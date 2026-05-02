@@ -371,7 +371,7 @@ type OpenRouterRouting struct {
 }
 
 type OpenRouterSort struct {
-	By 		  *string  	`json:"by,omitemoty"` // "price", "throughput" or "latency"
+	By 		  *string  	`json:"by,omitempty"` // "price", "throughput" or "latency"
 	Partition *string 	`json:"partition,omitempty"` // "model" or "none"		
 }
 
