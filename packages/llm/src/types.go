@@ -411,6 +411,7 @@ type ModelCost struct {
 	Output 		float64  `json:"output"`
 	CacheRead 	float64  `json:"cacheRead"`
 	CacheWrite 	float64  `json:"cacheWrite"`
+	Total 		float64  `json:"total"`
 }
 
 type InputType string
@@ -418,6 +419,8 @@ type InputType string
 const (
 	InputText  InputType = "text"
 	InputImage InputType = "image"
+	InputAudio InputType = "audio"
+	InputVideo InputType = "video"
 )
 
 type Compat struct {
