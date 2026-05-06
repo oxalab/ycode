@@ -5,7 +5,7 @@ import (
 	"os"
 	"regexp"
 
-	src "pigo.dev/packages/llm/src"
+	src "ycode/packages/llm/src"
 )
 
 const CloudflareWorkersAIBaseURL = "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"

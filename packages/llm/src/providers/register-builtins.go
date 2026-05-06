@@ -3,7 +3,7 @@ package providers
 import (
 	"context"
 
-	src "pigo.dev/packages/llm/src"
+	src "ycode/packages/llm/src"
 )
 
 // =============================================================================

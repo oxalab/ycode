@@ -3,7 +3,7 @@ package oauth
 import (
 	"context"
 
-	"pigo.dev/packages/llm/src"
+	"ycode/packages/llm/src"
 )
 
 type OAuthCredentials struct {
