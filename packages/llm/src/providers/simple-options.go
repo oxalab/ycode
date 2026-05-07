@@ -1,7 +1,7 @@
 package providers
 
 import (
-	src "pigo.dev/packages/llm/src"
+	src "ycode/packages/llm/src"
 )
 
 func BuildBaseOptions(model src.Model[src.Api], options *src.SimpleStreamOptions, apiKey string) src.StreamOptions {

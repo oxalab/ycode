@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	src "pigo.dev/packages/llm/src"
-	"pigo.dev/packages/llm/src/utils"
+	src "ycode/packages/llm/src"
+	"ycode/packages/llm/src/utils"
 )
 
 const (

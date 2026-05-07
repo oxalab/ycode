@@ -1,6 +1,6 @@
 package providers
 
-import src "pigo.dev/packages/llm/src"
+import src "ycode/packages/llm/src"
 
 func InferCopilotInitiator(messages []src.Message) string {
 	if len(messages) == 0 {

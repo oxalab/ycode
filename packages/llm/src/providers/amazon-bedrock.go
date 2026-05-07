@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"pigo.dev/packages/llm/src"
-	"pigo.dev/packages/llm/src/utils"
+	"ycode/packages/llm/src"
+	"ycode/packages/llm/src/utils"
 )
 
 // =============================================================================

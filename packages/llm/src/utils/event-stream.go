@@ -2,7 +2,7 @@ package utils
 
 import( 
 	"sync"
-	"pigo.dev/packages/llm/src"
+	"ycode/packages/llm/src"
 )
 
 // EventStream is an async event stream with final result extraction.
