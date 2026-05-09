@@ -81,7 +81,7 @@ type AgentTool[T any] struct {
 type BeforeToolCallResult struct{
 	// Block prevents the tool from executing. The loop emits an error tool result instead.
 	Block 	bool
-	Reasong string // If omitted, a default blocked message is used
+	Reason string // If omitted, a default blocked message is used
 }
 
 // AfterToolCallResult is returned from AfterToolCall hook
@@ -110,6 +110,7 @@ type AfterToolCallContext struct {
 	ToolCall 			llm.ToolCall
 	Args 				any
 	Result 				AgentToolResult[any]
+	IsError 			bool
 	Context 			AgentContext
 }
 
@@ -150,7 +151,7 @@ type AgentLoopConfig struct {
 	// Called before a tool is executed, after arguments have been validated
 	BeforeToolCall func(ctx BeforeToolCallContext, signal context.Context) (BeforeToolCallResult, error)
 	// Called after a tool finishes executing, before tool_execution_end and message events are emitted
-	AfterToolCall func(ctx AfterToolCallContext, signal context.Context) (AfterToolCallResult, error)
+	AfterToolCall func(ctx AfterToolCallContext, signal context.Context) (*AfterToolCallResult, error)
 	// Optional callbacks forwarded to the stream function
 	OnPayload func(payload []byte)
 	OnResponse func(response *llm.StreamOptions)
@@ -158,10 +159,11 @@ type AgentLoopConfig struct {
 
 // StreamFn is the function type for streaming LLM response 
 type StreamFn func(
-	model llm.Model[llm.Api],
-	ctx llm.ChatContext,
-	options llm.SimpleStreamOptions,
-) (llm.AssistantMessageEvent, error)
+    ctx context.Context,
+    model llm.Model[llm.Api],
+    chatCtx llm.ChatContext,
+    options *llm.SimpleStreamOptions,
+) <-chan llm.AssistantMessageEvent
 
 // AgentEvent: Represents all event emitted by the agent
 type AgentEvent interface {
