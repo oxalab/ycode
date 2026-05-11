@@ -17,7 +17,10 @@ func AgentLoop(
 ) *EventStream {
 	stream := NewEventStream()
 	go func() {
-		messages, err := RunAgentLoop(prompts, context, config, signal, streamFn)
+		messages, err := RunAgentLoop(prompts, context, config, func(event AgentEvent) error {
+			stream.Push(event)
+			return nil
+		}, signal, streamFn)
 		if err != nil {
 			stream.EndError(err)
 			return
@@ -47,7 +50,10 @@ func AgentLoopContinue(
 	}
 	stream := NewEventStream()
 	go func() {
-		messages, err := RunAgentLoopContinue(context, config, signal, streamFn)
+		messages, err := RunAgentLoopContinue(context, config, func(event AgentEvent) error {
+			stream.Push(event)
+			return nil
+		},signal, streamFn)
 		if err != nil {
 			stream.EndError(err)
 			return
@@ -62,6 +68,7 @@ func RunAgentLoop(
 	prompts 	[]AgentMessage,
 	context 	AgentContext,
 	config 		AgentLoopConfig, 
+	emit 		func(AgentEvent) error,
 	signal 		context.Context,
 	streamFn 	StreamFn,
 ) ([]AgentMessage, error) {
@@ -74,9 +81,6 @@ func RunAgentLoop(
 		Tools: 	      append([]AgentTool[any]{}, context.Tools...),
 	}
 	currentContext.Messages = append(currentContext.Messages, prompts...)
-	emit := func(event AgentEvent) error {
-		return nil
-	}
 	emit(NewAgentStartEvent())
 	emit(NewTurnStartEvent())
 	for _, prompt := range prompts {
@@ -94,6 +98,7 @@ func RunAgentLoop(
 func RunAgentLoopContinue(
 	context AgentContext,
 	config AgentLoopConfig,
+	emit func(AgentEvent) error,
 	signal context.Context,
 	streamFn StreamFn,
 ) ([]AgentMessage, error) {
@@ -109,9 +114,6 @@ func RunAgentLoopContinue(
 		SystemPrompt: context.SystemPrompt,
 		Messages:	  append([]AgentMessage{}, context.Messages...),
 		Tools: 		  append([]AgentTool[any]{}, context.Tools...),
-	}
-	emit := func(event AgentEvent) error {
-		return nil
 	}
 	emit(NewAgentStartEvent())
 	emit(NewTurnStartEvent())
@@ -566,7 +568,7 @@ func prepareToolCall(
 				IsError: true,
 			}
 		}
-		if result.Block {
+		if result != nil && result.Block {
 			return immediateToolCallOutcome{
 				Kind: preparationImmediate,
 				ToolCall: toolCall,

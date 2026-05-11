@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"ycode/packages/llm/src"
 )
@@ -35,6 +36,15 @@ var defaultModel = llm.Model[llm.Api]{
 	ContextWindow: 0,
 	MaxTokens: 	0,
 }
+
+var emptyUsage = llm.Usage{
+    Input:       0,
+    Output:      0,
+    CacheRead:   0,
+    CacheWrite:  0,
+    TotalTokens: 0,
+}
+
 
 // --- Pending Message Queue ---
 type PendingMessageQueue struct {
@@ -473,3 +483,213 @@ func (a *Agent) Continue(ctx context.Context) error {
 	return a.runContinuation(ctx)
 }
 
+// --- Private Helpers ---
+
+func (a *Agent) normalizePromptInput(input interface{}, images []llm.ImageContent) []AgentMessage{
+	switch v := input.(type) {
+	case []AgentMessage:
+		return v
+	case AgentMessage:
+		return []AgentMessage{v}
+	case string:
+		content := []llm.ContentBlock{llm.TextContent{Type: "text", Text: v}}
+		for _, img := range images {
+			content = append(content, img)
+		}
+		return []AgentMessage{llm.UserMessage{
+			Role: 		llm.RoleUser,
+			Content: 	content,
+			Timestamp: 	time.Now().UnixMilli(),
+		}}
+	default:
+		return []AgentMessage{}
+	}
+}
+
+func (a *Agent) createContextSnapshot() AgentContext {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	return AgentContext{
+		SystemPrompt: 	a.systemPrompt,
+		Messages: 		append([]AgentMessage{}, a.messages...),
+		Tools: 			append([]AgentTool[any]{}, a.tools...),
+	}
+}
+
+func (a *Agent) createLoopConfig(skipInitialSteeringPoll bool) AgentLoopConfig {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	return AgentLoopConfig{
+		Model: 			a.model,
+		Reasoning: 		a.thinkingLevel,
+		SessionID: 		a.sessionID,
+		ThinkingBudget: a.thinkingBudgets,
+		Transport: 		a.transport,
+		MaxRetryDelayMs: a.maxRetryDelayMs,
+		ToolExecution: 	a.toolExecution,
+
+		ConvertToLlm: 	a.convertToLlm,
+		TransformContext: a.transformContext,
+		GetApiKey: 		a.getApiKey,
+		OnPayload: 		a.onPayload,
+		OnResponse: 	a.onResponse,
+		BeforeToolCall: a.beforeToolCall,
+		AfterToolCall: a.afterToolCall,
+
+		GetSteeringMessages: func() ([]AgentMessage, error){
+			if skipInitialSteeringPoll {
+				skipInitialSteeringPoll = false
+				return []AgentMessage{}, nil
+			}
+			return a.steeringQueue.Drain(), nil
+		},
+		GetFollowUpMessages: func() ([]AgentMessage, error) {
+			return a.followUpQueue.Drain(), nil
+		},
+	}
+}
+
+func (a *Agent) runPromptMessages(ctx context.Context, messages []AgentMessage) error {
+	return a.runWithLifecycle(ctx, func(runCtx context.Context) error {
+		_, err := RunAgentLoop(
+			messages,
+			a.createContextSnapshot(),
+			a.createLoopConfig(true),
+			func(event AgentEvent) error {
+				return a.processEvents(event, runCtx)
+			},
+			runCtx,
+			a.streamFn,
+		)
+		return err
+	})
+}
+
+func (a *Agent) runPromptMessagesSkipSteering(ctx context.Context, messages []AgentMessage) error {
+	return a.runWithLifecycle(ctx, func(runCtx context.Context) error {
+		_, err := RunAgentLoop(
+			messages,
+			a.createContextSnapshot(),
+			a.createLoopConfig(true),
+			func(event AgentEvent) error {
+				return a.processEvents(event, runCtx)
+			},
+			runCtx,
+			a.streamFn,
+		)
+		return err
+	})
+}
+
+func (a *Agent) runContinuation(ctx context.Context) error {
+	return a.runWithLifecycle(ctx, func(runCtx context.Context) error {
+		_, err := RunAgentLoopContinue(
+			a.createContextSnapshot(),
+			a.createLoopConfig(false),
+			func(event AgentEvent) error {
+				return a.processEvents(event, runCtx)
+			},
+			runCtx,
+			a.streamFn,
+		)
+		return err
+	})
+}
+
+func (a *Agent) runWithLifecycle(parentCtx context.Context, executor func(ctx context.Context) error) error {
+	a.mu.Lock()
+	if a.run != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("agent is already processing")
+	}
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	done := make(chan struct{})
+	a.run = &activeRun{cancel: cancel, done: done}
+	a.isStreaming = true
+	a.streamingMessage = nil
+	a.errorMessage = ""
+	a.mu.Lock()
+
+	var runErr error
+	func() {
+		defer func() {
+			a.mu.Lock()
+			a.isStreaming = false
+			a.streamingMessage = nil
+			a.pendingToolCalls = make(map[string]bool)
+			a.run = nil
+			close(done)
+			a.mu.Unlock()
+		} ()
+		runErr = executor(ctx)
+		if runErr != nil {
+			a.handleRunFailure(runErr, ctx.Err() != nil)
+		}
+	}()
+	return runErr
+}
+
+func (a *Agent) handleRunFailure(err error, aborted bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	stopReason := llm.StopReasonError
+	if aborted {
+		stopReason = llm.StopReasonAborted
+	}
+
+	errMsg := err.Error()
+	failureMessage := llm.AssistantMessage {
+		Role: 		llm.RoleAssistant,
+		Content: 	[]llm.ContentBlock{llm.TextContent{Type: "text", Text: ""}},
+		Api: 		a.model.Api,
+		Provider: 	a.model.Provider,
+		Model: 		a.model.ID,
+		Usage: 		emptyUsage,
+		StopReason: stopReason,
+		ErrorMessage: errMsg,
+		Timestamp:  time.Now().UnixMilli(),
+	}
+	a.messages = append(a.messages, failureMessage)
+	a.errorMessage = errMsg
+}
+
+func (a *Agent) processEvents(event AgentEvent, signal context.Context) error {
+	a.mu.Lock()
+	switch e := event.(type) {
+	case EventMessageStart:
+		a.streamingMessage = e.Message
+	case EventMessageUpdate:
+		a.streamingMessage = e.Message
+	case EventMessageEnd:
+		a.streamingMessage = nil
+		a.messages = append(a.messages, e.Message)
+	case EventToolExecutionStart:
+		a.pendingToolCalls[e.ToolCallID] = true
+	case EventToolExecutionEnd:
+		delete(a.pendingToolCalls, e.ToolCallID)
+	case EventTurnEnd:
+		if msg, ok := e.Message.(llm.AssistantMessage); ok && msg.ErrorMessage != "" {
+			a.errorMessage = msg.ErrorMessage
+		}
+	case EventAgentEnd:
+		a.streamingMessage = nil
+	}
+	a.mu.Unlock()
+
+	// Notify Listeners
+	a.mu.RLock()
+	listeners := make([]func(event AgentEvent,signal context.Context) error, len(a.listeners))
+	copy(listeners, a.listeners)
+	a.mu.RUnlock()
+
+	for _, listener := range listeners {
+		if err := listener(event, signal); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -149,7 +149,7 @@ type AgentLoopConfig struct {
 	// Optional: Returns follow-up messages to process after the agent would otherwise stop
 	GetFollowUpMessages func() ([]AgentMessage, error)
 	// Called before a tool is executed, after arguments have been validated
-	BeforeToolCall func(ctx BeforeToolCallContext, signal context.Context) (BeforeToolCallResult, error)
+	BeforeToolCall func(ctx BeforeToolCallContext, signal context.Context) (*BeforeToolCallResult, error)
 	// Called after a tool finishes executing, before tool_execution_end and message events are emitted
 	AfterToolCall func(ctx AfterToolCallContext, signal context.Context) (*AfterToolCallResult, error)
 	// Optional callbacks forwarded to the stream function
