@@ -3,6 +3,8 @@ package ycode
 import (
 	"fmt"
 	"sync"
+
+	"ycode/packages/llm/src"
 )
 
 type EventBus interface {
@@ -66,3 +68,5 @@ func (eb *eventBus) Clear() {
 	defer eb.mu.Unlock()
 	eb.listeners = make(map[string][]func(any))
 }
+
+var DefaultThinkingLevel llm.ThinkingLevel = llm.Medium
