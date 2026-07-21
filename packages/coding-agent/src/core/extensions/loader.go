@@ -211,7 +211,7 @@ func readYcodeManifest(packageJsonPath string) *ycodeManifest {
 }
 
 func isExtensionFile(name string) bool {
-	return strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".so")
+	return strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".so") || IsJSExtensionFile(name)
 }
 
 func resolveExtensionEntries(dir string) []string {
@@ -237,6 +237,10 @@ func resolveExtensionEntries(dir string) []string {
 	indexPath := filepath.Join(dir, "index.go")
 	if _, err := os.Stat(indexPath); err == nil {
 		return []string{indexPath}
+	}
+	// Check for JS/TS index files (index.ts / index.js / index.mjs).
+	if jsIdx := hasJSExtensionIndex(dir); jsIdx != "" {
+		return []string{jsIdx}
 	}
 	return nil
 }
@@ -288,11 +292,38 @@ func LoadExtensionFromFactory(
 }
 
 func LoadExtensions(paths []string, cwd string, eventBus EventBus) *LoadExtensionsResult {
-	var extensions  []*Extension
-	var errors 	[]ExtensionLoadError
+	var extensions []*Extension
+	var errors []ExtensionLoadError
 
 	runtime := CreateExtensionRuntime()
+
+	// Create one shared JSRuntime for this load batch — it's needed only if any
+	// path is a JS/TS file. Lazily created on first JS load to avoid spinning
+	// up qjs (and its WASM runtime) when all extensions are JSON.
+	var jsrt *JSRuntime
 	for _, extPath := range paths {
+		// Suffix-dispatch: JS/TS files go through the JS loader (sharing the
+		// JSRuntime); everything else stays on the JSON path unchanged.
+		if IsJSExtensionFile(extPath) {
+			if jsrt == nil {
+				jr, err := NewJSRuntime()
+				if err != nil {
+					errors = append(errors, ExtensionLoadError{Path: extPath, Error: "create JS runtime: " + err.Error()})
+					continue
+				}
+				jsrt = jr
+				jsrt.SetCWD(cwd)
+			}
+			extension, err := loadJSExtension(extPath, cwd, eventBus, runtime, jsrt)
+			if err != nil {
+				errors = append(errors, ExtensionLoadError{Path: extPath, Error: err.Error()})
+				continue
+			}
+			if extension != nil {
+				extensions = append(extensions, extension)
+			}
+			continue
+		}
 		extension, err := loadExtensionFromConfig(extPath, cwd, eventBus, runtime)
 		if err != nil {
 			errors = append(errors, ExtensionLoadError{Path: extPath, Error: err.Error()})
@@ -303,11 +334,18 @@ func LoadExtensions(paths []string, cwd string, eventBus EventBus) *LoadExtensio
 		}
 	}
 
-	return &LoadExtensionsResult{
+	result := &LoadExtensionsResult{
 		Extensions: extensions,
 		Errors:     errors,
 		Runtime:    runtime,
 	}
+	// Only anchor the JSRuntime when one was actually created. Assigning a nil
+	// *JSRuntime to the `any` field would produce a non-nil interface wrapping
+	// a nil pointer (the typed-nil-in-interface pitfall), breaking nil checks.
+	if jsrt != nil {
+		result.JSRuntime = jsrt
+	}
+	return result
 }
 
 func loadExtensionFromConfig(extensionPath, cwd string, eventBus EventBus, runtime *ExtensionRuntime) (*Extension, error) {

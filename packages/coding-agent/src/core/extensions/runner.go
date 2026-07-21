@@ -11,15 +11,26 @@ type ExtensionUIContext struct {
 	Select  func(option []string, defaultIdx int, timeoutMs int) (int, error)
 	Confirm func(message string, timeoutMs int) (bool, error)
 	Input   func(message string, placeholder string, timeoutMs int) (string, error)
-	Notify  func(message string)
-	Status  func(message string)
+	// Editor swaps a multi-line editor into the prompt area and blocks until
+	// the user submits (returns the text) or cancels (returns ""). prefill
+	// pre-populates the editor. Interactive mode shows the ExtensionEditor
+	// widget with Ctrl+G external-editor support; non-interactive modes return "".
+	Editor func(message string, prefill string) (string, error)
+	// Notify surfaces a message to the user. level is "info" | "warning" |
+	// "error" (matching the reference's ctx.ui.notify). Interactive mode
+	// appends a themed line to the chat transcript (info=dim, warning=warning-
+	// colored "Warning: …", error=error-colored "Error: …"); RPC mode forwards
+	// it to the host.
+	Notify func(message, level string)
+	Status func(message string)
 }
 
 var NoOpUIContext = ExtensionUIContext{
 	Select:  func(options []string, defaultIdx int, timeoutMs int) (int, error) { return -1, nil },
 	Confirm: func(message string, timeoutMs int) (bool, error) { return false, nil },
 	Input:   func(message string, placeholder string, timeoutMs int) (string, error) { return "", nil },
-	Notify:  func(message string) {},
+	Editor:  func(message string, prefill string) (string, error) { return "", nil },
+	Notify:  func(message, level string) {},
 	Status:  func(message string) {},
 }
 
@@ -130,14 +141,33 @@ func (r *ExtensionRunner) BindCore(
 			}
 			return nil
 		}
-		r.isIdleFn = contextActions.IsIdle
 		r.getSignalFn = func() context.Context { return contextActions.Signal }
-		r.abortFn = contextActions.Abort
-		r.hasPendingMessagesFn = contextActions.HasPendingMessages
-		r.shutdownHandler = contextActions.Shutdown
-		r.getContextUsageFn = contextActions.GetContextUsage
-		r.compactFn = contextActions.Compact
-		r.getSystemPromptFn = contextActions.GetSystemPrompt
+		// Only override the constructor defaults when the caller actually provides
+		// a callback. Without these guards, a contextActions with nil fields (e.g.
+		// HasPendingMessages unset) clobbers the safe default with nil, and
+		// CreateContext then panics calling it — which crashed SetModel →
+		// SetThinkingLevel → Emit on any /model selection.
+		if contextActions.IsIdle != nil {
+			r.isIdleFn = contextActions.IsIdle
+		}
+		if contextActions.Abort != nil {
+			r.abortFn = contextActions.Abort
+		}
+		if contextActions.HasPendingMessages != nil {
+			r.hasPendingMessagesFn = contextActions.HasPendingMessages
+		}
+		if contextActions.Shutdown != nil {
+			r.shutdownHandler = contextActions.Shutdown
+		}
+		if contextActions.GetContextUsage != nil {
+			r.getContextUsageFn = contextActions.GetContextUsage
+		}
+		if contextActions.Compact != nil {
+			r.compactFn = contextActions.Compact
+		}
+		if contextActions.GetSystemPrompt != nil {
+			r.getSystemPromptFn = contextActions.GetSystemPrompt
+		}
 	}
 	
 	// Flush pending provider registrations
