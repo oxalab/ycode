@@ -683,7 +683,9 @@ func createToolResultMessage(finalized finalizedToolCallOutcome) llm.ToolResultM
 }
 
 func emitToolExecutionEnd(finalized finalizedToolCallOutcome, emit func(AgentEvent) error){
-	emit(NewToolExecutionEndEvent(finalized.ToolCall.ID, finalized.ToolCall.Name, finalized.Result.Details, finalized.IsError))
+	// Pass Content (the output blocks), not Details (which is nil for most tools).
+	// The TUI's extractResultText reads Content; passing Details sent nil → empty tool output.
+	emit(NewToolExecutionEndEvent(finalized.ToolCall.ID, finalized.ToolCall.Name, finalized.Result.Content, finalized.IsError))
 }
 
 func emitToolResultMessage(toolResultMessage llm.ToolResultMessage[any], emit func(AgentEvent) error) {
@@ -695,7 +697,13 @@ func emitToolResultMessage(toolResultMessage llm.ToolResultMessage[any], emit fu
 func extractToolCalls(message llm.AssistantMessage) []llm.ToolCall {
 	var toolCalls []llm.ToolCall
 	for _, content := range message.Content {
-		if tc, ok := content.(llm.ToolCall); ok {
+		// Providers append *llm.ToolCall (pointer); handle both forms defensively
+		// — a value-only assertion silently drops every tool call (the codebase
+		// has a history of this value/pointer mismatch).
+		switch tc := content.(type) {
+		case *llm.ToolCall:
+			toolCalls = append(toolCalls, *tc)
+		case llm.ToolCall:
 			toolCalls = append(toolCalls, tc)
 		}
 	}

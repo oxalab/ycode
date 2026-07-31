@@ -237,8 +237,11 @@ type EventToolExecutionEnd struct {
 
 func (e EventToolExecutionEnd) agentEvent() {}
 
-// AgentState represents the public agent state
+// AgentState represents the public agent state and lifecycle control.
+// All methods on this interface are implemented by *Agent.
 type AgentState interface {
+	// --- State accessors ---
+
 	// SystemPrompt returns the system prompt sent with each model request
 	SystemPrompt() string
 	// SetSystemPrompt sets the system prompt
@@ -254,19 +257,65 @@ type AgentState interface {
 	// Tools returns available tools
 	Tools() []AgentTool[any]
 	// SetTools sets available tools (copies the array)
-	SetTool(tools []AgentTool[any])
+	SetTools(tools []AgentTool[any])
 	// Messages returns the conversation transcript
 	Messages() []AgentMessage
 	// SetMessages sets the conversation transcript (copies the array)
 	SetMessages(messages []AgentMessage)
+	// SetBeforeToolCall installs a pre-tool-call hook (nil clears it).
+	// Extensions use this to observe or block tool calls.
+	SetBeforeToolCall(fn func(ctx BeforeToolCallContext, signal context.Context) (*BeforeToolCallResult, error))
+	// SetAfterToolCall installs a post-tool-call hook (nil clears it).
+	// Extensions use this to observe or modify tool results.
+	SetAfterToolCall(fn func(ctx AfterToolCallContext, signal context.Context) (*AfterToolCallResult, error))
 	// IsStreaming returns true while agent is processing
 	IsStreaming() bool
-	// StreamingMessage returns the parial assistant message if streaming
-	StreamingMessage() AgentMessage
+	// IsStreamingMessage returns the partial assistant message if streaming
+	IsStreamingMessage() AgentMessage
 	// PendingToolCalls returns the tool call IDs currently executing
 	PendingToolCalls() map[string]bool
 	// ErrorMessage returns the error from the most recent failed/aborted turn
 	ErrorMessage() string
+
+	// --- Lifecycle ---
+
+	// Prompt sends a new user prompt to the agent and starts processing.
+	Prompt(ctx context.Context, input interface{}, images ...llm.ImageContent) error
+	// Continue resumes the agent loop after an abort or error.
+	Continue(ctx context.Context) error
+	// Abort cancels the current agent run.
+	Abort()
+	// WaitForIdle blocks until the agent finishes processing.
+	WaitForIdle()
+
+	// --- Queue operations ---
+
+	// Steer enqueues a steering message to inject mid-run.
+	Steer(message AgentMessage)
+	// FollowUp enqueues a follow-up message to process after the run would stop.
+	FollowUp(message AgentMessage)
+	// SetSteeringMode sets the drain mode for the steering queue.
+	SetSteeringMode(mode QueueMode)
+	// SteeringMode returns the current steering queue mode.
+	SteeringMode() QueueMode
+	// SetFollowUpMode sets the drain mode for the follow-up queue.
+	SetFollowUpMode(mode QueueMode)
+	// FollowUpMode returns the current follow-up queue mode.
+	FollowUpMode() QueueMode
+	// HasQueuedMessages returns true if either queue has pending items.
+	HasQueuedMessages() bool
+	// ClearAllQueues removes all pending steering and follow-up messages.
+	ClearAllQueues()
+
+	// --- Subscription ---
+
+	// Subscribe registers an event listener and returns an unsubscribe function.
+	Subscribe(listener func(event AgentEvent, signal context.Context) error) func()
+
+	// --- Reset ---
+
+	// Reset clears all messages, queues, and streaming state.
+	Reset()
 }
 
 // AgentEventSink is the callback type for emitting agent events
