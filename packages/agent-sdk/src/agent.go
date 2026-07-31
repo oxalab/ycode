@@ -357,6 +357,25 @@ func (a *Agent) SetMessages(messages []AgentMessage) {
 	copy(a.messages, messages)
 }
 
+// SetBeforeToolCall installs a hook invoked by the loop before each tool call.
+// Pass nil to disable. The hook may return Block=true to prevent execution
+// (the loop emits an error tool result in its place). Mirrors the TS
+// `agent.beforeToolCall = ...` assignment.
+func (a *Agent) SetBeforeToolCall(fn func(ctx BeforeToolCallContext, signal context.Context) (*BeforeToolCallResult, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.beforeToolCall = fn
+}
+
+// SetAfterToolCall installs a hook invoked by the loop after each tool call.
+// Pass nil to disable. The hook may override Content/Details/IsError/Terminate
+// on the finalized result. Mirrors the TS `agent.afterToolCall = ...` assignment.
+func (a *Agent) SetAfterToolCall(fn func(ctx AfterToolCallContext, signal context.Context) (*AfterToolCallResult, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.afterToolCall = fn
+}
+
 
 // --- Queue Mode ---
 func (a *Agent) SetSteeringMode(mode QueueMode) {
@@ -611,7 +630,7 @@ func (a *Agent) runWithLifecycle(parentCtx context.Context, executor func(ctx co
 	a.isStreaming = true
 	a.streamingMessage = nil
 	a.errorMessage = ""
-	a.mu.Lock()
+	a.mu.Unlock() // release before the (potentially long) streaming executor below
 
 	var runErr error
 	func() {
