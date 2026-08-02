@@ -135,10 +135,9 @@ func doAmazonBedrockRequest(client *http.Client, model llm.Model[llm.Api], param
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add AWS credentials
+	// Add AWS credentials using Signature Version 4
 	if options != nil && options.AccessKey != "" {
-		// TODO: Implement AWS Signature Version 4 signing
-		req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+		awsSignV4(req, options.AccessKey, options.SecretKey, options.SessionToken, region, "bedrock", body)
 	}
 
 	// Add model headers

@@ -1,12 +1,14 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	src "ycode/packages/llm/src"
 	"ycode/packages/llm/src/utils"
@@ -81,8 +83,9 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 				StopReason: src.StopReasonStop,
 			}
 
-			// Build and send request
-			client := &http.Client{}
+			// Build and send request. A timeout ensures a hung/unreachable provider
+			// surfaces as an error instead of blocking the stream forever.
+			client := &http.Client{Timeout: 60 * time.Second}
 			compat := detectOpenAICompat(model)
 			params := buildOpenAICompletionsParams(model, context, options, compat)
 
@@ -416,8 +419,14 @@ func convertOpenAICompletionsMessages(model src.Model[src.Api], context src.Chat
 		}
 
 		if role == src.RoleUser {
-			um, ok := msg.(*src.UserMessage)
-			if !ok {
+			// Accept both value and pointer UserMessage (the agent passes values).
+			var um *src.UserMessage
+			switch m := msg.(type) {
+			case *src.UserMessage:
+				um = m
+			case src.UserMessage:
+				um = &m
+			default:
 				continue
 			}
 
@@ -789,8 +798,6 @@ func addCacheControlToMessage(msg map[string]interface{}, cacheControl map[strin
 // =============================================================================
 
 func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api], compat *OpenAICompletionsCompat) error {
-	decoder := json.NewDecoder(body)
-
 	var currentBlock struct {
 		Type        string
 		Text        string
@@ -804,10 +811,24 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 
 	currentBlock.Type = ""
 
-	for decoder.More() {
+	// The response is an SSE stream (`stream: true`): lines like `data: {...}`
+	// terminated by `data: [DONE]`. A raw json.Decoder can't read SSE (the `data:`
+	// prefix isn't JSON, and decoder.More() is false at the top level), which is
+	// why streaming previously yielded zero content. Parse it line by line.
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // SSE lines can be large (tool-call args)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue // blank separator, event/id lines, or keep-alives
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
 		var chunk map[string]interface{}
-		if err := decoder.Decode(&chunk); err != nil {
-			return err
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue // skip a malformed line rather than aborting the stream
 		}
 
 		// Set response ID from first chunk
@@ -860,6 +881,11 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 
 			currentBlock.Text += content
 			idx := len(output.Content) - 1
+			if idx >= 0 {
+				if tc, ok := output.Content[idx].(*src.TextContent); ok {
+					tc.Text = currentBlock.Text // sync accumulated text into the message block
+				}
+			}
 			ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: &idx, Delta: content, Partial: output}
 		}
 
@@ -879,6 +905,11 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 
 				currentBlock.Thinking += reasoning
 				idx := len(output.Content) - 1
+				if idx >= 0 {
+					if tk, ok := output.Content[idx].(*src.ThinkingContent); ok {
+						tk.Thinking = currentBlock.Thinking // sync accumulated thinking into the block
+					}
+				}
 				ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: &idx, Delta: reasoning, Partial: output}
 				break
 			}
@@ -942,9 +973,15 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 					var delta string
 					if fn, ok := toolCall["function"].(map[string]interface{}); ok {
 						if args, ok := fn["arguments"].(string); ok {
+							// Standard OpenAI: arguments is a JSON string, streamed incrementally.
 							delta = args
 							currentBlock.PartialArgs += args
 							currentBlock.Arguments = parseStreamingJson(currentBlock.Arguments, currentBlock.PartialArgs)
+						} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
+							// Some providers (e.g. z.ai/GLM) send arguments as a direct
+							// object instead of a JSON string. Use it directly.
+							currentBlock.Arguments = argsMap
+							currentBlock.PartialArgs = ""
 						}
 					}
 
@@ -972,6 +1009,9 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 				}
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 
 	finishCurrentOpenAICompletionsBlock(ch, output, &currentBlock)
