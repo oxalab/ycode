@@ -42,9 +42,15 @@ func msgRole(m src.Message) src.Role {
 	switch v := m.(type) {
 	case *src.UserMessage:
 		return v.Role
+	case src.UserMessage:
+		return v.Role
 	case *src.AssistantMessage:
 		return v.Role
+	case src.AssistantMessage:
+		return v.Role
 	case *src.ToolResultMessage[any]:
+		return v.Role
+	case src.ToolResultMessage[any]:
 		return v.Role
 	default:
 		return ""

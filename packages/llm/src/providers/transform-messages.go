@@ -70,7 +70,70 @@ func downgradeUnsupportedImages(messages []src.Message, model src.Model[src.Api]
 
 type NormalizeToolCallIDFunc func(id string, model src.Model[src.Api], source src.AssistantMessage) string
 
+// normalizeMessagePtrs converts value-form messages (llm.UserMessage, etc., as
+// the agent-sdk passes them) to pointer-form AND normalizes their content blocks
+// (which the agent also passes as values, e.g. llm.TextContent), leaving existing
+// pointers untouched. The transform + provider code asserts *T for both messages
+// and content blocks in many places, so normalizing once at the entry avoids
+// value/pointer mismatches (panics + silently-dropped content) at each site.
+func normalizeMessagePtrs(messages []src.Message) []src.Message {
+	out := make([]src.Message, len(messages))
+	for i, m := range messages {
+		out[i] = normalizeMessagePtr(m)
+	}
+	return out
+}
+
+func normalizeMessagePtr(m src.Message) src.Message {
+	switch v := m.(type) {
+	case src.UserMessage:
+		v.Content = normalizeContentPtrs(v.Content)
+		return &v
+	case *src.UserMessage:
+		cp := *v
+		cp.Content = normalizeContentPtrs(cp.Content)
+		return &cp
+	case src.AssistantMessage:
+		v.Content = normalizeContentPtrs(v.Content)
+		return &v
+	case *src.AssistantMessage:
+		cp := *v
+		cp.Content = normalizeContentPtrs(cp.Content)
+		return &cp
+	case src.ToolResultMessage[any]:
+		v.Content = normalizeContentPtrs(v.Content)
+		return &v
+	case *src.ToolResultMessage[any]:
+		cp := *v
+		cp.Content = normalizeContentPtrs(cp.Content)
+		return &cp
+	default:
+		return m
+	}
+}
+
+// normalizeContentPtrs converts value-form content blocks to pointer-form.
+func normalizeContentPtrs(blocks []src.ContentBlock) []src.ContentBlock {
+	out := make([]src.ContentBlock, len(blocks))
+	for i, b := range blocks {
+		switch v := b.(type) {
+		case src.TextContent:
+			out[i] = &v
+		case src.ImageContent:
+			out[i] = &v
+		case src.ThinkingContent:
+			out[i] = &v
+		case src.ToolCall:
+			out[i] = &v
+		default:
+			out[i] = b // already a pointer (or unknown) — leave as-is
+		}
+	}
+	return out
+}
+
 func TransformMessages(messages []src.Message, model src.Model[src.Api], normalizeID NormalizeToolCallIDFunc) []src.Message {
+	messages = normalizeMessagePtrs(messages)
 	toolCallIDMap := make(map[string]string)
 	imageAware := downgradeUnsupportedImages(messages, model)
 
