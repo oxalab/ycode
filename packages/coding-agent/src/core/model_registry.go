@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -571,6 +572,12 @@ func (mr *ModelRegistry) GetAll() []*llm.Model[llm.Api] {
 	return mr.models
 }
 
+// GetAuthStorage returns the auth storage backing this registry. Used by the
+// TUI's OAuth selector to read credential/auth status per provider.
+func (mr *ModelRegistry) GetAuthStorage() *AuthStorage {
+	return mr.authStorage
+}
+
 func (mr *ModelRegistry) GetAvailable() ([]*llm.Model[llm.Api], error) {
 	mr.mu.RLock()
 	defer mr.mu.RUnlock()
@@ -758,6 +765,38 @@ func (mr *ModelRegistry) UnregisterProvider(providerName string) {
 	}
 	delete(mr.registeredProviders, providerName)
 	mr.Refresh()
+}
+
+// SaveCustomProvider persists a custom provider (with one model) to models.json so
+// it survives restarts — RegisterProvider, by contrast, is in-memory only. It reads
+// the existing models.json, adds or overwrites the provider entry, and writes it
+// back (0o600; parent dir 0o700). The loader requires baseUrl + apiKey for
+// non-built-in providers that define models (validateConfig), so both are
+// mandatory here. Call Refresh after so the new model becomes available.
+func (mr *ModelRegistry) SaveCustomProvider(key, displayName, baseURL, apiKey, api, modelID string) error {
+	path := mr.modelsJsonPath
+	cfg := modelsConfig{Providers: map[string]*providerConfig{}}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &cfg) // corrupt/empty file → start fresh
+	}
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]*providerConfig{}
+	}
+	cfg.Providers[key] = &providerConfig{
+		Name:    displayName,
+		BaseURL: baseURL,
+		ApiKey:  apiKey,
+		Api:     api,
+		Models:  []modelDefinition{{ID: modelID}}, // Name defaults to ID in parseModels
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o600)
 }
 
 func (mr *ModelRegistry) upsertRegisteredProvider(providerName string, config *ProviderConfigInput) {
