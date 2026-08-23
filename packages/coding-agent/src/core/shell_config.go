@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
+	"ycode/packages/coding-agent/src/core/tools"
 )
 
 type ShellConfig struct {
@@ -61,4 +63,45 @@ func SanitizeBinaryOutput(str string) string {
 	}
 	return b.String()
 }
+
+// ============================================================================
+// Detached child process tracking
+// Mirrors TS trackDetachedChildPid / killTrackedDetachedChildren (utils/shell.ts:112-140)
+// ============================================================================
+
+var (
+	detachedPidsMu sync.Mutex
+	detachedPids   = make(map[int]struct{})
+)
+
+// TrackDetachedChildPid registers a detached child process PID for cleanup on shutdown.
+func TrackDetachedChildPid(pid int) {
+	detachedPidsMu.Lock()
+	defer detachedPidsMu.Unlock()
+	detachedPids[pid] = struct{}{}
+}
+
+// UntrackDetachedChildPid removes a PID from tracking.
+func UntrackDetachedChildPid(pid int) {
+	detachedPidsMu.Lock()
+	defer detachedPidsMu.Unlock()
+	delete(detachedPids, pid)
+}
+
+// KillTrackedDetachedChildren kills all tracked detached child processes.
+func KillTrackedDetachedChildren() {
+	detachedPidsMu.Lock()
+	pids := make([]int, 0, len(detachedPids))
+	for pid := range detachedPids {
+		pids = append(pids, pid)
+	}
+	detachedPids = make(map[int]struct{})
+	detachedPidsMu.Unlock()
+
+	for _, pid := range pids {
+		tools.KillProcessTree(pid)
+	}
+}
+
+
 
