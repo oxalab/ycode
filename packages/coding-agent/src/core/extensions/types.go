@@ -454,6 +454,18 @@ type ExtensionCommandContextActions struct {
 	Reload 			func() error
 }
 
+// ReplacedSessionContext is a fresh command-capable context bound to the
+// replacement session after a session switch.
+// Mirrors TS ReplacedSessionContext (extensions/types.ts:371-381).
+type ReplacedSessionContext struct {
+	// SendMessage sends a custom message into the session.
+	SendMessage func(msg any) error
+	// SendUserMessage sends a user-text message into the session.
+	SendUserMessage func(content string, images []any) error
+	// Actions inherited from the extension command context.
+	Actions *ExtensionCommandContextActions
+}
+
 // --- Load Result ---
 
 type ExtensionError struct {
@@ -466,9 +478,16 @@ type ExtensionError struct {
 type ExtensionErrorListener func(error ExtensionError)
 
 type LoadExtensionsResult struct {
-	Extensions 		[]*Extension
-	Errors 			[]ExtensionLoadError
-	Runtime 		*ExtensionRuntime
+	Extensions []*Extension
+	Errors     []ExtensionLoadError
+	Runtime    *ExtensionRuntime
+	// JSRuntime holds the qjs runtime used to run JS/TS extensions, if any were
+	// loaded. It's anchored here so qjs lives as long as the extensions do —
+	// the pinned JS function values (handlers, tool execute fns) reference it.
+	// Typed as `any` so this file doesn't import qjs. nil when no JS extensions
+	// were loaded (pure-JSON or empty batch). Callers must not access this
+	// directly; the runner treats it as an opaque lifetime anchor.
+	JSRuntime any
 }
 
 type ExtensionLoadError struct {
