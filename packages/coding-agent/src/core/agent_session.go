@@ -27,7 +27,9 @@ type AgentSession struct {
 	// Event subscription state
 	unsubscribeAgent func()
 	configSubscribe    func(listener func(event sdk.AgentEvent, ctx context.Context) error) func()
-	eventListeners   []AgentSessionEventListener
+	eventListeners    []AgentSessionEventListener
+	eventListenerIDs  []uint64 // parallel to eventListeners; registration IDs for unsubscribe
+	eventListenerSeq  uint64
 	agentEventQueue  chan func()
 	eventQueueOnce   sync.Once
 
@@ -45,10 +47,9 @@ type AgentSession struct {
 	branchSummaryAbort context.CancelFunc
 
 	// Retry state
-	retryAbort    context.CancelFunc
+	retryMu       sync.Mutex
 	retryAttempt  int
 	retryChan     chan struct{}
-	retryMu       sync.Mutex
 
 	// Bash execution state
 	bashAbort         context.CancelFunc
@@ -117,7 +118,12 @@ func NewAgentSession(config AgentSessionConfig) *AgentSession {
 			Reason: "startup",
 		}),
 		agentEventQueue:    make(chan func(), 256),
-		retryChan:          make(chan struct{}, 1),
+		// retryChan starts nil (TS: _retryPromise starts undefined). It is
+		// created only when a retry is actually initiated and cleared when the
+		// retry settles — see createRetryPromiseForAgentEnd / resolveRetry.
+		// Buffering a token at construction caused every retry wait to consume
+		// a stale token and self-cancel.
+		retryChan:          nil,
 		baseToolDefinitions: make(map[string]extensions.ToolDefinition),
 		toolRegistry:       make(map[string]any),
 		toolDefinitions:    make(map[string]ToolDefinitionEntry),
@@ -156,12 +162,21 @@ func (s *AgentSession) processEventQueue() {
 // Event subscription
 // ============================================================================
 
+// Subscribe registers a session event listener and returns an unsubscribe
+// function. Removal is by registration ID: Go func values aren't comparable
+// with == (and the old address-of-loop-copy comparison `&l == &listener` was
+// always false), so identity-based removal like the TS indexOf/splice
+// (agent-session.ts:713-723) needs an explicit handle.
 func (s *AgentSession) Subscribe(listener AgentSessionEventListener) func() {
+	s.eventListenerSeq++
+	id := s.eventListenerSeq
 	s.eventListeners = append(s.eventListeners, listener)
+	s.eventListenerIDs = append(s.eventListenerIDs, id)
 	return func() {
-		for i, l := range s.eventListeners {
-			if &l == &listener {
+		for i, existing := range s.eventListenerIDs {
+			if existing == id {
 				s.eventListeners = append(s.eventListeners[:i], s.eventListeners[i+1:]...)
+				s.eventListenerIDs = append(s.eventListenerIDs[:i], s.eventListenerIDs[i+1:]...)
 				return
 			}
 		}
@@ -205,7 +220,13 @@ func (s *AgentSession) processAgentEvent(event sdk.AgentEvent) {
 	switch e := event.(type) {
 	case sdk.EventMessageStart:
 		if e.Message != nil {
-			s.overflowRecoveryAttempted = false
+			// Reference (agent-session.ts:503) resets the overflow-recovery flag
+			// only on USER messages — resetting on any message_start let the
+			// retry's own assistant stream clear the flag, re-enabling
+			// compact→retry→compact loops on a persistently-overflowing model.
+			if getRole(e.Message) == "user" {
+				s.overflowRecoveryAttempted = false
+			}
 			text := getUserMessageText(e.Message)
 			if text != "" {
 				if s.removeFromSteering(text) || s.removeFromFollowUp(text) {
@@ -223,17 +244,25 @@ func (s *AgentSession) processAgentEvent(event sdk.AgentEvent) {
 			role := getRole(e.Message)
 			if role == "assistant" {
 				s.lastAssistantMessage = e.Message
-				s.overflowRecoveryAttempted = false
-				s.retryMu.Lock()
-				if s.retryAttempt > 0 {
-					s.emit(AgentSessionEvent{
-						EventType:   "auto_retry_end",
-						RetrySuccess: true,
-						RetryAttempt: s.retryAttempt,
-					})
-					s.retryAttempt = 0
+				// Reference (agent-session.ts:554-565): both the overflow-recovery
+				// flag and the retry counter reset ONLY on non-error responses.
+				// Resetting on error responses made persistent 529/500 loops
+				// retry forever (counter never reached max) and let the retry's
+				// own error stream clear overflowRecoveryAttempted, enabling
+				// compact→retry→compact loops.
+				if am, ok := e.Message.(llm.AssistantMessage); ok && am.StopReason != llm.StopReasonError {
+					s.overflowRecoveryAttempted = false
+					s.retryMu.Lock()
+					if s.retryAttempt > 0 {
+						s.emit(AgentSessionEvent{
+							EventType:   "auto_retry_end",
+							RetrySuccess: true,
+							RetryAttempt: s.retryAttempt,
+						})
+						s.retryAttempt = 0
+					}
+					s.retryMu.Unlock()
 				}
-				s.retryMu.Unlock()
 			}
 		}
 
@@ -268,6 +297,11 @@ func (s *AgentSession) processAgentEvent(event sdk.AgentEvent) {
 func (s *AgentSession) resolveRetry() {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
+	// No active retry → no-op (TS: resolveRetry() no-ops when _retryPromise is
+	// undefined). The channel is drained/cleared by the retry goroutine.
+	if s.retryChan == nil {
+		return
+	}
 	select {
 	case s.retryChan <- struct{}{}:
 	default:
@@ -396,6 +430,7 @@ func (s *AgentSession) Dispose() {
 	}
 	s.disconnectFromAgent()
 	s.eventListeners = nil
+	s.eventListenerIDs = nil
 	close(s.agentEventQueue)
 }
 

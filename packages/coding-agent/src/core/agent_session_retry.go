@@ -139,10 +139,18 @@ func (s *AgentSession) handleRetryableError(message llm.AssistantMessage) bool {
 
 	// Wait with exponential backoff (abortable)
 	go func() {
+		defer func() {
+			// Clear the channel on BOTH branches so the next retryable
+			// agent_end isn't blocked by createRetryPromiseForAgentEnd's
+			// "already created" guard (TS: _retryPromise = undefined).
+			s.retryMu.Lock()
+			s.retryChan = nil
+			s.retryMu.Unlock()
+		}()
 		select {
 		case <-time.After(time.Duration(delayMs) * time.Millisecond):
 			// Retry via continue — use goroutine to break out of event handler chain
-				s.Agent.Continue(context.Background())
+			s.Agent.Continue(context.Background())
 		case <-s.retryChan:
 			// Aborted during wait
 			s.retryMu.Lock()
@@ -150,28 +158,31 @@ func (s *AgentSession) handleRetryableError(message llm.AssistantMessage) bool {
 			s.retryAttempt = 0
 			s.retryMu.Unlock()
 
-			s.retryAbort = nil
 			s.emit(AgentSessionEvent{
 				EventType:   "auto_retry_end",
 				RetrySuccess: false,
 				RetryAttempt: attempt,
 				RetryError:  "Retry cancelled",
 			})
-			s.resolveRetry()
 		}
 	}()
 
 	return true
 }
 
-// AbortRetry cancels in-progress retry.
+// AbortRetry cancels in-progress retry. Signals the waiting goroutine via
+// retryChan (the TS equivalent aborts the retry sleep's AbortController); the
+// goroutine emits auto_retry_end and clears the channel.
 func (s *AgentSession) AbortRetry() {
 	s.retryMu.Lock()
-	defer s.retryMu.Unlock()
-	if s.retryAbort != nil {
-		s.retryAbort()
+	ch := s.retryChan
+	s.retryMu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
-	s.resolveRetry()
 }
 
 // --- Helpers ---

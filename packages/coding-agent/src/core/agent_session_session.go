@@ -123,12 +123,11 @@ func (s *AgentSession) GetContextUsage() extensions.ContextUsage {
 	}
 
 	estimate := compaction.EstimateContextTokens(s.Agent.Messages())
-	if estimate.Tokens <= 0 {
-		return extensions.ContextUsage{
-			ContextWindow: contextWindow,
-		}
-	}
-
+	// Note: no estimate.Tokens <= 0 guard. A fresh session legitimately
+	// estimates to 0 tokens → 0%, shown as "0/205k" in the footer (matches the
+	// reference TS, which has no such guard). "?" is reserved for the two
+	// genuinely-unknown cases above: no model/context window, and
+	// post-compaction before the next LLM response.
 	percent := int(float64(estimate.Tokens) / float64(contextWindow) * 100)
 	tokens := estimate.Tokens
 

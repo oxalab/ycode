@@ -125,7 +125,13 @@ type ExtensionBindings struct {
 }
 
 type PromptOptions struct {
-	ExpandPromptTemplates bool
+	// ExpandPromptTemplates controls skill-command/prompt-template expansion.
+	// *bool so nil means "default true" (reference agent-session.ts:968
+	// `options?.expandPromptTemplates ?? true`) while an explicit false — as
+	// SendUserMessage passes for extension-originated text — is honored. A
+	// plain bool could not distinguish unset from false, which made the
+	// opt-out impossible and let literal "/foo" extension text run commands.
+	ExpandPromptTemplates *bool
 	Images 				  []any
 	StreamingBehavior 	  string
 	Source 				  extensions.InputSource

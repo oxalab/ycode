@@ -30,17 +30,32 @@ import (
 
 // Compact manually triggers session compaction.
 // Aborts current agent operation first.
-// Mirrors TS: AgentSession.compact() lines 1610-1738
+// Mirrors TS: AgentSession.compact() lines 1610-1738 — the TS runs cleanup +
+// reconnection in a finally block, so they happen on error AND cancel paths
+// too. The port previously reconnected only on success, leaving the session
+// permanently disconnected from agent events after one failed /compact.
 func (s *AgentSession) Compact(customInstructions string) (*compaction.CompactionResult, error) {
 	s.disconnectFromAgent()
 	s.Agent.Abort()
-	s.compactionAbort = func() {}
+
+	// Real cancel function so AbortCompaction() actually cancels (the TS
+	// aborts an AbortController; the old `func(){}` made it a no-op).
+	ctx, cancel := context.WithCancel(context.Background())
+	s.compactionAbort = cancel
+
 	s.emit(AgentSessionEvent{
 		EventType:       "compaction_start",
 		CompactionReason: CompactionManual,
 	})
 
-	result, err := s.runCompaction(CompactionManual, customInstructions)
+	// finally-equivalent: cleanup + reconnect on every path.
+	defer func() {
+		cancel()
+		s.compactionAbort = nil
+		s.reconnectToAgent()
+	}()
+
+	result, err := s.runCompaction(ctx, CompactionManual, customInstructions)
 	if err != nil {
 		aborted := err.Error() == "Compaction cancelled"
 		s.emit(AgentSessionEvent{
@@ -61,8 +76,6 @@ func (s *AgentSession) Compact(customInstructions string) (*compaction.Compactio
 	// Clear overflow recovery flag on successful manual compaction
 	s.overflowRecoveryAttempted = false
 
-	s.compactionAbort = nil
-	s.reconnectToAgent()
 	return result, nil
 }
 
@@ -258,13 +271,14 @@ func (s *AgentSession) runAutoCompaction(reason CompactionReason, willRetry bool
 
 // runCompaction is the shared flow for both manual and auto compaction.
 // Mirrors the inner logic of TS compact() and _runAutoCompaction().
-func (s *AgentSession) runCompaction(reason CompactionReason, customInstructions string) (*compaction.CompactionResult, error) {
+// ctx carries cancellation from AbortCompaction (manual) or the auto-compaction
+// abort context.
+func (s *AgentSession) runCompaction(ctx context.Context, reason CompactionReason, customInstructions string) (*compaction.CompactionResult, error) {
 	model := s.GetModel()
 	if model.ID == "" {
 		return nil, fmt.Errorf("no model selected")
 	}
 
-	ctx := context.Background()
 	authResult := s.modelRegistry.GetApiKeyAndHeaders(ctx, &model)
 	if authResult == nil || !authResult.Ok || authResult.ApiKey == "" {
 		return nil, fmt.Errorf("unable to get API credentials for compaction")
