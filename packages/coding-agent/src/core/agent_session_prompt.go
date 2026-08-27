@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
+
+	sdk "ycode/packages/agent-sdk/src"
 	"ycode/packages/coding-agent/src/core/extensions"
 	"ycode/packages/llm/src"
 )
@@ -95,9 +98,10 @@ func (s *AgentSession) Prompt(text string, opts *PromptOptions) error {
 	if opts == nil {
 		opts = &PromptOptions{}
 	}
-	expandTemplates := opts.ExpandPromptTemplates
-	if !expandTemplates {
-		expandTemplates = true
+	// nil → default true (reference `?? true`); explicit false honored.
+	expandTemplates := true
+	if opts.ExpandPromptTemplates != nil {
+		expandTemplates = *opts.ExpandPromptTemplates
 	}
 
 	// Handle extension commands first (even during streaming)
@@ -180,28 +184,26 @@ func (s *AgentSession) Prompt(text string, opts *PromptOptions) error {
 		s.lastAssistantMessage = nil
 	}
 
-	// Build messages array
-	var messages []any
+	// Build messages array (reference agent-session.ts:1052-1111): user
+	// content (+images), pending nextTurn custom messages, and any
+	// before_agent_start extension-injected messages. The whole slice is what
+	// reaches the model — historically this was built then discarded in favor
+	// of a text-only Prompt call, silently dropping images and extension
+	// context.
+	var messages []sdk.AgentMessage
 
 	// Add user message
-	userContent := []map[string]any{
-		{"type": "text", "text": expandedText},
-	}
-	if len(currentImages) > 0 {
-		for _, img := range currentImages {
-			userContent = append(userContent, img.(map[string]any))
-		}
-	}
-
-	messages = append(messages, map[string]any{
-		"role":     "user",
-		"content":  userContent,
-		"timestamp": currentTimeMillis(),
+	messages = append(messages, llm.UserMessage{
+		Role:      llm.RoleUser,
+		Content:   buildUserContent(expandedText, currentImages),
+		Timestamp: currentTimeMillis(),
 	})
 
 	// Inject pending nextTurn messages
 	for _, msg := range s.pendingNextTurnMessages {
-		messages = append(messages, msg)
+		if m, ok := msg.(sdk.AgentMessage); ok {
+			messages = append(messages, m)
+		}
 	}
 	s.pendingNextTurnMessages = nil
 
@@ -217,7 +219,9 @@ func (s *AgentSession) Prompt(text string, opts *PromptOptions) error {
 		if result != nil {
 			if result.Messages != nil {
 				for _, msg := range result.Messages {
-					messages = append(messages, msg)
+					if m, ok := msg.(sdk.AgentMessage); ok {
+						messages = append(messages, m)
+					}
 				}
 			}
 			if result.SystemPrompt != nil {
@@ -232,9 +236,9 @@ func (s *AgentSession) Prompt(text string, opts *PromptOptions) error {
 		opts.PreflightResult(true)
 	}
 
-	// Send prompt to agent
-	err := s.Agent.Prompt(context.Background(), expandedText)
-	return err
+	// Send the full messages array to the agent (normalizePromptInput accepts
+	// []AgentMessage and passes it through).
+	return s.Agent.Prompt(context.Background(), messages)
 }
 
 // ============================================================================
@@ -264,13 +268,49 @@ func (s *AgentSession) FollowUp(text string, images []any) error {
 func (s *AgentSession) queueSteer(text string, images []any) {
 	s.steeringMessages = append(s.steeringMessages, text)
 	s.emitQueueUpdate()
-	s.Agent.Steer(llm.UserMessage{Role: "user", Content: []llm.ContentBlock{llm.TextContent{Text: text}}})
+	// Build content with images attached (reference agent-session.ts:1217-1246
+	// appends image content blocks to queued steering messages).
+	s.Agent.Steer(llm.UserMessage{
+		Role:      "user",
+		Content:   buildUserContent(text, images),
+		Timestamp: currentTimeMillis(),
+	})
 }
 
 func (s *AgentSession) queueFollowUp(text string, images []any) {
 	s.followUpMessages = append(s.followUpMessages, text)
 	s.emitQueueUpdate()
-	s.Agent.FollowUp(llm.UserMessage{Role: "user", Content: []llm.ContentBlock{llm.TextContent{Text: text}}})
+	// Same as queueSteer — images ride along on the queued message.
+	s.Agent.FollowUp(llm.UserMessage{
+		Role:      "user",
+		Content:   buildUserContent(text, images),
+		Timestamp: currentTimeMillis(),
+	})
+}
+
+// buildUserContent assembles a user message's content blocks: the text block
+// plus any attached images. Accepts the three image shapes that flow through
+// the session: llm.ImageContent (typed), *llm.ImageContent, and
+// map[string]any (extension/JSON-sourced).
+func buildUserContent(text string, images []any) []llm.ContentBlock {
+	content := []llm.ContentBlock{llm.TextContent{Type: "text", Text: text}}
+	for _, img := range images {
+		switch v := img.(type) {
+		case llm.ImageContent:
+			content = append(content, v)
+		case *llm.ImageContent:
+			if v != nil {
+				content = append(content, *v)
+			}
+		case map[string]any:
+			data, _ := v["data"].(string)
+			mime, _ := v["mimeType"].(string)
+			if data != "" || mime != "" {
+				content = append(content, llm.ImageContent{Type: "image", Data: data, MimeType: mime})
+			}
+		}
+	}
+	return content
 }
 
 func (s *AgentSession) throwIfExtensionCommand(text string) {
@@ -405,8 +445,9 @@ func (s *AgentSession) SendCustomMessage(customType string, content any, display
 }
 
 func (s *AgentSession) SendUserMessage(text string, images []any) error {
+	noExpand := false // explicit false: deliver extension text literally
 	return s.Prompt(text, &PromptOptions{
-		ExpandPromptTemplates: false,
+		ExpandPromptTemplates: &noExpand,
 		StreamingBehavior:     "",
 		Images:                images,
 		Source:                extensions.InputSourceExtension,
@@ -443,6 +484,7 @@ func (s *AgentSession) Abort() {
 // ============================================================================
 
 func currentTimeMillis() int64 {
-	// Placeholder — will use args or time parsing in production
-	return 0
+	// Reference: Date.now() (agent-session.ts:1063,1285). Wall-clock ms since
+	// epoch — used for user/custom message timestamps and ordering.
+	return time.Now().UnixMilli()
 }
