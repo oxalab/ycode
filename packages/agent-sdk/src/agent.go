@@ -376,7 +376,6 @@ func (a *Agent) SetAfterToolCall(fn func(ctx AfterToolCallContext, signal contex
 	a.afterToolCall = fn
 }
 
-
 // --- Queue Mode ---
 func (a *Agent) SetSteeringMode(mode QueueMode) {
 	a.steeringQueue.mode = mode
