@@ -127,3 +127,4 @@ func TestExtensionEditorPrefill(t *testing.T) {
 		t.Errorf("editor prefill = %q, want %q", got, "pre-filled content")
 	}
 }
+

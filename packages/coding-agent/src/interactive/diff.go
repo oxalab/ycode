@@ -5,12 +5,19 @@ package interactive
 // diff and highlights intra-line word changes with inverse video. The Go
 // coding-agent already has a faithful port at core/tui/components/diff.go, but
 // importing that package would pull in charmbracelet (the BT TUI), so the logic
-// is reproduced here against the shared theme.Theme (no charmbracelet, no
-// sergi/go-diff — the word-diff is a self-contained LCS).
+// is reproduced here against the shared theme.Theme.
+//
+// Word-level diffing uses github.com/sergi/go-diff/diffmatchpatch (the mapping
+// note's recommended substitute for the TS "diff" npm package's diffWords):
+// words are token-encoded into runes, DiffMainRunes diffs the encoded
+// sequences, and the tokens are decoded back — the same trick dmp itself uses
+// for line-mode diffing (DiffLinesToRunes).
 
 import (
 	"regexp"
 	"strings"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
 
 	"ycode/packages/coding-agent/src/core/tui/theme"
 )
@@ -39,49 +46,71 @@ type wordDiffPart struct {
 	added   bool
 }
 
-// diffWords computes a simple LCS-based word diff (approximates the TS "diff"
-// library's diffWords; groups whitespace with adjacent words).
+// wordRuneBase is the first rune used for token encoding. Words map to
+// wordRuneBase + index in the vocabulary. Kept clear of the surrogate range
+// and beyond typical text so collisions with real content are impossible in
+// the encoded domain (words never appear there — only vocab indices do).
+const wordRuneBase = 0x100000
+
+// diffWords computes a word-level diff via diffmatchpatch, approximating the
+// TS diff library's diffWords (whitespace groups with the adjacent word).
+//
+// Token encoding: build a vocabulary of unique whitespace-or-word tokens from
+// both inputs, map each token to a rune (wordRuneBase + index), and run
+// DiffMainRunes over the two rune slices. Because each token is a single rune,
+// dmp treats every word as an atomic unit — matching how diffWords behaves.
+// checklines=false keeps dmp from doing its own line-mode pre-pass, which
+// would be meaningless over token-encoded input.
 func diffWords(oldText, newText string) []wordDiffPart {
-	oldWords := splitWordsWithWhitespace(oldText)
-	newWords := splitWordsWithWhitespace(newText)
-	m, n := len(oldWords), len(newWords)
-	lcs := make([][]int, m+1)
-	for i := range lcs {
-		lcs[i] = make([]int, n+1)
-	}
-	for i := m - 1; i >= 0; i-- {
-		for j := n - 1; j >= 0; j-- {
-			if oldWords[i] == newWords[j] {
-				lcs[i][j] = lcs[i+1][j+1] + 1
-			} else if lcs[i+1][j] >= lcs[i][j+1] {
-				lcs[i][j] = lcs[i+1][j]
-			} else {
-				lcs[i][j] = lcs[i][j+1]
+	oldTokens := splitWordsWithWhitespace(oldText)
+	newTokens := splitWordsWithWhitespace(newText)
+
+	vocab := make(map[string]rune, len(oldTokens)+len(newTokens))
+	reverseVocab := make(map[rune]string)
+	encode := func(tokens []string) []rune {
+		out := make([]rune, 0, len(tokens))
+		for _, tok := range tokens {
+			r, ok := vocab[tok]
+			if !ok {
+				r = wordRuneBase + rune(len(vocab))
+				vocab[tok] = r
+				reverseVocab[r] = tok
 			}
+			out = append(out, r)
 		}
+		return out
 	}
-	var parts []wordDiffPart
-	i, j := 0, 0
-	for i < m && j < n {
-		if oldWords[i] == newWords[j] {
-			parts = append(parts, wordDiffPart{value: oldWords[i]})
-			i++
-			j++
-		} else if lcs[i+1][j] >= lcs[i][j+1] {
-			parts = append(parts, wordDiffPart{value: oldWords[i], removed: true})
-			i++
-		} else {
-			parts = append(parts, wordDiffPart{value: newWords[j], added: true})
-			j++
+	oldRunes := encode(oldTokens)
+	newRunes := encode(newTokens)
+
+	dmp := diffmatchpatch.New()
+	diffs := dmp.DiffMainRunes(oldRunes, newRunes, false)
+	// Merge fragmented adjacent ops so changed words render as one inverse
+	// span per side (matches diffWords' merged part output). In the encoded
+	// domain every rune is a whole token, so merging only ever happens at
+	// word boundaries — a word is never split mid-token.
+	diffs = dmp.DiffCleanupMerge(diffs)
+
+	// Decode each diff chunk's text back into its tokens. A chunk's Text is a
+	// run of encoded runes; each rune expands to its full token.
+	decode := func(encoded string) string {
+		var b strings.Builder
+		for _, r := range encoded {
+			b.WriteString(reverseVocab[r])
 		}
+		return b.String()
 	}
-	for i < m {
-		parts = append(parts, wordDiffPart{value: oldWords[i], removed: true})
-		i++
-	}
-	for j < n {
-		parts = append(parts, wordDiffPart{value: newWords[j], added: true})
-		j++
+
+	parts := make([]wordDiffPart, 0, len(diffs))
+	for _, d := range diffs {
+		part := wordDiffPart{value: decode(d.Text)}
+		switch d.Type {
+		case diffmatchpatch.DiffDelete:
+			part.removed = true
+		case diffmatchpatch.DiffInsert:
+			part.added = true
+		}
+		parts = append(parts, part)
 	}
 	return parts
 }

@@ -208,3 +208,4 @@ func (o *Orchestrator) extensionEditor(message, prefill string) (string, error) 
 	o.engine.RequestRender()
 	return text, nil
 }
+
