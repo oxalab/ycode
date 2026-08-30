@@ -2,7 +2,6 @@ package ycode
 
 import (
 	"fmt"
-	"time"
 
 	"ycode/packages/llm/src"
 )
@@ -26,6 +25,8 @@ type BashExecutionMessage struct {
 
 func (m BashExecutionMessage) Role() string { return "bashExecution"}
 
+func (m BashExecutionMessage) IsMessage() {}
+
 // CustomMessage is an extension-injected message
 type CustomMessage struct {
 	CustomType 	string
@@ -37,6 +38,8 @@ type CustomMessage struct {
 
 func (m CustomMessage) Role() string { return "custom" }
 
+func (m CustomMessage) IsMessage() {}
+
 // BranchSummaryMessage summarizes a branch the conversation returned from
 type BranchSummaryMessage struct {
 	Summary 	string
@@ -46,6 +49,8 @@ type BranchSummaryMessage struct {
 
 func (m BranchSummaryMessage) Role() string { return "branchSummary" }
 
+func (m BranchSummaryMessage) IsMessage() {}
+
 // CompactionSummaryMessage summarizes compacted conversation history
 type CompactionSummaryMessage struct {
 	Summary 	string
@@ -54,6 +59,8 @@ type CompactionSummaryMessage struct {
 }
 
 func (m CompactionSummaryMessage) Role() string { return "compactionSummary" }
+
+func (m CompactionSummaryMessage) IsMessage() {}
 
 func BashExecutionToText(msg BashExecutionMessage) string {
 	text := fmt.Sprintf("Ran `%s`\n", msg.Command)
@@ -73,32 +80,29 @@ func BashExecutionToText(msg BashExecutionMessage) string {
 	return text
 }
 
-func CreateBranchSummaryMessage(summary string, fromID string, timestamp string) BranchSummaryMessage {
-	t, _ := time.Parse(time.RFC3339, timestamp)
+func CreateBranchSummaryMessage(summary string, fromID string, timestamp int64) BranchSummaryMessage {
 	return BranchSummaryMessage{
 		Summary: summary,
 		FromID: fromID,
-		Timestamp: t.UnixMilli(),
+		Timestamp: timestamp,
 	}
 }
 
-func CreateCompactionSummaryMessage(summary string, tokensBefore int, timestamp string) CompactionSummaryMessage {
-	t, _ := time.Parse(time.RFC3339, timestamp)
+func CreateCompactionSummaryMessage(summary string, tokensBefore int, timestamp int64) CompactionSummaryMessage {
 	return CompactionSummaryMessage{
 		Summary: summary,
 		TokensBefore: tokensBefore,
-		Timestamp: t.UnixMilli(),
+		Timestamp: timestamp,
 	}
 }
 
-func CreateCustomMessage(customType string, content any, display bool, details any, timestamp string) CustomMessage {
-	t, _ := time.Parse(time.RFC3339, timestamp)
+func CreateCustomMessage(customType string, content any, display bool, details any, timestamp int64) CustomMessage {
 	return CustomMessage{
 		CustomType: customType,
 		Content: 	content,
 		Display: 	display,
 		Details: 	details,
-		Timestamp:  t.UnixMilli(),
+		Timestamp:  timestamp,
 	}
 }
 
