@@ -391,16 +391,16 @@ func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.Too
 			}
 			if execErr != nil {
 				if execErr.Error() == "aborted" {
-					return nil, fmt.Errorf(appendStatus(outputText, "Command Aborted"))
+					return nil, fmt.Errorf("%s", appendStatus(outputText, "Command Aborted"))
 				}
 				if strings.HasPrefix(execErr.Error(), "timeout:") {
-					timeoutSecs := strings.TrimPrefix(execErr.Error(), "tomeout:")
+					timeoutSecs := strings.TrimPrefix(execErr.Error(), "timeout:")
 					(appendStatus(outputText, fmt.Sprintf("Command timed out after %s seconds", timeoutSecs)))
 				}
 				return nil, execErr
 			}
 			if result.ExitCode != 0 {
-				return nil, fmt.Errorf(appendStatus(outputText, fmt.Sprintf("Command exited with code %d", result.ExitCode)))
+				return nil, fmt.Errorf("%s", appendStatus(outputText, fmt.Sprintf("Command exited with code %d", result.ExitCode)))
 			}
 			return &ToolExecuteResult{
 				Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: outputText}},

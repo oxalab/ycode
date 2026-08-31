@@ -378,6 +378,17 @@ func (sm *SettingsManager) GetCompactionEnabled() bool {
 	return true
 }
 
+func (sm *SettingsManager) SetCompactionEnabled(enabled bool) {
+	sm.mu.Lock()
+	if sm.settings.Compaction == nil {
+		sm.settings.Compaction = &CompactionSettings{}
+	}
+	sm.settings.Compaction.Enabled = &enabled
+	sm.markModified("compaction.enabled", "")
+	sm.save()
+	sm.mu.Unlock()
+}
+
 func (sm *SettingsManager) GetCompactionReserveTokens() int {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -430,6 +441,18 @@ func (sm *SettingsManager) GetProviderRetryMaxDelayMs() int {
 		return *sm.settings.Retry.Provider.MaxRetryDelayMs
 	}
 	return 60000
+}
+
+// GetProviderRetrySettings returns the provider-scoped retry settings
+// (timeoutMs / maxRetries / maxRetryDelayMs). Nil sub-settings fall back to
+// zero values; callers apply their own defaults via derefInt.
+func (sm *SettingsManager) GetProviderRetrySettings() ProviderRetrySettings {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.settings.Retry != nil && sm.settings.Retry.Provider != nil {
+		return *sm.settings.Retry.Provider
+	}
+	return ProviderRetrySettings{}
 }
 
 func (sm *SettingsManager) GetHideThinkingBlock() bool {
