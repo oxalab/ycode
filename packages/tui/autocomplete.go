@@ -724,6 +724,7 @@ func (p *CombinedAutocompleteProvider) getFuzzyFileSuggestionsViaWalk(query stri
 	return suggestions
 }
 
+
 type scopedQuery struct {
 	baseDir    string
 	query      string
