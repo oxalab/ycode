@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 8 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 9 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -100,17 +100,21 @@
 
 ---
 
-## 🔴 OPEN — Destructive UX (recommended next)
+## ✅ FIXED — Destructive UX
 
 ### 9. Single Ctrl+C exits the app
-- **TS:** interactive-mode.ts:3202-3210 — first Ctrl+C clears the editor; a
-  second within **500ms** shuts down. Registered via `onAction("app.clear")`
-  (:2381).
-- **Go:** `interactive/orchestrator.go` `installExitListener` — any `ctrl+c`
-  → `go o.Stop()` immediately. `app.clear` never registered.
-- **Note:** our header literally prints "ctrl+c to clear / ctrl+c twice to
-  exit" (`header.go`), contradicting the behavior. Fix the listener to match
-  the printed hint.
+- **Was:** engine-level `installExitListener` consumed ctrl+c and ran
+  `go o.Stop()` on any press; `app.clear` was bound (keybindings.go:45) and
+  advertised (header.go) but never handled.
+- **Fix:** listener removed; `app.clear` registered on the editor action loop
+  (`setupEditorCallbacks`) → `Orchestrator.ctrlC`: first press clears the
+  editor, second within 500ms exits (`lastCtrlC` field, mirrors TS
+  `lastSigintTime`). Tests: `orchestrator_test.go`.
+- **Reference:** interactive-mode.ts:3202-3211, :2381.
+
+---
+
+## 🔴 OPEN — Destructive UX
 
 ### 10. Session delete: no confirmation, no active-session guard
 - **TS:** session-selector.ts:380-391 — Ctrl+D enters a confirm state
