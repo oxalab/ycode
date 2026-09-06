@@ -14,6 +14,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"ycode/packages/tui"
 	"ycode/packages/tui/components"
@@ -77,6 +78,11 @@ type Orchestrator struct {
 
 	done     chan struct{}
 	stopOnce sync.Once
+
+	// lastCtrlC stamps the previous app.clear press for the 500ms double-press
+	// exit window (reference interactive-mode.ts lastSigintTime). Only touched
+	// under the engine render lock.
+	lastCtrlC time.Time
 }
 
 // NewOrchestrator constructs the engine, theme, editor, and tree. It does not
@@ -125,7 +131,6 @@ func NewOrchestrator(opts Options) *Orchestrator {
 
 	o.buildStaticTree()
 	engine.SetFocus(editor)
-	o.installExitListener()
 
 	// Wire the extension UI context + error listener. Until this call, every
 	// extension ran against NoOpUIContext — ctx.ui.notify was a no-op. This
@@ -215,6 +220,14 @@ func (o *Orchestrator) setupEditorCallbacks() {
 	// Ctrl+D on an empty editor exits (mirrors reference app.exit). Interrupt/
 	// abort (OnEscape) + slash/bash routing land in P6.
 	o.editor.OnCtrlD = func() { go o.Stop() }
+	// app.clear (ctrl+c): first press clears the editor, second within 500ms
+	// exits (reference interactive-mode.ts:3202-3211). Runs under the render
+	// lock — SetText needs no explicit RequestRender (see above).
+	o.editor.OnAction("app.clear", func() {
+		if o.ctrlC() {
+			go o.Stop()
+		}
+	})
 	// app.tools.expand toggles the header's startup help (later also tool/thinking
 	// blocks, P3). Runs under the render lock — SetExpanded just invalidates the
 	// Text cache; the engine re-renders after HandleInput returns.
@@ -381,16 +394,17 @@ func buildAutocompleteProvider(cwd string, session *core.AgentSession) tui.Autoc
 	return tui.NewCombinedAutocompleteProvider(sources, cwd, "")
 }
 
-// installExitListener exits on Ctrl+C. In raw mode Ctrl+C arrives as a byte
-// (not SIGINT); the listener runs inside handleInput under the render lock, so
-// Stop runs on a goroutine to avoid re-locking (self-deadlock). (Ctrl+D on an
-// empty editor exits via CustomEditor.OnCtrlD.)
-func (o *Orchestrator) installExitListener() {
-	o.engine.AddInputListener(func(data string) *tui.InputListenerResult {
-		if tui.MatchesKey(data, "ctrl+c") {
-			go o.Stop()
-			return &tui.InputListenerResult{Consume: true}
-		}
-		return nil
-	})
+// ctrlC implements app.clear (reference interactive-mode.ts:3202-3211): the
+// first press clears the editor, a second press within 500ms exits. Returns
+// true when the app should exit; the OnAction wrapper runs Stop on a goroutine
+// (Stop stops the engine — calling it synchronously under the render lock
+// would self-deadlock).
+func (o *Orchestrator) ctrlC() bool {
+	now := time.Now()
+	if now.Sub(o.lastCtrlC) < 500*time.Millisecond {
+		return true
+	}
+	o.editor.SetText("")
+	o.lastCtrlC = now
+	return false
 }
