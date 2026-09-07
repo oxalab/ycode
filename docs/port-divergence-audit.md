@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 10 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 11 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -124,15 +124,23 @@
 
 ---
 
-## 🔴 OPEN — RPC protocol
+## ✅ FIXED — RPC protocol
 
 ### 11. RPC stdin fully serialized — `abort_bash` cannot preempt
-- **TS:** rpc-mode.ts:742-745 — `void handleInputLine(line)` fire-and-forget;
-  reader continues while commands run.
-- **Go:** `modes/rpc_mode.go` — `handleLine` called synchronously on the reader
-  goroutine; a 10s bash blocks reading the abort line until it finishes.
-- **Fix shape:** spawn a goroutine per line (or a worker pool) so the reader
-  loop keeps consuming; preserve per-session ordering where the protocol needs it.
+- **Was:** `handleLine` ran inline on the reader goroutine (jsonl.go:61 →
+  rpc_mode.go:299); a 10s `bash` blocked reading later lines, so `abort_bash`
+  waited until the command finished.
+- **Fix:** each stdin line dispatches on its own goroutine (TS `void
+  handleInputLine(line)`, rpc-mode.ts:744); responses interleave via the
+  existing `outputMu`. `bashAbort` is now mutex-guarded (was only
+  single-goroutine-safe by accident). Known follow-up: concurrent commands
+  can race the unsynchronized `s.session` pointer across a rebind — same
+  logical overlap as TS await points, unaddressed.
+- **Reference:** rpc-mode.ts:737-750.
+
+---
+
+## 🔴 OPEN — RPC protocol
 
 ### 12. RPC response `data` emits PascalCase (wire break)
 - **TS:** rpc-types.ts — all data shapes camelCase (`cancelled`, `output`,
