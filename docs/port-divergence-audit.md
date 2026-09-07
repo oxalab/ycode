@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 9 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 10 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -112,18 +112,15 @@
   `lastSigintTime`). Tests: `orchestrator_test.go`.
 - **Reference:** interactive-mode.ts:3202-3211, :2381.
 
----
-
-## 🔴 OPEN — Destructive UX
-
 ### 10. Session delete: no confirmation, no active-session guard
-- **TS:** session-selector.ts:380-391 — Ctrl+D enters a confirm state
-  (`Delete session? confirm · cancel`, :159); refuses for the active session
-  ("Cannot delete the currently active session").
-- **Go:** `interactive/session_selector.go` `fireDelete` → `core.DeleteSessionFile`
-  on first keypress; deleting the session you're in succeeds.
-- **Fix shape:** add a confirm mode to `sessionSelector` (mirrors the existing
-  rename mode) + reject `path == currentSessionFile` with a notice.
+- **Was:** `fireDelete` invoked `onDelete` on first Ctrl+D; deleting the
+  session you're in succeeded.
+- **Fix:** `fireDelete` refuses `target.current` via new `onError` callback
+  ("Cannot delete the currently active session", wired to a chat notice in
+  `buildSessionSelector`); otherwise enters a `confirmDelete` mode — Enter
+  commits, Escape cancels, other keys ignored (rename-mode pattern; TS
+  `confirmingDeletePath`). Tests: `session_selector_test.go`.
+- **Reference:** session-selector.ts:157-161, 381-397, 521-536.
 
 ---
 
