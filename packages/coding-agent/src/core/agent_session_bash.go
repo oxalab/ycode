@@ -32,7 +32,9 @@ type BashRecordOptions struct {
 // Mirrors TS: executeBash() lines 2559-2587
 func (s *AgentSession) ExecuteBash(command string, onChunk func(chunk string)) (*BashResult, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	s.bashAbortMu.Lock()
 	s.bashAbort = cancel
+	s.bashAbortMu.Unlock()
 
 	// Apply command prefix if configured
 	prefix := s.SettingsManager.GetShellCommandPrefix()
@@ -51,7 +53,9 @@ func (s *AgentSession) ExecuteBash(command string, onChunk func(chunk string)) (
 			Ctx:     ctx,
 		},
 	)
+	s.bashAbortMu.Lock()
 	s.bashAbort = nil
+	s.bashAbortMu.Unlock()
 
 	if err != nil {
 		return nil, err
@@ -90,13 +94,18 @@ func (s *AgentSession) recordBashResult(command string, result *BashResult, opti
 
 // AbortBash cancels the running bash command.
 func (s *AgentSession) AbortBash() {
-	if s.bashAbort != nil {
-		s.bashAbort()
+	s.bashAbortMu.Lock()
+	abort := s.bashAbort
+	s.bashAbortMu.Unlock()
+	if abort != nil {
+		abort()
 	}
 }
 
 // IsBashRunning returns whether a bash command is currently running.
 func (s *AgentSession) IsBashRunning() bool {
+	s.bashAbortMu.Lock()
+	defer s.bashAbortMu.Unlock()
 	return s.bashAbort != nil
 }
 

@@ -52,6 +52,7 @@ type AgentSession struct {
 	retryChan     chan struct{}
 
 	// Bash execution state
+	bashAbortMu       sync.Mutex // guards bashAbort (touched from RPC handler goroutines)
 	bashAbort         context.CancelFunc
 	pendingBashMessages []any // BashExecutionMessage
 

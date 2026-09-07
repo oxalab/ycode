@@ -33,6 +33,8 @@
 // handler runs it in a goroutine, capturing the session ref at dispatch time
 // (matching the TS closure). Multiple in-flight prompts serialize inside the
 // agent's event queue, as in the TS. All stdout writes are mutex-guarded.
+// Dispatch concurrency: every stdin line runs on its own goroutine (mirror of
+// the TS fire-and-forget), so aborts preempt in-flight commands.
 //
 // JSON event stream: Subscribe delivers AgentSessionEvent (no json tags →
 // PascalCase), the same wire divergence as print mode (documented there).
@@ -87,9 +89,15 @@ func RunRPCMode(runtimeHost *core.AgentSessionRuntime) error {
 
 	srv.registerSignalHandlers()
 
-	// Read commands line-by-line; EOF triggers a clean shutdown.
+	// Read commands line-by-line; EOF triggers a clean shutdown. Each line
+	// dispatches on its own goroutine (TS: `void handleInputLine(line)`,
+	// rpc-mode.ts:744) so a blocking handler (bash, compact, a dialog-bound
+	// switch) can't starve the reader — abort_bash preempts in-flight work.
+	// Responses interleave on stdout via outputMu, as in the TS.
 	go func() {
-		_ = AttachJSONLLineReader(os.Stdin, srv.handleLine)
+		_ = AttachJSONLLineReader(os.Stdin, func(line string) {
+			go srv.handleLine(line)
+		})
 		srv.shutdown(0)
 	}()
 
