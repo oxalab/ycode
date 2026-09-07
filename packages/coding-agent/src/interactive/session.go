@@ -35,6 +35,11 @@ func (o *Orchestrator) buildSessionSelector() *sessionSelector {
 	})
 	selector.onSwitch = func(path string) { o.switchToSession(path) }
 	selector.onCancel = o.closeSelector
+	selector.onError = func(msg string) {
+		// Fires under the render lock (selector HandleInput); addNotice is a
+		// plain append and the engine re-renders after HandleInput returns.
+		o.addNotice(o.th.Fg("error", msg))
+	}
 	selector.onDelete = func(path, label string) {
 		go func() {
 			method, err := core.DeleteSessionFile(path)

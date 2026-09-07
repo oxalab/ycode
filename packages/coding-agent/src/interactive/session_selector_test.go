@@ -1,8 +1,9 @@
 package interactive
 
 // session_selector_test.go verifies the sessionSelector's key routing —
-// particularly that delete/rename keys are intercepted in list mode and that
-// rename mode owns its keys.
+// delete/rename interception in list mode, the delete-confirm state
+// (enter/commit/cancel/ignore, active-session refusal), and rename mode's
+// key ownership.
 
 import (
 	"testing"
@@ -12,35 +13,115 @@ import (
 
 func newTestSessionSelector(t *testing.T) *sessionSelector {
 	t.Helper()
+	return newTestSessionSelectorWithItems(t, []sessionItem{
+		{path: "/path/a.jsonl", label: "Session A", desc: "3 msgs"},
+		{path: "/path/b.jsonl", label: "Session B", desc: "5 msgs"},
+		{path: "/path/c.jsonl", label: "Session C", desc: "1 msg"},
+	})
+}
+
+func newTestSessionSelectorWithItems(t *testing.T, items []sessionItem) *sessionSelector {
+	t.Helper()
 	ensureTheme()
 	installAppKeybindings() // ensures tui.GetKeybindings() returns the merged manager
-	th := theme.GetTheme()
-	s := newSessionSelector(th)
-	s.refresh(func() []sessionItem {
-		return []sessionItem{
-			{path: "/path/a.jsonl", label: "Session A", desc: "3 msgs"},
-			{path: "/path/b.jsonl", label: "Session B", desc: "5 msgs"},
-			{path: "/path/c.jsonl", label: "Session C", desc: "1 msg"},
-		}
-	})
+	s := newSessionSelector(theme.GetTheme())
+	s.refresh(func() []sessionItem { return items })
 	return s
 }
 
-func TestSessionSelector_DeleteKeyFiresOnDelete(t *testing.T) {
+func TestSessionSelector_DeleteKeyEntersConfirmMode(t *testing.T) {
+	s := newTestSessionSelector(t)
+	var fired bool
+	s.onDelete = func(path, label string) { fired = true }
+
+	// Default selection is the first row.
+	s.HandleInput("\x04") // Ctrl+D
+
+	if s.mode != sessionModeConfirmDelete {
+		t.Fatalf("mode = %q, want %q", s.mode, sessionModeConfirmDelete)
+	}
+	if s.confirmDeleteTarget.path != "/path/a.jsonl" {
+		t.Errorf("confirmDeleteTarget = %q, want /path/a.jsonl", s.confirmDeleteTarget.path)
+	}
+	if fired {
+		t.Error("onDelete must not fire until confirmed")
+	}
+}
+
+func TestSessionSelector_ConfirmModeSubmitFiresOnDelete(t *testing.T) {
 	s := newTestSessionSelector(t)
 	var gotPath, gotLabel string
 	s.onDelete = func(path, label string) {
 		gotPath, gotLabel = path, label
 	}
 
-	// Default selection is the first row.
-	s.HandleInput("\x04") // Ctrl+D
+	s.HandleInput("\x04") // Ctrl+D → confirm mode
+	s.HandleInput("\r")   // Enter → commit
 
 	if gotPath != "/path/a.jsonl" {
 		t.Errorf("onDelete path = %q, want /path/a.jsonl", gotPath)
 	}
 	if gotLabel != "Session A" {
 		t.Errorf("onDelete label = %q, want \"Session A\"", gotLabel)
+	}
+	if s.mode != sessionModeList {
+		t.Errorf("after submit, mode = %q, want \"list\"", s.mode)
+	}
+}
+
+func TestSessionSelector_ConfirmModeEscapeCancels(t *testing.T) {
+	s := newTestSessionSelector(t)
+	var fired bool
+	s.onDelete = func(path, label string) { fired = true }
+
+	s.HandleInput("\x04") // Ctrl+D → confirm mode
+	s.HandleInput("\x1b") // Esc → cancel
+
+	if s.mode != sessionModeList {
+		t.Errorf("after Esc, mode = %q, want \"list\"", s.mode)
+	}
+	if fired {
+		t.Error("onDelete must not fire on cancel")
+	}
+}
+
+func TestSessionSelector_ConfirmModeIgnoresOtherKeys(t *testing.T) {
+	s := newTestSessionSelector(t)
+	var fired bool
+	s.onDelete = func(path, label string) { fired = true }
+
+	s.HandleInput("\x04") // Ctrl+D → confirm mode
+	s.HandleInput("x")    // regular key — must be swallowed
+	s.HandleInput("\x04") // even another Ctrl+D
+
+	if s.mode != sessionModeConfirmDelete {
+		t.Errorf("mode = %q, want still %q", s.mode, sessionModeConfirmDelete)
+	}
+	if fired {
+		t.Error("onDelete must not fire on ignored keys")
+	}
+}
+
+func TestSessionSelector_DeleteCurrentSessionRefused(t *testing.T) {
+	s := newTestSessionSelectorWithItems(t, []sessionItem{
+		{path: "/path/current.jsonl", label: "Current", desc: "", current: true},
+		{path: "/path/other.jsonl", label: "Other", desc: ""},
+	})
+	var fired bool
+	s.onDelete = func(path, label string) { fired = true }
+	var errMsg string
+	s.onError = func(msg string) { errMsg = msg }
+
+	s.HandleInput("\x04") // Ctrl+D on the current row
+
+	if fired {
+		t.Error("deleting the active session must be refused")
+	}
+	if errMsg != "Cannot delete the currently active session" {
+		t.Errorf("onError = %q, want refusal message", errMsg)
+	}
+	if s.mode != sessionModeList {
+		t.Errorf("mode = %q, want \"list\" (no confirm state)", s.mode)
 	}
 }
 
@@ -99,15 +180,16 @@ func TestSessionSelector_RenameModeSubmitFiresOnRename(t *testing.T) {
 }
 
 func TestSessionSelector_ListModeNavigationStillWorks(t *testing.T) {
-	// Down should move selection to second row; then Ctrl+D should fire on
-	// that row, not the first.
+	// Down should move selection to second row; then Ctrl+D + Enter should
+	// delete that row, not the first.
 	s := newTestSessionSelector(t)
 	var gotPath string
 	s.onDelete = func(path, label string) { gotPath = path }
 	s.HandleInput("\x1b[B") // Down
-	s.HandleInput("\x04")   // Ctrl+D
+	s.HandleInput("\x04")   // Ctrl+D → confirm mode
+	s.HandleInput("\r")     // Enter → commit
 	if gotPath != "/path/b.jsonl" {
-		t.Errorf("after Down+Ctrl+D, onDelete path = %q, want /path/b.jsonl", gotPath)
+		t.Errorf("after Down+Ctrl+D+Enter, onDelete path = %q, want /path/b.jsonl", gotPath)
 	}
 }
 
