@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 11 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 13 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -138,25 +138,29 @@
   logical overlap as TS await points, unaddressed.
 - **Reference:** rpc-mode.ts:737-750.
 
----
-
-## 🔴 OPEN — RPC protocol
-
 ### 12. RPC response `data` emits PascalCase (wire break)
-- **TS:** rpc-types.ts — all data shapes camelCase (`cancelled`, `output`,
-  `path`, …).
-- **Go:** untagged core structs pass through: `SessionReplacementResult`,
-  `ModelCycleResult`, `BashResult`, `CompactionResult`, `SessionStats`
-  (`rpc_mode.go` handlers), and `SourceInfo` (core, feeds every
-  `get_commands` entry). `rpc_types.go`'s own structs are tagged correctly —
-  the leak is the core types it passes through.
-- **Fix shape:** add camelCase json tags to those struct fields. Mechanical;
-  check nothing else serializes them (they'd change shape there too — likely
-  fine/desired).
+- **Was:** untagged core structs marshaled raw: `SessionReplacementResult`,
+  `ModelCycleResult`, `BashResult`, `CompactionResult`, `SessionStats` +
+  `TokenStats`, `SourceInfo` — new_session/switch_session, cycle_model, bash,
+  compact, get_session_stats, get_commands all leaked PascalCase fields.
+- **Fix:** camelCase json tags on all six structs (TS wire names;
+  `BashResult.ExitCode`/`FullOutputPath` omitempty — TS drops undefined).
+  Pinned by `TestRpcDataShapes_CamelCase` (rpc_types_test.go).
+- **Blast radius (accepted):** `CompactionResult` tags also camelCase the
+  nested payload of `compaction_end` events on the RPC + print-mode streams
+  (mixed-case envelope; TS is fully camelCase). No persistence impact —
+  `BashResult`/`CompactionResult` are copied into separately-tagged types
+  before session writes.
+- **Noted (new divergence, unfixed):** Go `CompactionResult` is structurally
+  divergent from TS (`firstKeptEntry` object vs `firstKeptEntryId` string;
+  extra tokensAfter/readFiles/modifiedFiles/error).
+- **Reference:** rpc-types.ts:76-85,117,135,174-176; agent-session.ts:209-226;
+  bash-executor.ts:29-40; compaction.ts:103-109; source-info.ts:6-12.
 
-### 12b. (minor) `extension_error` drops the `event` field
-- rpc-mode.ts:341 sends it; Go omits though `ExtensionError.Event` exists and
-  is already tagged. One map entry.
+### 12b. `extension_error` drops the `event` field
+- **Fix:** added `"event": e.Event` to the emission map (rpc_mode.go,
+  OnError handler) — wire now matches TS `{type, extensionPath, event, error}`.
+- **Reference:** rpc-mode.ts:341.
 
 ---
 
