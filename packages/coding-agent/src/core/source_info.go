@@ -23,11 +23,11 @@ type PathMetadata struct {
 }
 
 type SourceInfo struct {
-	Path 	string
-	Source 	string
-	Scope 	string
-	Origin 	SourceOrigin
-	BaseDir string
+	Path 	string `json:"path"`
+	Source 	string `json:"source"`
+	Scope 	string `json:"scope"`
+	Origin 	SourceOrigin `json:"origin"`
+	BaseDir string `json:"baseDir,omitempty"`
 }
 
 func CreateSourceInfo(path string, metadata PathMetadata) SourceInfo {

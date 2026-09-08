@@ -602,7 +602,7 @@ type ForkOptions struct {
 }
 
 type SessionReplacementResult struct {
-	Cancelled bool
+	Cancelled bool `json:"cancelled"`
 }
 
 type ForkResult struct {

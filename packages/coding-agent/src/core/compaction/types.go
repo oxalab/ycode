@@ -168,13 +168,13 @@ type CompactionDetails struct {
 
 // CompactionResult: Holds the outcome of a compaction operation.
 type CompactionResult struct {
-	Summary 	string
-	TokensBefore int
-	TokensAfter  int
-	FirstKeptEntry *SessionEntry
-	ReadFiles 	[]string
-	ModifiedFiles []string
-	Error 		string
+	Summary 	string `json:"summary"`
+	TokensBefore int `json:"tokensBefore"`
+	TokensAfter  int `json:"tokensAfter"`
+	FirstKeptEntry *SessionEntry `json:"firstKeptEntry"`
+	ReadFiles 	[]string `json:"readFiles"`
+	ModifiedFiles []string `json:"modifiedFiles"`
+	Error 		string `json:"error,omitempty"`
 }
 
 

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	core "ycode/packages/coding-agent/src/core"
+	"ycode/packages/coding-agent/src/core/compaction"
 	llm "ycode/packages/llm/src"
 )
 
@@ -179,3 +181,36 @@ func TestRpcExtensionUIResponse_ConfirmedDistinguishesFalse(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestRpcDataShapes_CamelCase pins the handler-assigned core structs (audit
+// #12) to camelCase wire keys, matching TS rpc-types.ts — a dropped tag would
+// resurface as PascalCase Go field names.
+func TestRpcDataShapes_CamelCase(t *testing.T) {
+	sr := mustRoundTrip(t, core.SessionReplacementResult{Cancelled: true}, `"cancelled":true`)
+	if !sr.Cancelled {
+		t.Errorf("SessionReplacementResult round-trip lost Cancelled")
+	}
+
+	mustRoundTrip(t, core.BashResult{
+		Output: "out", Cancelled: true, Truncated: true,
+	}, `"output":"out"`, `"cancelled":true`, `"truncated":true`)
+	// ExitCode is *int; zero marshals, nil must drop the key (TS optional).
+	exit0 := 0
+	mustRoundTrip(t, core.BashResult{ExitCode: &exit0}, `"exitCode":0`)
+	rawBash, _ := json.Marshal(core.BashResult{})
+	if strings.Contains(string(rawBash), "exitCode") || strings.Contains(string(rawBash), "fullOutputPath") {
+		t.Errorf("nil ExitCode / empty FullOutputPath must be omitted: %s", rawBash)
+	}
+
+	mustRoundTrip(t, compaction.CompactionResult{
+		Summary: "s", TokensBefore: 1, TokensAfter: 2,
+	}, `"summary":"s"`, `"tokensBefore":1`, `"tokensAfter":2`, `"firstKeptEntry":null`)
+
+	mustRoundTrip(t, core.SessionStats{
+		UserMessages: 1, Tokens: core.TokenStats{CacheRead: 3},
+	}, `"userMessages":1`, `"cacheRead":3`, `"sessionFile"`, `"contextUsage"`)
+
+	mustRoundTrip(t, core.SourceInfo{
+		Path: "p", Source: "built-in", Origin: core.OriginPackage,
+	}, `"path":"p"`, `"origin":"package"`)
+}
