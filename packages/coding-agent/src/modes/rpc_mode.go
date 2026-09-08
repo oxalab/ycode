@@ -151,6 +151,7 @@ func (s *rpcServer) rebind(session *core.AgentSession) error {
 			s.output(map[string]any{
 				"type":          "extension_error",
 				"extensionPath": e.ExtensionPath,
+				"event":         e.Event,
 				"error":         e.Error,
 			})
 		},

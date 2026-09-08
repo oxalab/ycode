@@ -16,11 +16,11 @@ type BashExecutorOptions struct {
 }
 
 type BashResult struct {
-	Output 	string
-	ExitCode *int
-	Cancelled bool
-	Truncated bool
-	FullOutputPath string
+	Output 	string `json:"output"`
+	ExitCode *int `json:"exitCode,omitempty"`
+	Cancelled bool `json:"cancelled"`
+	Truncated bool `json:"truncated"`
+	FullOutputPath string `json:"fullOutputPath,omitempty"`
 }
 
 func ExecuteBashWithOperations(

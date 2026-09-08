@@ -139,30 +139,30 @@ type PromptOptions struct {
 }
 
 type ModelCycleResult struct {
-	Model 		llm.Model[llm.Api]
-	ThinkingLevel sdk.ThinkingLevel
-	IsScoped 	bool
+	Model 		llm.Model[llm.Api] `json:"model"`
+	ThinkingLevel sdk.ThinkingLevel `json:"thinkingLevel"`
+	IsScoped 	bool `json:"isScoped"`
 }
 
 type SessionStats struct {
-	SessionFile 	string
-	SessionID 		string
-	UserMessages 	int
-	AssistantMessages int
-	ToolCalls 		int
-	ToolResults 	int
-	TotalMessages 	int
-	Tokens 			TokenStats
-	Cost 			float64
-	ContextUsage 	extensions.ContextUsage
+	SessionFile 	string `json:"sessionFile"`
+	SessionID 		string `json:"sessionId"`
+	UserMessages 	int `json:"userMessages"`
+	AssistantMessages int `json:"assistantMessages"`
+	ToolCalls 		int `json:"toolCalls"`
+	ToolResults 	int `json:"toolResults"`
+	TotalMessages 	int `json:"totalMessages"`
+	Tokens 			TokenStats `json:"tokens"`
+	Cost 			float64 `json:"cost"`
+	ContextUsage 	extensions.ContextUsage `json:"contextUsage"`
 }
 
 type TokenStats struct {
-	Input 	int
-	Output  int
-	CacheRead int
-	CacheWrite int
-	Total int
+	Input 	int `json:"input"`
+	Output  int `json:"output"`
+	CacheRead int `json:"cacheRead"`
+	CacheWrite int `json:"cacheWrite"`
+	Total int `json:"total"`
 }
 
 type ToolDefinitionEntry struct {
