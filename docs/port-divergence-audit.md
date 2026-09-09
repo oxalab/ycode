@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 13 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 14 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -164,11 +164,20 @@
 
 ---
 
-## 🟠 OPEN — Core session (remaining)
+## ✅ FIXED — Core session
 
 ### 13. `throwIfExtensionCommand` panics instead of erroring
-- `agent_session_prompt.go` — `panic(...)` in a library path; TS throws a
-  catchable error. Callers (Steer/FollowUp) should return an error.
+- **Was:** `panic(fmt.Sprintf(...))` in a library path; an RPC
+  `steer`/`follow_up` of an extension command killed the process (dispatch
+  runs on bare `go srv.handleLine` goroutines, no recover).
+- **Fix:** returns the TS error (identical message) — `Steer`/`FollowUp`
+  propagate it and rpc_mode.go's existing `errResp` plumbing turns it into an
+  RPC error response. Tests: `agent_session_prompt_test.go`.
+- **Reference:** agent-session.ts:1251-1261, :1184, :1204.
+
+---
+
+## 🟠 OPEN — Core session (remaining)
 
 ### 14. `waitForRetry()` after `agent.prompt()` has no Go counterpart
 - agent-session.ts:1110 — Go fires `Prompt` and returns; check whether the
