@@ -247,7 +247,9 @@ func (s *AgentSession) Prompt(text string, opts *PromptOptions) error {
 
 func (s *AgentSession) Steer(text string, images []any) error {
 	if strings.HasPrefix(text, "/") {
-		s.throwIfExtensionCommand(text)
+		if err := s.throwIfExtensionCommand(text); err != nil {
+			return err
+		}
 	}
 	expandedText := s.expandSkillCommand(text)
 	expandedText = ExpandPromptTemplate(expandedText, s.GetPromptTemplates())
@@ -257,7 +259,9 @@ func (s *AgentSession) Steer(text string, images []any) error {
 
 func (s *AgentSession) FollowUp(text string, images []any) error {
 	if strings.HasPrefix(text, "/") {
-		s.throwIfExtensionCommand(text)
+		if err := s.throwIfExtensionCommand(text); err != nil {
+			return err
+		}
 	}
 	expandedText := s.expandSkillCommand(text)
 	expandedText = ExpandPromptTemplate(expandedText, s.GetPromptTemplates())
@@ -313,7 +317,11 @@ func buildUserContent(text string, images []any) []llm.ContentBlock {
 	return content
 }
 
-func (s *AgentSession) throwIfExtensionCommand(text string) {
+// throwIfExtensionCommand returns an error when text names a registered
+// extension command — queued messages (Steer/FollowUp) cannot execute
+// extension commands inline (TS throws a catchable Error,
+// agent-session.ts:1251-1261).
+func (s *AgentSession) throwIfExtensionCommand(text string) error {
 	spaceIndex := strings.Index(text, " ")
 	commandName := text[1:]
 	if spaceIndex != -1 {
@@ -322,9 +330,10 @@ func (s *AgentSession) throwIfExtensionCommand(text string) {
 	if s.extensionRunner != nil {
 		cmd := s.extensionRunner.GetCommand(commandName)
 		if cmd != nil {
-			panic(fmt.Sprintf("Extension command \"/%s\" cannot be queued. Use prompt() or execute the command when not streaming.", commandName))
+			return fmt.Errorf("Extension command \"/%s\" cannot be queued. Use prompt() or execute the command when not streaming.", commandName)
 		}
 	}
+	return nil
 }
 
 // ============================================================================
