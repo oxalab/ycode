@@ -137,23 +137,31 @@ func (s *AgentSession) handleRetryableError(message llm.AssistantMessage) bool {
 		}
 	}
 
-	// Wait with exponential backoff (abortable)
+	// Wait with exponential backoff (abortable). backoffAbort is this cycle's
+	// abort signal; retryChan stays non-nil across the retried turn (TS:
+	// _retryPromise resolves only when the whole chain settles).
+	s.retryMu.Lock()
+	abort := make(chan struct{})
+	s.backoffAbort = abort
+	s.retryMu.Unlock()
+
 	go func() {
-		defer func() {
-			// Clear the channel on BOTH branches so the next retryable
-			// agent_end isn't blocked by createRetryPromiseForAgentEnd's
-			// "already created" guard (TS: _retryPromise = undefined).
-			s.retryMu.Lock()
-			s.retryChan = nil
-			s.retryMu.Unlock()
-		}()
+		timer := time.NewTimer(time.Duration(delayMs) * time.Millisecond)
+		defer timer.Stop()
 		select {
-		case <-time.After(time.Duration(delayMs) * time.Millisecond):
-			// Retry via continue — use goroutine to break out of event handler chain
-			s.Agent.Continue(context.Background())
-		case <-s.retryChan:
-			// Aborted during wait
+		case <-timer.C:
 			s.retryMu.Lock()
+			s.backoffAbort = nil
+			s.retryMu.Unlock()
+			if err := s.Agent.Continue(context.Background()); err != nil {
+				// The chain can't proceed (e.g. another prompt started).
+				// Settle it so waitForRetry can't block forever (TS swallows
+				// this error via .catch(() => {})).
+				s.resolveRetry()
+			}
+		case <-abort:
+			s.retryMu.Lock()
+			s.backoffAbort = nil
 			attempt := s.retryAttempt
 			s.retryAttempt = 0
 			s.retryMu.Unlock()
@@ -164,25 +172,27 @@ func (s *AgentSession) handleRetryableError(message llm.AssistantMessage) bool {
 				RetryAttempt: attempt,
 				RetryError:  "Retry cancelled",
 			})
+			// Chain resolution is AbortRetry's job (it calls resolveRetry).
 		}
 	}()
 
 	return true
 }
 
-// AbortRetry cancels in-progress retry. Signals the waiting goroutine via
-// retryChan (the TS equivalent aborts the retry sleep's AbortController); the
-// goroutine emits auto_retry_end and clears the channel.
+// AbortRetry cancels in-progress retry: signals the backoff sleep, then
+// resolves the retry chain (TS abortRetry = abort the sleep's
+// AbortController + _resolveRetry, agent-session.ts:2511-2515).
 func (s *AgentSession) AbortRetry() {
 	s.retryMu.Lock()
-	ch := s.retryChan
+	abort := s.backoffAbort
 	s.retryMu.Unlock()
-	if ch != nil {
+	if abort != nil {
 		select {
-		case ch <- struct{}{}:
+		case abort <- struct{}{}:
 		default:
 		}
 	}
+	s.resolveRetry()
 }
 
 // --- Helpers ---
@@ -227,8 +237,11 @@ KEYNOTES:
     BEFORE processAgentEvent runs. This ensures the retry promise exists when
     processAgentEvent calls handleRetryableError.
 
- 5. The retry wait uses a goroutine with select on time.After vs retryChan.
-    This mirrors TS's sleep() with AbortController signal.
+  5. The retry wait uses a goroutine with select on its timer vs backoffAbort
+    (the per-cycle abort signal). This mirrors TS's sleep() with
+    AbortController signal. retryChan is NOT cleared when the backoff ends —
+    it spans the whole chain and is cleared by resolveRetry.
 
- 6. resolveRetry is defined in agent_session.go — sends to retryChan.
+  6. resolveRetry is defined in agent_session.go — delivers a token to
+    waitForRetry waiters and clears retryChan.
 */

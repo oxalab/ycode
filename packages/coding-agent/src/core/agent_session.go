@@ -50,6 +50,7 @@ type AgentSession struct {
 	retryMu       sync.Mutex
 	retryAttempt  int
 	retryChan     chan struct{}
+	backoffAbort  chan struct{} // per-backoff-cycle abort signal (guarded by retryMu)
 
 	// Bash execution state
 	bashAbortMu       sync.Mutex // guards bashAbort (touched from RPC handler goroutines)
@@ -120,10 +121,10 @@ func NewAgentSession(config AgentSessionConfig) *AgentSession {
 		}),
 		agentEventQueue:    make(chan func(), 256),
 		// retryChan starts nil (TS: _retryPromise starts undefined). It is
-		// created only when a retry is actually initiated and cleared when the
-		// retry settles — see createRetryPromiseForAgentEnd / resolveRetry.
-		// Buffering a token at construction caused every retry wait to consume
-		// a stale token and self-cancel.
+		// created when a retry chain starts and cleared only when the whole
+		// chain settles (success / retries exhausted / abort) — mirroring the
+		// _retryPromise span. Buffering a token at construction caused every
+		// retry wait to consume a stale token and self-cancel.
 		retryChan:          nil,
 		baseToolDefinitions: make(map[string]extensions.ToolDefinition),
 		toolRegistry:       make(map[string]any),
@@ -298,8 +299,10 @@ func (s *AgentSession) processAgentEvent(event sdk.AgentEvent) {
 func (s *AgentSession) resolveRetry() {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
-	// No active retry → no-op (TS: resolveRetry() no-ops when _retryPromise is
-	// undefined). The channel is drained/cleared by the retry goroutine.
+	// No active retry → no-op (TS: _resolveRetry() no-ops when _retryPromise
+	// is undefined). Deliver a token to any waitForRetry waiter, then clear
+	// the channel: retryChan spans the whole retry chain (all backoffs +
+	// retried turns), like TS _retryPromise.
 	if s.retryChan == nil {
 		return
 	}
@@ -307,6 +310,7 @@ func (s *AgentSession) resolveRetry() {
 	case s.retryChan <- struct{}{}:
 	default:
 	}
+	s.retryChan = nil
 }
 
 // Extension event dispatch — see agent_session_extensions.go (Phase 11.6)
