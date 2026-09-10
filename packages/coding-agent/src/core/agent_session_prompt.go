@@ -237,8 +237,29 @@ func (s *AgentSession) Prompt(text string, opts *PromptOptions) error {
 	}
 
 	// Send the full messages array to the agent (normalizePromptInput accepts
-	// []AgentMessage and passes it through).
-	return s.Agent.Prompt(context.Background(), messages)
+	// []AgentMessage and passes it through), then wait for any retry chain
+	// the turn initiated to settle (TS: `await this.waitForRetry()`,
+	// agent-session.ts:1110) — print mode reads final state right after.
+	if err := s.Agent.Prompt(context.Background(), messages); err != nil {
+		return err
+	}
+	s.waitForRetry()
+	return nil
+}
+
+// waitForRetry blocks until any in-flight retry chain settles (TS
+// agent-session.ts:2521-2527). Loops because a retried turn can start another
+// backoff cycle before the chain resolves.
+func (s *AgentSession) waitForRetry() {
+	for {
+		s.retryMu.Lock()
+		ch := s.retryChan
+		s.retryMu.Unlock()
+		if ch == nil {
+			return
+		}
+		<-ch
+	}
 }
 
 // ============================================================================
@@ -468,6 +489,10 @@ func (s *AgentSession) SendUserMessage(text string, images []any) error {
 // ============================================================================
 
 func (s *AgentSession) Abort() {
+	// Cancel a pending retry backoff first (TS abort() → abortRetry(),
+	// agent-session.ts:1388) — without this a retry could fire after the
+	// user aborted, and waitForRetry would never release.
+	s.AbortRetry()
 	if s.compactionAbort != nil {
 		s.compactionAbort()
 		s.compactionAbort = nil
@@ -480,10 +505,12 @@ func (s *AgentSession) Abort() {
 		s.branchSummaryAbort()
 		s.branchSummaryAbort = nil
 	}
+	s.bashAbortMu.Lock()
 	if s.bashAbort != nil {
 		s.bashAbort()
 		s.bashAbort = nil
 	}
+	s.bashAbortMu.Unlock()
 	s.Agent.Abort()
 }
 
