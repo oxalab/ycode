@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 14 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 15 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -166,6 +166,23 @@
 
 ## ✅ FIXED — Core session
 
+### 14. `waitForRetry()` after `agent.prompt()` has no Go counterpart
+- **Was:** NOT moot (audit's "may be moot" disproven). `Prompt()` returned at
+  the initial agent_end: print mode's `extractPrintResult` raced the retry
+  pipeline (exit 1 even when a retry would succeed), multi-message print sent
+  the next prompt during backoff so the retry's `Continue` failed
+  "already processing" and was silently dropped. Also `Abort()` never called
+  `AbortRetry()` (TS :1388) — a retry could fire after the user aborted.
+- **Fix:** `retryChan` now spans the whole retry chain (all backoffs +
+  retried turns, like TS `_retryPromise`); per-cycle aborts moved to a new
+  `backoffAbort` channel. `resolveRetry` nils the chan (also kills a
+  latent stale-token instant-cancel after max-retries). `Prompt()` calls new
+  `waitForRetry()` (TS :1108-1110, :2521-2527); `Abort()` calls
+  `AbortRetry()`; `Continue` errors settle the chain so the wait can't
+  deadlock. `Abort()`'s unguarded `bashAbort` access now uses `bashAbortMu`.
+  Tests: `agent_session_retry_test.go`.
+- **Reference:** agent-session.ts:1108-1110, 1388, 2432-2527.
+
 ### 13. `throwIfExtensionCommand` panics instead of erroring
 - **Was:** `panic(fmt.Sprintf(...))` in a library path; an RPC
   `steer`/`follow_up` of an extension command killed the process (dispatch
@@ -178,11 +195,6 @@
 ---
 
 ## 🟠 OPEN — Core session (remaining)
-
-### 14. `waitForRetry()` after `agent.prompt()` has no Go counterpart
-- agent-session.ts:1110 — Go fires `Prompt` and returns; check whether the
-  retry-promise timing needs an equivalent wait (may be moot after fix #2 —
-  verify retry now actually runs end-to-end with a live provider).
 
 ### 15. `turn_end` events stuff the message into `RetryError`
 - `agent_session.go` `EventAgentEnd`/`turn_end` path — shape looks wrong;
