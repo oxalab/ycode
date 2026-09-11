@@ -671,7 +671,9 @@ func agentEventToSessionEvent(event sdk.AgentEvent) AgentSessionEvent {
 	case sdk.EventTurnStart:
 		return AgentSessionEvent{EventType: "turn_start"}
 	case sdk.EventTurnEnd:
-		return AgentSessionEvent{EventType: "turn_end", RetryError: fmt.Sprintf("%v", e.Message)}
+		// Structured payload (TS turn_end { message, toolResults }) — never
+		// routed through RetryError; that field belongs to auto_retry_* only.
+		return AgentSessionEvent{EventType: "turn_end", Message: e.Message, ToolResults: e.ToolResults}
 	case sdk.EventMessageStart:
 		return AgentSessionEvent{EventType: "message_start"}
 	case sdk.EventMessageEnd:

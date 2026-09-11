@@ -83,6 +83,11 @@ type AgentSessionEvent struct {
 	RetryDelayMs 	int
 	RetryError 		string
 	RetrySuccess	bool
+
+	// Turn-end payload — structured, mirrors TS turn_end { message, toolResults }
+	// (pi/packages/agent/src/types.ts:401). Never routed through RetryError.
+	Message      any
+	ToolResults  []llm.ToolResultMessage[any]
 }
 
 type AgentSessionEventListener func(event AgentSessionEvent)
