@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 15 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 16 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -166,6 +166,23 @@
 
 ## ✅ FIXED — Core session
 
+### 15. `turn_end` events stuff the message into `RetryError`
+- **Was:** `agentEventToSessionEvent` stringified the whole message struct into
+  `RetryError` on every `turn_end` (`fmt.Sprintf("%v", e.Message)`) — wire
+  clients (RPC/print JSON) got a garbage blob on every turn and no payload.
+  Verified: the three real `auto_retry_*` emit sites already match TS 1:1.
+- **Fix:** `AgentSessionEvent` gains structured `Message any` +
+  `ToolResults []llm.ToolResultMessage[any]`; `turn_end` carries them and
+  leaves `RetryError` empty (mirrors TS turn_end `{ message, toolResults }`,
+  pi/packages/agent/src/types.ts:401). Tests: `agent_session_events_test.go`.
+- **Noted (adjacent, unfixed):** `auto_retry_end` wire field naming
+  (`RetrySuccess/RetryAttempt/RetryError` vs TS `success/attempt/finalError`)
+  — part of the documented PascalCase event-wire divergence; Go TUI never
+  displays retry-failure `RetryError` (TS shows "Retry failed after N
+  attempts: …") — deferred to the TUI-chrome redo tier.
+- **Reference:** pi/packages/agent/src/types.ts:401; agent-session.ts:139-140,
+  561-568, 2451-2492.
+
 ### 14. `waitForRetry()` after `agent.prompt()` has no Go counterpart
 - **Was:** NOT moot (audit's "may be moot" disproven). `Prompt()` returned at
   the initial agent_end: print mode's `extractPrintResult` raced the retry
@@ -195,10 +212,6 @@
 ---
 
 ## 🟠 OPEN — Core session (remaining)
-
-### 15. `turn_end` events stuff the message into `RetryError`
-- `agent_session.go` `EventAgentEnd`/`turn_end` path — shape looks wrong;
-  verify against TS event payloads.
 
 ### 16. `GetAvailableThinkingLevels` returns `[off]` for no-model
 - agent-session.ts:1553 returns all five; `agent_session_model.go:230`
