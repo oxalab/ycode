@@ -229,9 +229,11 @@ func (s *AgentSession) CycleThinkingLevel() *sdk.ThinkingLevel {
 
 func (s *AgentSession) GetAvailableThinkingLevels() []sdk.ThinkingLevel {
 	model := s.GetModel()
-	if model.ID == "" || !model.Reasoning {
+	if model.ID != "" && !model.Reasoning {
 		return []sdk.ThinkingLevel{sdk.ThinkingOff}
 	}
+	// No model yet → full list (TS agent-session.ts:1553-1556 returns
+	// THINKING_LEVELS when this.model is undefined).
 	return ThinkingLevels
 }
 
