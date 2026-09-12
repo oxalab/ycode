@@ -42,6 +42,15 @@ func TestParseArgs_ModeValidation(t *testing.T) {
 			if !c.set && a.Mode != "" {
 				t.Errorf("Mode = %q, want unset", a.Mode)
 			}
+			// The value is consumed even when invalid (audit #24) — it must
+			// never leak into the positional messages, and --mode is silent
+			// on invalid input (TS parity).
+			if len(a.Messages) != 0 {
+				t.Errorf("Messages = %v, want empty — flag value leaked", a.Messages)
+			}
+			if len(a.Diagnostics) != 0 {
+				t.Errorf("Diagnostics = %v, want none for --mode", a.Diagnostics)
+			}
 		})
 	}
 }

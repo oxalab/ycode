@@ -141,10 +141,12 @@ func ParseArgs(args []string) Args {
 			result.Version = true
 
 		case arg == "--mode" && hasNext:
+			// Consume the value before validating (TS args.ts:74-78) — an
+			// invalid mode must not leak into the positional messages.
 			mode := next
+			i++
 			if mode == string(ModeText) || mode == string(ModeJSON) || mode == string(ModeRPC) {
 				result.Mode = Mode(mode)
-				i++
 			}
 
 		case arg == "--continue" || arg == "-c":
