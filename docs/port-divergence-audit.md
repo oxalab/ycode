@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 16 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 17 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -166,6 +166,18 @@
 
 ## ✅ FIXED — Core session
 
+### 16. `GetAvailableThinkingLevels` returns `[off]` for no-model
+- **Was:** no model → `[off]`; TS returns all five `THINKING_LEVELS` when
+  `this.model` is undefined (agent-session.ts:1553-1556, :238) — the thinking
+  picker/settings offered only "off" before a model was chosen.
+- **Fix:** only a *selected* non-reasoning model narrows the list to `[off]`;
+  no-model and reasoning-model both return the full list. Set/cycle behavior
+  already matched TS. Tests: `agent_session_model_test.go`.
+- **Noted (structural, unfixed):** TS additionally filters reasoning models
+  per-model via `thinkingLevelMap` (can drop levels, include `xhigh`); Go's
+  `llm.Model` has no such field, so reasoning models always get the fixed 5.
+- **Reference:** agent-session.ts:1553-1556, :238; models.ts:48-59.
+
 ### 15. `turn_end` events stuff the message into `RetryError`
 - **Was:** `agentEventToSessionEvent` stringified the whole message struct into
   `RetryError` on every `turn_end` (`fmt.Sprintf("%v", e.Message)`) — wire
@@ -208,14 +220,6 @@
   propagate it and rpc_mode.go's existing `errResp` plumbing turns it into an
   RPC error response. Tests: `agent_session_prompt_test.go`.
 - **Reference:** agent-session.ts:1251-1261, :1184, :1204.
-
----
-
-## 🟠 OPEN — Core session (remaining)
-
-### 16. `GetAvailableThinkingLevels` returns `[off]` for no-model
-- agent-session.ts:1553 returns all five; `agent_session_model.go:230`
-  returns `[off]`.
 
 ---
 
