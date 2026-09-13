@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 17 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 18 of 32 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -260,10 +260,13 @@
 
 ## 🟡 OPEN — CLI / modes
 
-### 24. `--mode <invalid>` not consumed → becomes the prompt
-- TS args.ts:74-78 consumes the value then validates; Go `cli/args.go:143-148`
-  has `i++` inside the validity check. `ycode --mode bogus "real prompt"` →
-  prompts with "bogus". (`--thinking` does it correctly nearby — copy that.)
+### 24. `--mode <invalid>` not consumed → becomes the prompt — ✅ FIXED (2026-09-10)
+- **Was:** the `i++` sat inside the validity check (args.go:143-148) —
+  `ycode --mode bogus "real prompt"` sent "bogus" as the initial prompt.
+- **Fix:** value consumed unconditionally before validating, silent on
+  invalid (TS args.ts:74-78 sends no diagnostic for --mode). Locked by
+  `TestParseArgs_ModeValidation` (messages empty, no diagnostics).
+- **Reference:** pi/packages/coding-agent/src/cli/args.ts:74-78.
 
 ### 25. URL-scheme sources treated as local paths
 - TS paths.ts:23-37 — non-local prefixes `npm: git: github: http: https: ssh:`;
