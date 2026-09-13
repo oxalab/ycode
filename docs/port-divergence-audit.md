@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 18 of 32 findings fixed
+> **Created:** 2026-08-26 · **Status:** 18 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -268,8 +268,7 @@
   `TestParseArgs_ModeValidation` (messages empty, no diagnostics).
 - **Reference:** pi/packages/coding-agent/src/cli/args.ts:74-78.
 
-### 25. URL-scheme sources treated as local paths
-- TS paths.ts:23-37 — non-local prefixes `npm: git: github: http: https: ssh:`;
+### 25. URL-scheme sources treated as local paths- TS paths.ts:23-37 — non-local prefixes `npm: git: github: http: https: ssh:`;
   Go `helpers.go:150-155` uses `filepath.IsAbs(p) || Contains(p, "://")` —
   `github:owner/repo` becomes `<cwd>/github:owner/repo`. Affects
   `--extension/-e --skill --prompt-template --theme`.
@@ -306,6 +305,19 @@
 ### 32. `completeSimple` ignores `maxTokens`
 - TS clamps to `min(0.8×reserve, model.maxTokens)`; Go computes the constants
   but never passes them → summaries can blow the budget.
+
+### 33. Interactive TUI ignores the CLI initial message — ✅ FIXED (2026-09-10, found during #24 live check)
+- **Was:** `launchInteractivePi` discarded `cli.InitialMessageResult`
+  (runtime_pi.go) and `Options.InitialMessage` was declared but never read —
+  `ycode "hi"` opened the TUI with an empty session. TS sends `initialMessage`
+  (+`initialImages`), then leftover positionals as sequential prompts
+  (interactive-mode.ts:738-756).
+- **Fix:** `launchInteractivePi` threads `InitialMessage`/`InitialImages`/
+  `InitialMessages` into Options; `Run()` calls `submitInitialPrompts()` after
+  engine start — one goroutine, sequential Prompts (ordering preserved by #14),
+  each rendering the user bubble via `sendInitialPrompt` (handleSubmit's tail
+  without editor history or slash/bash routing).
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:738-756.
 
 ---
 
