@@ -13,18 +13,22 @@ import (
 
 // launchInteractivePi runs the pi-tui interactive TUI. It intentionally mirrors
 // launchInteractive's signature so the gate in launchInteractive can dispatch to
-// either. Only runtime + settingsManager are consumed in P0.
+// either. Consumes runtime, settingsManager, and the CLI initial prompts
+// (finding #33); modelFallback/migratedProviders are still ignored here.
 func launchInteractivePi(
-	_ cli.Args,
+	parsed cli.Args,
 	runtime *core.AgentSessionRuntime,
-	_ cli.InitialMessageResult,
+	initial cli.InitialMessageResult,
 	_ string,
 	_ []string,
 	settingsManager *core.SettingsManager,
 ) {
 	orch := interactive.NewOrchestrator(interactive.Options{
-		Runtime:  runtime,
-		Settings: settingsManager,
+		Runtime:         runtime,
+		Settings:        settingsManager,
+		InitialMessage:  initial.InitialMessage,
+		InitialImages:   initial.Images,
+		InitialMessages: parsed.Messages,
 	})
 	orch.Run()
 }
