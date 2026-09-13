@@ -21,16 +21,19 @@ import (
 	core "ycode/packages/coding-agent/src/core"
 	"ycode/packages/coding-agent/src/core/extensions"
 	"ycode/packages/coding-agent/src/core/tui/theme"
+	llm "ycode/packages/llm/src"
 )
 
 // Options configures the Orchestrator. It mirrors the args launchInteractive
 // receives (cmd/ycode/runtime.go); only Runtime + Settings are used so far.
 type Options struct {
-	Runtime        *core.AgentSessionRuntime
-	Settings       *core.SettingsManager
-	InitialMessage string
-	ModelFallback  string
-	Verbose        bool
+	Runtime         *core.AgentSessionRuntime
+	Settings        *core.SettingsManager
+	InitialMessage  string
+	InitialImages   []*llm.ImageContent
+	InitialMessages []string
+	ModelFallback   string
+	Verbose         bool
 }
 
 // Orchestrator owns the pi-tui engine + static container tree.
@@ -64,6 +67,11 @@ type Orchestrator struct {
 	headerExpandable *ExpandableText // built by buildHeader; toggled by app.tools.expand
 	headerExpanded   bool
 	verbose          bool
+
+	// CLI initial prompts (finding #33) — sent once the engine is running.
+	initialMessage  string
+	initialImages   []*llm.ImageContent
+	initialMessages []string
 
 	streamingComp *AssistantMessage // in-progress assistant message (P3a)
 	unsubAgent    func()            // SDK agent event unsubscribe
@@ -111,6 +119,9 @@ func NewOrchestrator(opts Options) *Orchestrator {
 		kb:       kb,
 		editor:   editor,
 		verbose:  opts.Verbose,
+		initialMessage:  opts.InitialMessage,
+		initialImages:   opts.InitialImages,
+		initialMessages: opts.InitialMessages,
 		toolComps: map[string]*ToolExecution{},
 		bashComps: map[string]*BashExecution{},
 		done:     make(chan struct{}),
@@ -166,6 +177,7 @@ func (o *Orchestrator) Run() {
 	o.unsubSession = o.subscribeSession()
 	o.startFooterWatch()
 	o.engine.Start()
+	o.submitInitialPrompts()
 	<-o.done
 }
 
@@ -292,6 +304,50 @@ func (o *Orchestrator) handleSubmit(text string) {
 	o.chat.AddChild(components.NewSpacer(1))
 	o.chat.AddChild(NewUserMessage(trimmed, o.th, o.mdTheme()))
 	go func() { _ = o.session.Prompt(trimmed, nil) }()
+}
+
+// submitInitialPrompts sends the CLI initial message (+ images) and any
+// remaining positional messages, in order (TS interactive-mode.ts:738-756).
+// Sequential Prompts on one goroutine preserve ordering — Prompt settles the
+// turn and any retry chain before returning (audit #14).
+func (o *Orchestrator) submitInitialPrompts() {
+	if o.initialMessage == "" && len(o.initialMessages) == 0 {
+		return
+	}
+	go func() {
+		if o.initialMessage != "" {
+			o.sendInitialPrompt(o.initialMessage, o.initialImages)
+		}
+		for _, m := range o.initialMessages {
+			o.sendInitialPrompt(m, nil)
+		}
+	}()
+}
+
+// sendInitialPrompt renders the user bubble and sends the prompt — the
+// handleSubmit tail without editor history or slash/bash routing (TS calls
+// session.prompt directly for the initial message). Runs on the initial-prompt
+// goroutine, so Mutate is the sanctioned mutation path.
+func (o *Orchestrator) sendInitialPrompt(text string, images []*llm.ImageContent) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return
+	}
+	if o.session.GetModel().ID == "" {
+		o.engine.Mutate(func() {
+			o.addNotice("No model configured. Use /login to add a provider, then /model to select one.")
+		})
+		return
+	}
+	o.engine.Mutate(func() {
+		o.chat.AddChild(components.NewSpacer(1))
+		o.chat.AddChild(NewUserMessage(trimmed, o.th, o.mdTheme()))
+	})
+	imgs := make([]any, len(images))
+	for i, img := range images {
+		imgs[i] = img
+	}
+	go func() { _ = o.session.Prompt(trimmed, &core.PromptOptions{Images: imgs}) }()
 }
 
 // handleChange recomputes the bash-mode indicator and editor border color on
