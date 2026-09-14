@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 18 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 19 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -268,7 +268,21 @@
   `TestParseArgs_ModeValidation` (messages empty, no diagnostics).
 - **Reference:** pi/packages/coding-agent/src/cli/args.ts:74-78.
 
-### 25. URL-scheme sources treated as local paths- TS paths.ts:23-37 — non-local prefixes `npm: git: github: http: https: ssh:`;
+### 25. URL-scheme sources treated as local paths — ✅ FIXED (2026-09-10)
+- **Was:** `resolveOneCliPath` (cmd/ycode/helpers.go) treated a value as
+  non-local only if absolute or containing `://` — `--skill github:owner/repo`
+  cwd-joined into `<cwd>/github:owner/repo`, then failed `os.Stat` → error
+  diagnostic + exit 1. Core already had the correct six-prefix `isLocalPath`
+  (resource_loader.go) — only the CLI helper was wrong.
+- **Fix:** exported `core.IsLocalPath`; `resolveOneCliPath` now passes the six
+  schemes (npm: git: github: http: https: ssh:) through untouched (TS
+  paths.ts:23-37 parity). The `filepath.IsAbs` clause stays — Go's
+  `filepath.Join`, unlike TS `resolve()`, doesn't treat absolute operands as
+  final. Locked by `TestResolveCliPaths`.
+- **Noted (unrelated):** `PackageManager` interface (resource_loader.go:90)
+  declares a 2-arg `ResolveExtensionSources` while `DefaultPackageManager`
+  implements a 3-arg error-returning version — wiring inconsistency, separate look.
+- **Reference:** pi/packages/coding-agent/src/utils/paths.ts:23-37; main.ts:381-383.- TS paths.ts:23-37 — non-local prefixes `npm: git: github: http: https: ssh:`;
   Go `helpers.go:150-155` uses `filepath.IsAbs(p) || Contains(p, "://")` —
   `github:owner/repo` becomes `<cwd>/github:owner/repo`. Affects
   `--extension/-e --skill --prompt-template --theme`.
