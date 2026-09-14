@@ -148,7 +148,12 @@ func resolveCliPaths(cwd string, paths []string) []string {
 // resolveOneCliPath is the per-element helper extracted for testability: relative
 // non-URL paths are joined to cwd (TS isLocalPath: not absolute and has no "://").
 func resolveOneCliPath(cwd, p string) string {
-	if filepath.IsAbs(p) || strings.Contains(p, "://") {
+	// Same rule as the resource loader (TS paths.ts isLocalPath): package
+	// sources like github:owner/repo or npm:pkg are identifiers, not paths —
+	// they pass through untouched instead of being cwd-joined (audit #25).
+	// The IsAbs clause stays because filepath.Join, unlike TS resolve(), does
+	// not treat an absolute operand as final.
+	if filepath.IsAbs(p) || !core.IsLocalPath(p) {
 		return p
 	}
 	return filepath.Join(cwd, p)
