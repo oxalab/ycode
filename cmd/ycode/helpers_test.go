@@ -105,9 +105,12 @@ func TestResolveCliPaths(t *testing.T) {
 	if !filepath.IsAbs(absPath) {
 		t.Fatalf("sanity: %q is not absolute on this platform", absPath)
 	}
-	got := resolveCliPaths("/work", []string{"./src", absPath, "https://x/y", "rel/file"})
-	if len(got) != 4 {
-		t.Fatalf("len = %d, want 4: %v", len(got), got)
+	got := resolveCliPaths("/work", []string{
+		"./src", absPath, "https://x/y", "rel/file",
+		"github:owner/repo", "npm:pkg", "git:host/x/y", "ssh:git@host/x",
+	})
+	if len(got) != 8 {
+		t.Fatalf("len = %d, want 8: %v", len(got), got)
 	}
 	if !strings.HasSuffix(got[0], "src") || !strings.Contains(got[0], "work") {
 		t.Errorf("relative ./src resolved to %q, want it joined under /work", got[0])
@@ -120,6 +123,13 @@ func TestResolveCliPaths(t *testing.T) {
 	}
 	if got[3] == "rel/file" {
 		t.Errorf("rel/file left relative (%q), want joined under /work", got[3])
+	}
+	// Package-source identifiers pass through untouched (audit #25) — they
+	// must not be cwd-joined into local paths.
+	for i, want := range []string{"github:owner/repo", "npm:pkg", "git:host/x/y", "ssh:git@host/x"} {
+		if got[4+i] != want {
+			t.Errorf("source %d = %q, want untouched %q", i, got[4+i], want)
+		}
 	}
 }
 
