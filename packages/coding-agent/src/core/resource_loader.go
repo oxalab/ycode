@@ -1126,6 +1126,12 @@ func isLocalPath(value string) bool {
 	return true
 }
 
+// IsLocalPath reports whether p is a local filesystem path (as opposed to a
+// package source like npm: git: github: http: https: ssh:). Exported for the
+// CLI path resolver (cmd/ycode), which must apply the same rule as the
+// resource loader (TS paths.ts isLocalPath).
+func IsLocalPath(p string) bool { return isLocalPath(p) }
+
 // ============================================================================
 // Shared Helpers
 // ============================================================================
