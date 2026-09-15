@@ -1,6 +1,7 @@
 package modes
 
 import (
+	"reflect"
 	"testing"
 
 	llm "ycode/packages/llm/src"
@@ -25,7 +26,7 @@ func assistantMsg(stop llm.StopReason, errMsg string, texts []string, extra ...l
 // TestExtractPrintResult_Empty verifies no messages yields no output / exit 0.
 func TestExtractPrintResult_Empty(t *testing.T) {
 	r := extractPrintResult(nil)
-	if r.text != "" || r.exitCode != 0 || r.errMsg != "" {
+	if len(r.texts) != 0 || r.exitCode != 0 || r.errMsg != "" {
 		t.Errorf("empty → %+v, want zero", r)
 	}
 }
@@ -38,17 +39,18 @@ func TestExtractPrintResult_LastNotAssistant(t *testing.T) {
 		llm.UserMessage{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: "hi"}}},
 	}
 	r := extractPrintResult(msgs)
-	if r.text != "" || r.exitCode != 0 {
+	if len(r.texts) != 0 || r.exitCode != 0 {
 		t.Errorf("non-assistant last → %+v, want no output (must not scan back to earlier assistant)", r)
 	}
 }
 
-// TestExtractPrintResult_TextBlocks verifies text content blocks are concatenated.
+// TestExtractPrintResult_TextBlocks verifies each text block becomes its own
+// output line — blocks are never fused (audit #26, TS print-mode.ts:138-142).
 func TestExtractPrintResult_TextBlocks(t *testing.T) {
 	msgs := []llm.Message{assistantMsg(llm.StopReasonStop, "", []string{"Hello ", "world"})}
 	r := extractPrintResult(msgs)
-	if r.text != "Hello world" || r.exitCode != 0 {
-		t.Errorf("text blocks → %+v, want text='Hello world' exit=0", r)
+	if !reflect.DeepEqual(r.texts, []string{"Hello ", "world"}) || r.exitCode != 0 {
+		t.Errorf("text blocks → %+v, want texts=[Hello   world] exit=0", r)
 	}
 }
 
@@ -58,8 +60,8 @@ func TestExtractPrintResult_SkipsNonTextContent(t *testing.T) {
 	msgs := []llm.Message{assistantMsg(llm.StopReasonStop, "", []string{"only this"},
 		llm.ToolCall{Type: "tool_use"})}
 	r := extractPrintResult(msgs)
-	if r.text != "only this" {
-		t.Errorf("non-text filtered → %q, want 'only this'", r.text)
+	if !reflect.DeepEqual(r.texts, []string{"only this"}) {
+		t.Errorf("non-text filtered → %q, want [only this]", r.texts)
 	}
 }
 
@@ -68,7 +70,7 @@ func TestExtractPrintResult_SkipsNonTextContent(t *testing.T) {
 func TestExtractPrintResult_Error(t *testing.T) {
 	msgs := []llm.Message{assistantMsg(llm.StopReasonError, "upstream blew up", nil)}
 	r := extractPrintResult(msgs)
-	if r.exitCode != 1 || r.errMsg != "upstream blew up" || r.text != "" {
+	if r.exitCode != 1 || r.errMsg != "upstream blew up" || len(r.texts) != 0 {
 		t.Errorf("error stop → %+v, want exit=1 errMsg='upstream blew up'", r)
 	}
 }

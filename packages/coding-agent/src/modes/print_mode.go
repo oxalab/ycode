@@ -41,7 +41,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"syscall"
 
 	core "ycode/packages/coding-agent/src/core"
@@ -165,8 +164,12 @@ func RunPrintMode(runtimeHost *core.AgentSessionRuntime, options PrintModeOption
 		if result.exitCode != 0 {
 			fmt.Fprintln(os.Stderr, result.errMsg)
 			exitCode = result.exitCode
-		} else if result.text != "" {
-			fmt.Fprintln(os.Stdout, result.text)
+		} else {
+			// One line per text block (TS print-mode.ts:138-142) — blocks are
+			// never fused.
+			for _, text := range result.texts {
+				fmt.Fprintln(os.Stdout, text)
+			}
 		}
 	}
 
@@ -175,16 +178,17 @@ func RunPrintMode(runtimeHost *core.AgentSessionRuntime, options PrintModeOption
 
 // printResult captures the text-mode outcome of the final assistant turn.
 type printResult struct {
-	text     string // concatenated text-block content (success)
-	exitCode int    // 1 on error/aborted, else 0
-	errMsg   string // stderr message when exitCode != 0
+	texts    []string // per-text-block content, one stdout line each (success)
+	exitCode int      // 1 on error/aborted, else 0
+	errMsg   string   // stderr message when exitCode != 0
 }
 
 // extractPrintResult inspects the LAST message and produces the text-mode output
 // (pure, extracted for testability). Mirrors the TS text-mode block: only the
 // final message is considered, and only when it is an assistant message. An
 // error/aborted stop reason yields exit 1 (with the assistant's error message or
-// a "Request <reason>" fallback); otherwise the text content blocks are joined.
+// a "Request <reason>" fallback); otherwise one output entry per text block
+// (each printed on its own line — blocks are never fused).
 func extractPrintResult(messages []llm.Message) printResult {
 	if len(messages) == 0 {
 		return printResult{}
@@ -203,17 +207,19 @@ func extractPrintResult(messages []llm.Message) printResult {
 		return printResult{exitCode: 1, errMsg: msg}
 	}
 
-	var sb strings.Builder
+	var texts []string
 	for _, block := range am.Content {
 		// ContentBlock concrete values may be stored as value or pointer; handle both.
+		// Every text block gets its own entry — even an empty one (TS emits
+		// a bare "\n" per text block).
 		switch c := block.(type) {
 		case *llm.TextContent:
 			if c != nil {
-				sb.WriteString(c.Text)
+				texts = append(texts, c.Text)
 			}
 		case llm.TextContent:
-			sb.WriteString(c.Text)
+			texts = append(texts, c.Text)
 		}
 	}
-	return printResult{text: sb.String()}
+	return printResult{texts: texts}
 }
