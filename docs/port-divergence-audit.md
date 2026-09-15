@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 19 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 20 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -287,9 +287,17 @@
   `github:owner/repo` becomes `<cwd>/github:owner/repo`. Affects
   `--extension/-e --skill --prompt-template --theme`.
 
-### 26. Print mode collapses per-block newlines
-- TS print-mode.ts:138-142 writes `text\n` per block; Go concatenates then one
-  `Fprintln` → `["A","B"]` prints `AB\n` not `A\nB\n`.
+### 26. Print mode collapses per-block newlines — ✅ FIXED (2026-09-10)
+- **Was:** `extractPrintResult` concatenated all text blocks, then a single
+  `Fprintln` — blocks `["A","B"]` printed `"AB\n"` instead of TS's `"A\nB\n"`
+  (one `writeRawStdout(text+"\n")` per block, print-mode.ts:138-142). An
+  all-empty join also suppressed output entirely; TS emits a bare `\n` per
+  empty text block.
+- **Fix:** `printResult.texts []string` (one entry per text block, empty
+  blocks included); the text branch loops `Fprintln` per entry. Thinking
+  blocks excluded on both sides (faithful). `TestExtractPrintResult_TextBlocks`
+  inverted to assert the non-fused shape.
+- **Reference:** pi/packages/coding-agent/src/modes/print-mode.ts:128-145.
 
 ### 27. `images.autoResize` setting ignored + stub drops images
 - TS main.ts:640-644 reads the setting (default true); Go `cmd/ycode/main.go`
