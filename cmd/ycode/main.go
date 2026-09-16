@@ -181,8 +181,7 @@ func run() error {
 	}
 	core.Time("readPipedStdin")
 
-	// autoResize defaults to true: SettingsManager has no GetImageAutoResize yet.
-	initial, err := prepareInitialMessage(&parsed, cwd, true, stdinContent)
+	initial, err := prepareInitialMessage(&parsed, cwd, startupSettingsManager.GetImageAutoResize(), stdinContent)
 	if err != nil {
 		return fmt.Errorf("prepare initial message: %w", err)
 	}
