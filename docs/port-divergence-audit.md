@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 20 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 21 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -299,10 +299,26 @@
   inverted to assert the non-fused shape.
 - **Reference:** pi/packages/coding-agent/src/modes/print-mode.ts:128-145.
 
-### 27. `images.autoResize` setting ignored + stub drops images
-- TS main.ts:640-644 reads the setting (default true); Go `cmd/ycode/main.go`
-  hardcodes true, `GetImageAutoResize` doesn't exist. Interacts with the
-  documented `tools.ResizeImage` stub: oversized images get silently dropped.
+### 27. `images.autoResize` setting ignored + stub drops images — ✅ FIXED (2026-09-10)
+- **Was:** no `GetImageAutoResize` (main.go hardcoded `true`); `Settings.Images`
+  json tag was `imageSettings` where TS writes `images` (settings_types.go) —
+  the setting could never load; the session's read tool never received the
+  flag (`CreateAllToolDefinitions(cwd, nil)`) and on resize failure silently
+  attached oversized bytes instead of TS's omission note (read.go vs
+  read.ts:255-262).
+- **Fix:** `GetImageAutoResize` (default true) + `SetImageAutoResize` (writes
+  the global backing struct — save() rebuilds the merged view); tag corrected
+  to `images`; main.go reads the getter; `buildRuntime` threads it into
+  `CreateAllToolDefinitions` (TS agent-session.ts:2334-2345); read tool
+  degrades to the "[Image omitted: …]" note on resize failure.
+  Tests: `settings_manager_test.go` (default, TS-key load, setter).
+- **Noted (deferral stands):** the real `ResizeImage` implementation remains
+  the documented deferral — with default true, oversized @file images still
+  degrade to the omission note (byte-identical to TS's degraded path when its
+  resizer fails). Settings-UI toggle wiring (`auto-resize-images` item
+  unpopulated in both TUI builders) also deferred.
+- **Reference:** pi/packages/coding-agent/src/main.ts:640-644;
+  settings-manager.ts:966-976; agent-session.ts:2334-2345; read.ts:255-262.
 
 ### 28. Dialog requests lose `title`/`statusKey`; select discards `defaultIdx`
 - rpc-mode.ts:131-170 sends them; `ExtensionUIContext` signatures lack the
