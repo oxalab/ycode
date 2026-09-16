@@ -449,8 +449,11 @@ func (s *AgentSession) refreshToolRegistry(activeToolNames []string, includeAllE
 // Mirrors TS: _buildRuntime() lines 2329-2381
 func (s *AgentSession) buildRuntime(activeToolNames []string, flagValues map[string]any, includeAllExtensionTools bool) {
 	// 1. Build base tool definitions from tools package
-	
-	baseDefs := tools.CreateAllToolDefinitions(s.cwd, nil)
+	// The read tool honors images.autoResize (TS agent-session.ts:2334-2345
+	// re-reads the setting on every runtime rebuild).
+	baseDefs := tools.CreateAllToolDefinitions(s.cwd, &tools.ToolsOptions{
+		Read: &tools.ReadToolOptions{AutoResizeImages: s.SettingsManager.GetImageAutoResize()},
+	})
 	s.baseToolDefinitions = make(map[string]extensions.ToolDefinition, len(baseDefs))
 	for name, def := range baseDefs {
 		if def != nil {
