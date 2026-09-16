@@ -125,13 +125,20 @@ func CreateReadToolDefinition(cwd string, opts *ReadToolOptions) *extensions.Too
 				}
 				base64Data := base64.StdEncoding.EncodeToString(data)
 
-				// Auto-Resize if enabled
+				// Auto-Resize if enabled. On resize failure, degrade the way TS
+				// does (read.ts:255-262): a text-only "[Image omitted: …]"
+				// block instead of silently attaching oversized bytes.
 				if autoResizeImages {
 					resized, err := ResizeImage(base64Data, mimeType, 2000, 2000)
-					if err == nil && resized != nil {
-						base64Data = resized.Data
-						mimeType = resized.MimeType
+					if err != nil || resized == nil {
+						return &ToolExecuteResult{
+							Content: []llm.ContentBlock{
+								&llm.TextContent{Type: "text", Text: "[Image omitted: could not be resized below the inline image size limit.]"},
+							},
+						}, nil
 					}
+					base64Data = resized.Data
+					mimeType = resized.MimeType
 				}
 				textNote := fmt.Sprintf("Read image file [%s]", mimeType)
 				content = []llm.ContentBlock{

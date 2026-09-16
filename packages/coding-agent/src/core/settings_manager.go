@@ -582,6 +582,36 @@ func (sm *SettingsManager) GetBlockImages() bool {
 	return false
 }
 
+// GetImageAutoResize returns images.autoResize, default true (TS
+// settings-manager.ts:966-976).
+func (sm *SettingsManager) GetImageAutoResize() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.settings.Images != nil && sm.settings.Images.AutoResize != nil {
+		return *sm.settings.Images.AutoResize
+	}
+	return true
+}
+
+// SetImageAutoResize persists images.autoResize, creating the nested object if
+// absent (TS setImageAutoResize). Writes the global backing struct too —
+// save() rebuilds the merged view from global+project, so a merged-view-only
+// write would be discarded.
+func (sm *SettingsManager) SetImageAutoResize(enabled bool) {
+	sm.mu.Lock()
+	if sm.settings.Images == nil {
+		sm.settings.Images = &ImageSettings{}
+	}
+	sm.settings.Images.AutoResize = &enabled
+	if sm.global.Images == nil {
+		sm.global.Images = &ImageSettings{}
+	}
+	sm.global.Images.AutoResize = &enabled
+	sm.markModified("images", "")
+	sm.save()
+	sm.mu.Unlock()
+}
+
 func (sm *SettingsManager) GetEnabledModels() []string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

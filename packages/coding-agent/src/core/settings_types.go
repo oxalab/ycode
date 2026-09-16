@@ -95,7 +95,7 @@ type Settings struct {
 	Themes 					[]string 		`json:"themes,omitempty"`
 	EnableSkillCommands 	*bool 			`json:"enableSkillCommands"`
 	Terminal 				*TerminalSettings `json:"terminal,omitempty"`
-	Images 					*ImageSettings 	`json:"imageSettings,omitempty"`
+	Images 					*ImageSettings 	`json:"images,omitempty"`
 	EnabledModels 			[]string 		`json:"enabledModels,omitempty"`
 	DoubleEscapeAction 		*string 		`json:"doubleEscapeAction,omitempty"`
 	TreeFilterMode 			*string 		`json:"treeFilterMode,omitempty"`
