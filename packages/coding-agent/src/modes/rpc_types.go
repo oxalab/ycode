@@ -248,8 +248,12 @@ type RpcExtensionUIRequest struct {
 	// select / confirm / input / editor / notify / setTitle
 	Title       string   `json:"title,omitempty"`
 	Options     []string `json:"options,omitempty"` // select
-	Timeout     int      `json:"timeout,omitempty"` // select/confirm/input (ms)
-	Message     string   `json:"message,omitempty"` // confirm / notify
+	// DefaultIdx pre-selects a select entry. ycode extension on top of the
+	// reference's wire shape (the reference has no defaultIndex); hosts that
+	// don't know the field ignore it.
+	DefaultIdx  int      `json:"defaultIdx,omitempty"`  // select
+	Timeout     int      `json:"timeout,omitempty"`     // select/confirm/input (ms)
+	Message     string   `json:"message,omitempty"`     // confirm / notify
 	NotifyType  string   `json:"notifyType,omitempty"`
 	Placeholder string   `json:"placeholder,omitempty"` // input
 	Prefill     string   `json:"prefill,omitempty"`     // editor

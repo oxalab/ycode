@@ -109,13 +109,19 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 // thread waits; extension handlers are sequential by design, so no other JS
 // work is starved.
 //
-// JS API:
+// JS API (mirrors the reference's ExtensionUIContext, extensions/types.ts):
 //   ui.notify(message, level?)                 → void
-//   ui.status(message)                          → void
-//   await ui.input(message, placeholder?, timeoutMs?)     → string  ("" on cancel)
-//   await ui.select(options: string[], defaultIdx?, timeoutMs?)  → number  (-1 on cancel)
-//   await ui.confirm(message, timeoutMs?)       → boolean
-//   await ui.editor(message, prefill?)          → string  ("" on cancel)
+//   ui.status(key, text)                        → void
+//   await ui.input(title, placeholder?, opts?)  → string  ("" on cancel)
+//   await ui.select(title, options, opts?)      → number  (-1 on cancel;
+//                                                         the reference resolves
+//                                                         the option string)
+//   await ui.confirm(title, message, opts?)     → boolean
+//   await ui.editor(title, prefill?)            → string  ("" on cancel)
+//
+// opts is { timeout?: number, defaultIdx?: number } (the reference also takes
+// { signal }, which ycode does not support yet). A bare number in the opts
+// position is tolerated as timeoutMs.
 //
 // On error (e.g., the underlying Go function fails), the Promise rejects.
 func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
@@ -140,15 +146,18 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	obj.SetPropertyStr("notify", notifyFn)
 	notifyFn.Free() // GetPropertyStr returns a reference; freeing the ref is safe after assign
 
-	// ui.status(message)
+	// ui.status(key, text)
 	ctx.SetFunc("__ui_status", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
-		msg := ""
+		key, msg := "", ""
 		if len(args) > 0 {
-			msg = args[0].String()
+			key = args[0].String()
+		}
+		if len(args) > 1 {
+			msg = args[1].String()
 		}
 		if ui.Status != nil {
-			ui.Status(msg)
+			ui.Status(key, msg)
 		}
 		return ctx.NewUndefined(), nil
 	})
@@ -156,21 +165,21 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	obj.SetPropertyStr("status", statusFn)
 	statusFn.Free()
 
-	// ui.input(message, placeholder?, timeoutMs?) → Promise<string>
+	// ui.input(title, placeholder?, opts?) → Promise<string>
 	ctx.SetAsyncFunc("__ui_input", func(this *qjs.This) {
 		args := this.Args()
-		message, placeholder := "", ""
-		timeoutMs := 0
+		title, placeholder := "", ""
 		if len(args) > 0 {
-			message = args[0].String()
+			title = args[0].String()
 		}
 		if len(args) > 1 {
 			placeholder = args[1].String()
 		}
+		_, timeoutMs := 0, 0
 		if len(args) > 2 {
-			timeoutMs = int(args[2].Int32())
+			_, timeoutMs = uiDialogOpts(args[2])
 		}
-		text, err := ui.Input(message, placeholder, timeoutMs)
+		text, err := ui.Input(title, placeholder, timeoutMs)
 		if err != nil {
 			this.Promise().Reject(this.Context().NewError(err))
 			return
@@ -181,15 +190,16 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	obj.SetPropertyStr("input", inputFn)
 	inputFn.Free()
 
-	// ui.select(options: string[], defaultIdx?, timeoutMs?) → Promise<number>
+	// ui.select(title, options, opts?) → Promise<number>
 	// Returns the selected index, or -1 if the user cancels.
 	ctx.SetAsyncFunc("__ui_select", func(this *qjs.This) {
 		args := this.Args()
-		if len(args) == 0 || !args[0].IsArray() {
-			this.Promise().Reject(this.Context().NewError(errors.New("ui.select: first argument must be an array of strings")))
+		if len(args) < 2 || !args[0].IsString() || !args[1].IsArray() {
+			this.Promise().Reject(this.Context().NewError(errors.New("ui.select: expected (title: string, options: string[], opts?)")))
 			return
 		}
-		arr := args[0]
+		title := args[0].String()
+		arr := args[1]
 		n := int(arr.Len())
 		options := make([]string, 0, n)
 		for i := 0; i < n; i++ {
@@ -198,13 +208,10 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 			elem.Free()
 		}
 		defaultIdx, timeoutMs := 0, 0
-		if len(args) > 1 {
-			defaultIdx = int(args[1].Int32())
-		}
 		if len(args) > 2 {
-			timeoutMs = int(args[2].Int32())
+			defaultIdx, timeoutMs = uiDialogOpts(args[2])
 		}
-		idx, err := ui.Select(options, defaultIdx, timeoutMs)
+		idx, err := ui.Select(title, options, defaultIdx, timeoutMs)
 		if err != nil {
 			this.Promise().Reject(this.Context().NewError(err))
 			return
@@ -215,18 +222,21 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	obj.SetPropertyStr("select", selectFn)
 	selectFn.Free()
 
-	// ui.confirm(message, timeoutMs?) → Promise<boolean>
+	// ui.confirm(title, message, opts?) → Promise<boolean>
 	ctx.SetAsyncFunc("__ui_confirm", func(this *qjs.This) {
 		args := this.Args()
-		message := ""
-		timeoutMs := 0
+		title, message := "", ""
 		if len(args) > 0 {
-			message = args[0].String()
+			title = args[0].String()
 		}
 		if len(args) > 1 {
-			timeoutMs = int(args[1].Int32())
+			message = args[1].String()
 		}
-		ok, err := ui.Confirm(message, timeoutMs)
+		_, timeoutMs := 0, 0
+		if len(args) > 2 {
+			_, timeoutMs = uiDialogOpts(args[2])
+		}
+		ok, err := ui.Confirm(title, message, timeoutMs)
 		if err != nil {
 			this.Promise().Reject(this.Context().NewError(err))
 			return
@@ -237,19 +247,19 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	obj.SetPropertyStr("confirm", confirmFn)
 	confirmFn.Free()
 
-	// ui.editor(message, prefill?) → Promise<string>
+	// ui.editor(title, prefill?) → Promise<string>
 	// Multi-line editor (no timeout — interrupting a compose flow mid-edit
 	// would lose the user's input).
 	ctx.SetAsyncFunc("__ui_editor", func(this *qjs.This) {
 		args := this.Args()
-		message, prefill := "", ""
+		title, prefill := "", ""
 		if len(args) > 0 {
-			message = args[0].String()
+			title = args[0].String()
 		}
 		if len(args) > 1 {
 			prefill = args[1].String()
 		}
-		text, err := ui.Editor(message, prefill)
+		text, err := ui.Editor(title, prefill)
 		if err != nil {
 			this.Promise().Reject(this.Context().NewError(err))
 			return
@@ -261,6 +271,29 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	editorFn.Free()
 
 	return obj
+}
+
+// uiDialogOpts extracts { timeout, defaultIdx } from a dialog's trailing opts
+// argument (pi passes { signal?, timeout? }; ycode adds defaultIdx for its
+// preselected-entry extension). A bare number is tolerated as timeoutMs.
+// Non-object/non-number values yield zeroes.
+func uiDialogOpts(v *qjs.Value) (defaultIdx, timeoutMs int) {
+	if v == nil || v.IsUndefined() || v.IsNull() {
+		return 0, 0
+	}
+	if v.IsNumber() {
+		return 0, int(v.Int32())
+	}
+	if !v.IsObject() {
+		return 0, 0
+	}
+	if t := v.GetPropertyStr("timeout"); t != nil && t.IsNumber() {
+		timeoutMs = int(t.Int32())
+	}
+	if d := v.GetPropertyStr("defaultIdx"); d != nil && d.IsNumber() {
+		defaultIdx = int(d.Int32())
+	}
+	return defaultIdx, timeoutMs
 }
 
 // ScrubRunnerCtx converts a runner ctx map (which may carry Go func values,

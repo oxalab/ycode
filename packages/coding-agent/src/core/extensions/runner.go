@@ -8,30 +8,40 @@ import (
 )
 
 type ExtensionUIContext struct {
-	Select  func(option []string, defaultIdx int, timeoutMs int) (int, error)
-	Confirm func(message string, timeoutMs int) (bool, error)
-	Input   func(message string, placeholder string, timeoutMs int) (string, error)
+	// Dialog signatures mirror the reference's ExtensionUIContext
+	// (extensions/types.ts): title is the first parameter of every dialog.
+	// Select returns the INDEX of the chosen option (-1 if cancelled) and
+	// defaultIdx pre-selects an entry — a ycode extension on top of the
+	// reference's shape (the reference's select has no default and resolves
+	// the option string).
+	Select  func(title string, options []string, defaultIdx int, timeoutMs int) (int, error)
+	Confirm func(title string, message string, timeoutMs int) (bool, error)
+	Input   func(title string, placeholder string, timeoutMs int) (string, error)
 	// Editor swaps a multi-line editor into the prompt area and blocks until
 	// the user submits (returns the text) or cancels (returns ""). prefill
 	// pre-populates the editor. Interactive mode shows the ExtensionEditor
-	// widget with Ctrl+G external-editor support; non-interactive modes return "".
-	Editor func(message string, prefill string) (string, error)
+	// widget with Ctrl+G external-editor support; RPC mode forwards the
+	// request to the host; print mode returns "".
+	Editor func(title string, prefill string) (string, error)
 	// Notify surfaces a message to the user. level is "info" | "warning" |
 	// "error" (matching the reference's ctx.ui.notify). Interactive mode
 	// appends a themed line to the chat transcript (info=dim, warning=warning-
 	// colored "Warning: …", error=error-colored "Error: …"); RPC mode forwards
 	// it to the host.
 	Notify func(message, level string)
-	Status func(message string)
+	// Status writes to the footer status bar. key namespaces the slot (the
+	// reference keys a Map so concurrent extensions don't clobber each other);
+	// empty message clears. Interactive mode currently keeps a single slot.
+	Status func(key, message string)
 }
 
 var NoOpUIContext = ExtensionUIContext{
-	Select:  func(options []string, defaultIdx int, timeoutMs int) (int, error) { return -1, nil },
-	Confirm: func(message string, timeoutMs int) (bool, error) { return false, nil },
-	Input:   func(message string, placeholder string, timeoutMs int) (string, error) { return "", nil },
-	Editor:  func(message string, prefill string) (string, error) { return "", nil },
+	Select:  func(title string, options []string, defaultIdx int, timeoutMs int) (int, error) { return -1, nil },
+	Confirm: func(title, message string, timeoutMs int) (bool, error) { return false, nil },
+	Input:   func(title, placeholder string, timeoutMs int) (string, error) { return "", nil },
+	Editor:  func(title, prefill string) (string, error) { return "", nil },
 	Notify:  func(message, level string) {},
-	Status:  func(message string) {},
+	Status:  func(key, message string) {},
 }
 
 type NewSessionHandler func(options map[string]any) (map[string]bool, error)

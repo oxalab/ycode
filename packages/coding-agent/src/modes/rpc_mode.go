@@ -11,11 +11,11 @@
 //
 // ExtensionUIContext: in the TS this is a ~30-method interface (select/confirm/
 // input/editor/notify/setStatus/setWidget/setTitle/theme/setEditorText/...). In
-// the Go port it is a 5-field STRUCT (Select/Confirm/Input/Notify/Status — see
-// core/extensions/runner.go). RPC mode therefore wires exactly those five via
-// the dialog protocol; editor/setWidget/setTitle/theme/setEditorText and the
-// rest have no Go UIContext field and are simply not emitted. This is the
-// current port surface, not a regression.
+// the Go port it is a struct (Select/Confirm/Input/Editor/Notify/Status — see
+// core/extensions/runner.go). RPC mode wires those six via the dialog/notify
+// protocol; setWidget/setTitle/theme/setEditorText and the rest have no Go
+// UIContext field and are simply not emitted. This is the current port surface,
+// not a regression.
 //
 // CommandContextActions: deferred (same as print mode). grep finds zero
 // construction sites anywhere in the Go port, so binding them here would be
@@ -54,6 +54,7 @@ package modes
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"runtime"
@@ -110,6 +111,7 @@ type rpcServer struct {
 	runtimeHost    *core.AgentSessionRuntime
 	session        *core.AgentSession
 	unsubscribe    func()
+	out            io.Writer // stdout in production; injectable for tests
 	outputMu       sync.Mutex // serializes stdout writes (events + responses + UI requests)
 	pendingMu      sync.Mutex // guards pending
 	pending        map[string]chan RpcExtensionUIResponse
@@ -126,6 +128,10 @@ func (s *rpcServer) output(v any) {
 	}
 	s.outputMu.Lock()
 	defer s.outputMu.Unlock()
+	if s.out != nil {
+		fmt.Fprint(s.out, line)
+		return
+	}
 	fmt.Fprint(os.Stdout, line)
 }
 
@@ -207,7 +213,7 @@ func (s *rpcServer) registerSignalHandlers() {
 }
 
 // ============================================================================
-// Extension UI context — the 5 supported methods, driven via the RPC protocol
+// Extension UI context — dialogs + notify/status, driven via the RPC protocol
 // ============================================================================
 
 // buildUIContext returns the ExtensionUIContext whose dialogs round-trip through
@@ -216,17 +222,28 @@ func (s *rpcServer) buildUIContext() extensions.ExtensionUIContext {
 	return extensions.ExtensionUIContext{
 		// Select returns the INDEX of the chosen option (-1 if cancelled/absent),
 		// matching NoOpUIContext's -1 sentinel; the wire response carries a value
-		// string, so we resolve it against the option list.
-		Select: func(options []string, _ int, timeoutMs int) (int, error) {
-			resp, ok := s.dialog(RpcExtensionUIRequest{Method: MethodSelect, Options: options, Timeout: timeoutMs}, timeoutMs)
+		// string, so we resolve it against the option list. defaultIdx is
+		// forwarded so the host can pre-select it (ycode wire extension).
+		Select: func(title string, options []string, defaultIdx int, timeoutMs int) (int, error) {
+			req := RpcExtensionUIRequest{Method: MethodSelect, Title: title, Options: options, DefaultIdx: defaultIdx, Timeout: timeoutMs}
+			resp, ok := s.dialog(req, timeoutMs)
 			return dialogSelectIndex(resp, options, ok), nil
 		},
-		Confirm: func(message string, timeoutMs int) (bool, error) {
-			resp, ok := s.dialog(RpcExtensionUIRequest{Method: MethodConfirm, Message: message, Timeout: timeoutMs}, timeoutMs)
+		Confirm: func(title, message string, timeoutMs int) (bool, error) {
+			req := RpcExtensionUIRequest{Method: MethodConfirm, Title: title, Message: message, Timeout: timeoutMs}
+			resp, ok := s.dialog(req, timeoutMs)
 			return dialogConfirmValue(resp, ok), nil
 		},
-		Input: func(message, placeholder string, timeoutMs int) (string, error) {
-			resp, ok := s.dialog(RpcExtensionUIRequest{Method: MethodInput, Message: message, Placeholder: placeholder, Timeout: timeoutMs}, timeoutMs)
+		Input: func(title, placeholder string, timeoutMs int) (string, error) {
+			req := RpcExtensionUIRequest{Method: MethodInput, Title: title, Placeholder: placeholder, Timeout: timeoutMs}
+			resp, ok := s.dialog(req, timeoutMs)
+			return dialogInputValue(resp, ok), nil
+		},
+		// Editor has no timeout (pi rpc-mode.ts:247-264): a multi-line compose
+		// flow blocks until the host responds.
+		Editor: func(title, prefill string) (string, error) {
+			req := RpcExtensionUIRequest{Method: MethodEditor, Title: title, Prefill: prefill}
+			resp, ok := s.dialog(req, 0)
 			return dialogInputValue(resp, ok), nil
 		},
 		// Fire-and-forget: no response expected. Map the level to the RPC
@@ -241,8 +258,8 @@ func (s *rpcServer) buildUIContext() extensions.ExtensionUIContext {
 			}
 			s.output(RpcExtensionUIRequest{Type: ExtUIRequestType, ID: s.newRequestID(), Method: MethodNotify, Message: message, NotifyType: notifyType})
 		},
-		Status: func(message string) {
-			s.output(RpcExtensionUIRequest{Type: ExtUIRequestType, ID: s.newRequestID(), Method: MethodSetStatus, StatusText: message})
+		Status: func(key, message string) {
+			s.output(RpcExtensionUIRequest{Type: ExtUIRequestType, ID: s.newRequestID(), Method: MethodSetStatus, StatusKey: key, StatusText: message})
 		},
 	}
 }

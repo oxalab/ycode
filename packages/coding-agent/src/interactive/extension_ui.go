@@ -21,6 +21,7 @@ package interactive
 import (
 	"ycode/packages/coding-agent/src/core/extensions"
 	"ycode/packages/coding-agent/src/core/tui/theme"
+	"ycode/packages/tui"
 	"ycode/packages/tui/components"
 )
 
@@ -39,10 +40,10 @@ func (o *Orchestrator) createExtensionUIContext() extensions.ExtensionUIContext 
 		// (interactive-mode.ts:1997-2035).
 		Select: o.extensionSelect,
 
-		// confirm is select with ["Yes", "No"] (reference: showExtensionConfirm
-		// at interactive-mode.ts:2052-2059).
-		Confirm: func(message string, timeoutMs int) (bool, error) {
-			idx, err := o.extensionSelect([]string{"Yes", "No"}, 0, timeoutMs)
+		// confirm is select with ["Yes", "No"] and a "title\nmessage" header
+		// (reference: showExtensionConfirm at interactive-mode.ts:2052-2059).
+		Confirm: func(title, message string, timeoutMs int) (bool, error) {
+			idx, err := o.extensionSelect(title+"\n"+message, []string{"Yes", "No"}, 0, timeoutMs)
 			if err != nil || idx < 0 {
 				return false, err
 			}
@@ -64,8 +65,11 @@ func (o *Orchestrator) createExtensionUIContext() extensions.ExtensionUIContext 
 		Notify: o.extensionNotify,
 
 		// status writes to the footer status bar (distinct from notify).
-		// Reference: interactive-mode.ts:1654-1657 → footerDataProvider.
-		Status: func(message string) {
+		// Reference: interactive-mode.ts:1654-1657 → footerDataProvider. The
+		// key namespaces the slot in the reference (a Map); the Go footer
+		// keeps a single slot for now, so the latest status wins.
+		// Reference keyed-map behavior is a noted follow-up.
+		Status: func(key, message string) {
 			if o.footerData == nil {
 				return
 			}
@@ -109,13 +113,15 @@ func (o *Orchestrator) extensionNotify(message, level string) {
 // extensionSelect swaps a SelectList into editorContainer and blocks until the
 // user picks (returns selected index) or cancels (returns -1). Mirrors the
 // reference's showExtensionSelector, which uses a Promise that resolves when
-// the list's onSelect/onCancel fires.
+// the list's onSelect/onCancel fires. title renders as an accent-bold header
+// line above the options (extension-selector.ts:44); multi-line titles (e.g.
+// confirm's "title\nmessage") render as multiple header lines.
 //
 // The blocking-via-channel pattern: build the selector, register onSelect/
 // onCancel closures that resolve a Go channel, swap in, wait. The wait happens
 // on the calling goroutine (extension handlers run off the render lock), so
 // the engine keeps rendering on its own goroutine.
-func (o *Orchestrator) extensionSelect(options []string, defaultIdx, timeoutMs int) (int, error) {
+func (o *Orchestrator) extensionSelect(title string, options []string, defaultIdx, timeoutMs int) (int, error) {
 	if len(options) == 0 {
 		return -1, nil
 	}
@@ -140,7 +146,20 @@ func (o *Orchestrator) extensionSelect(options []string, defaultIdx, timeoutMs i
 	}
 	list.OnCancel = func() { result <- 0 }
 
-	sel := newSimpleSelector(list, o.th)
+	// Titled shell (extension-selector.ts:42-46): border → spacer → title →
+	// spacer → list → border.
+	th := o.th
+	if th == nil {
+		th = theme.GetTheme()
+	}
+	c := &tui.Container{}
+	c.AddChild(newDynamicBorder(fgStyle(th, "border")))
+	c.AddChild(components.NewSpacer(1))
+	c.AddChild(components.NewText(th.Bold(th.Fg("accent", title)), 1, 0, nil))
+	c.AddChild(components.NewSpacer(1))
+	c.AddChild(list)
+	c.AddChild(newDynamicBorder(fgStyle(th, "border")))
+	sel := &simpleSelector{Container: c, list: list}
 
 	// Swap in under the render lock.
 	o.engine.Mutate(func() {
@@ -161,10 +180,11 @@ func (o *Orchestrator) extensionSelect(options []string, defaultIdx, timeoutMs i
 }
 
 // extensionInput swaps an input field into editorContainer and blocks until
-// the user submits (returns the text) or cancels (returns "").
-func (o *Orchestrator) extensionInput(message, placeholder string, timeoutMs int) (string, error) {
+// the user submits (returns the text) or cancels (returns ""). title is the
+// widget's prompt line.
+func (o *Orchestrator) extensionInput(title, placeholder string, timeoutMs int) (string, error) {
 	result := make(chan string, 1)
-	dlg := NewExtensionInput(o.engine, message, placeholder, timeoutMs, o.th,
+	dlg := NewExtensionInput(o.engine, title, placeholder, timeoutMs, o.th,
 		func(text string) { result <- text },
 		func() { result <- "" },
 	)
@@ -185,13 +205,14 @@ func (o *Orchestrator) extensionInput(message, placeholder string, timeoutMs int
 // extensionEditor swaps a multi-line editor into editorContainer and blocks
 // until the user submits (returns the text) or cancels (returns ""). prefill
 // pre-populates the editor. Mirrors extensionInput but uses the multi-line
-// ExtensionEditor widget (with Ctrl+G external-editor support).
+// ExtensionEditor widget (with Ctrl+G external-editor support). title is the
+// widget's prompt line.
 //
 // No timeout parameter: a multi-line compose flow shouldn't be interrupted
 // mid-edit, and the widget doesn't render a countdown.
-func (o *Orchestrator) extensionEditor(message, prefill string) (string, error) {
+func (o *Orchestrator) extensionEditor(title, prefill string) (string, error) {
 	result := make(chan string, 1)
-	dlg := NewExtensionEditor(o.engine, o.kb, message, prefill, o.th,
+	dlg := NewExtensionEditor(o.engine, o.kb, title, prefill, o.th,
 		func(text string) { result <- text },
 		func() { result <- "" },
 	)
