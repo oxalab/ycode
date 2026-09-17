@@ -38,22 +38,22 @@ func awaitPromise(t *testing.T, ctx *qjs.Context, expr string) string {
 }
 
 func TestJSUI_InputResolvesWithString(t *testing.T) {
-	var gotMessage, gotPlaceholder string
+	var gotTitle, gotPlaceholder string
 	var gotTimeoutMs int
 	jrt, ctx := evalUI(t, ExtensionUIContext{
-		Input: func(message, placeholder string, timeoutMs int) (string, error) {
-			gotMessage, gotPlaceholder, gotTimeoutMs = message, placeholder, timeoutMs
+		Input: func(title, placeholder string, timeoutMs int) (string, error) {
+			gotTitle, gotPlaceholder, gotTimeoutMs = title, placeholder, timeoutMs
 			return "alice", nil
 		},
 	})
 	defer jrt.Close()
 
-	got := awaitPromise(t, ctx, `await ui.input("Your name?", "name", 5000)`)
+	got := awaitPromise(t, ctx, `await ui.input("Your name?", "name", {timeout: 5000})`)
 	if got != "alice" {
 		t.Errorf("ui.input resolved with %q, want \"alice\"", got)
 	}
-	if gotMessage != "Your name?" {
-		t.Errorf("Input message = %q", gotMessage)
+	if gotTitle != "Your name?" {
+		t.Errorf("Input title = %q", gotTitle)
 	}
 	if gotPlaceholder != "name" {
 		t.Errorf("Input placeholder = %q", gotPlaceholder)
@@ -64,18 +64,21 @@ func TestJSUI_InputResolvesWithString(t *testing.T) {
 }
 
 func TestJSUI_InputDefaultArgs(t *testing.T) {
-	// Calling with just the message — placeholder and timeoutMs default.
-	var gotPlaceholder string
+	// Calling with just the title — placeholder and timeout default.
+	var gotTitle, gotPlaceholder string
 	var gotTimeoutMs int
 	jrt, ctx := evalUI(t, ExtensionUIContext{
-		Input: func(_, placeholder string, timeoutMs int) (string, error) {
-			gotPlaceholder, gotTimeoutMs = placeholder, timeoutMs
+		Input: func(title, placeholder string, timeoutMs int) (string, error) {
+			gotTitle, gotPlaceholder, gotTimeoutMs = title, placeholder, timeoutMs
 			return "", nil
 		},
 	})
 	defer jrt.Close()
 
 	_ = awaitPromise(t, ctx, `await ui.input("Just a message")`)
+	if gotTitle != "Just a message" {
+		t.Errorf("Input title = %q", gotTitle)
+	}
 	if gotPlaceholder != "" {
 		t.Errorf("default placeholder = %q, want \"\"", gotPlaceholder)
 	}
@@ -85,20 +88,23 @@ func TestJSUI_InputDefaultArgs(t *testing.T) {
 }
 
 func TestJSUI_SelectResolvesWithIndex(t *testing.T) {
+	var gotTitle string
 	var gotOptions []string
 	var gotDefault int
 	jrt, ctx := evalUI(t, ExtensionUIContext{
-		Select: func(options []string, defaultIdx, timeoutMs int) (int, error) {
-			gotOptions = options
-			gotDefault = defaultIdx
+		Select: func(title string, options []string, defaultIdx, timeoutMs int) (int, error) {
+			gotTitle, gotOptions, gotDefault = title, options, defaultIdx
 			return 2, nil // user picks the third option
 		},
 	})
 	defer jrt.Close()
 
-	got := awaitPromise(t, ctx, `await ui.select(["red", "green", "blue"], 1)`)
+	got := awaitPromise(t, ctx, `await ui.select("Pick a color", ["red", "green", "blue"], {defaultIdx: 1})`)
 	if got != "2" {
 		t.Errorf("ui.select resolved with %q, want \"2\"", got)
+	}
+	if gotTitle != "Pick a color" {
+		t.Errorf("Select title = %q", gotTitle)
 	}
 	if len(gotOptions) != 3 || gotOptions[0] != "red" || gotOptions[2] != "blue" {
 		t.Errorf("Select options = %v, want [red green blue]", gotOptions)
@@ -117,26 +123,29 @@ func TestJSUI_SelectRejectsOnNonArrayArg(t *testing.T) {
 	jrt, ctx := evalUI(t, ExtensionUIContext{})
 	defer jrt.Close()
 
-	_, err := ctx.Eval("t.js", qjs.Code(`ui.select("not an array")`))
+	_, err := ctx.Eval("t.js", qjs.Code(`ui.select("Pick", "not an array")`))
 	if err == nil {
-		t.Error("ui.select with non-array should error; got nil")
+		t.Error("ui.select with non-array options should error; got nil")
 	}
 }
 
 func TestJSUI_ConfirmResolvesWithBool(t *testing.T) {
-	var gotMessage string
+	var gotTitle, gotMessage string
 	var gotTimeoutMs int
 	jrt, ctx := evalUI(t, ExtensionUIContext{
-		Confirm: func(message string, timeoutMs int) (bool, error) {
-			gotMessage, gotTimeoutMs = message, timeoutMs
+		Confirm: func(title, message string, timeoutMs int) (bool, error) {
+			gotTitle, gotMessage, gotTimeoutMs = title, message, timeoutMs
 			return true, nil
 		},
 	})
 	defer jrt.Close()
 
-	got := awaitPromise(t, ctx, `await ui.confirm("Proceed?", 3000)`)
+	got := awaitPromise(t, ctx, `await ui.confirm("Confirm", "Proceed?", {timeout: 3000})`)
 	if got != "true" {
 		t.Errorf("ui.confirm resolved with %q, want \"true\"", got)
+	}
+	if gotTitle != "Confirm" {
+		t.Errorf("Confirm title = %q", gotTitle)
 	}
 	if gotMessage != "Proceed?" {
 		t.Errorf("Confirm message = %q", gotMessage)
@@ -147,10 +156,10 @@ func TestJSUI_ConfirmResolvesWithBool(t *testing.T) {
 }
 
 func TestJSUI_EditorResolvesWithText(t *testing.T) {
-	var gotMessage, gotPrefill string
+	var gotTitle, gotPrefill string
 	jrt, ctx := evalUI(t, ExtensionUIContext{
-		Editor: func(message, prefill string) (string, error) {
-			gotMessage, gotPrefill = message, prefill
+		Editor: func(title, prefill string) (string, error) {
+			gotTitle, gotPrefill = title, prefill
 			return "edited body", nil
 		},
 	})
@@ -160,8 +169,8 @@ func TestJSUI_EditorResolvesWithText(t *testing.T) {
 	if got != "edited body" {
 		t.Errorf("ui.editor resolved with %q, want \"edited body\"", got)
 	}
-	if gotMessage != "Commit message:" {
-		t.Errorf("Editor message = %q", gotMessage)
+	if gotTitle != "Commit message:" {
+		t.Errorf("Editor title = %q", gotTitle)
 	}
 	if gotPrefill != "feat: " {
 		t.Errorf("Editor prefill = %q", gotPrefill)

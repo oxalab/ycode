@@ -27,7 +27,7 @@ func TestJSUI_NotifyFromHandler(t *testing.T) {
 		pi.on("session_start", function (event, ctx) {
 			ctx.ui.notify("Hello from extension", "info");
 			ctx.ui.notify("Something went wrong", "error");
-			ctx.ui.status("running");
+			ctx.ui.status("sync", "running");
 			return { done: true };
 		});
 	};`)
@@ -45,13 +45,16 @@ func TestJSUI_NotifyFromHandler(t *testing.T) {
 		msg   string
 		level string
 	}
-	var statusCalls []string
+	var statusCalls []struct {
+		key string
+		msg string
+	}
 	uiCtx := ExtensionUIContext{
 		Notify: func(msg, level string) { notifyCalls = append(notifyCalls, struct {
 			msg   string
 			level string
 		}{msg, level}) },
-		Status: func(msg string) { statusCalls = append(statusCalls, msg) },
+		Status: func(key, msg string) { statusCalls = append(statusCalls, struct{ key, msg string }{key, msg}) },
 	}
 
 	// Fire the handler with a runner ctx that carries the fake UI.
@@ -76,8 +79,8 @@ func TestJSUI_NotifyFromHandler(t *testing.T) {
 	if notifyCalls[1].msg != "Something went wrong" || notifyCalls[1].level != "error" {
 		t.Errorf("notify[1] = %v", notifyCalls[1])
 	}
-	if len(statusCalls) != 1 || statusCalls[0] != "running" {
-		t.Errorf("status calls = %v, want [running]", statusCalls)
+	if len(statusCalls) != 1 || statusCalls[0].key != "sync" || statusCalls[0].msg != "running" {
+		t.Errorf("status calls = %v, want [{sync running}]", statusCalls)
 	}
 }
 

@@ -1,7 +1,12 @@
 package modes
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	core "ycode/packages/coding-agent/src/core"
 	"ycode/packages/coding-agent/src/core/extensions"
@@ -193,5 +198,111 @@ func TestImagesToAny(t *testing.T) {
 	}
 	if _, ok := got[0].(*llm.ImageContent); !ok {
 		t.Errorf("element type = %T, want *llm.ImageContent", got[0])
+	}
+}
+
+// ============================================================================
+// buildUIContext — emitted request shape (audit #28)
+// ============================================================================
+
+// syncBuffer is a concurrency-safe bytes.Buffer: dialog closures emit from the
+// caller's goroutine while routeUIResponse may run on another.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitForRequest scans the captured stdout lines for the first request with the
+// given method and returns it fully decoded.
+func waitForRequest(t *testing.T, buf *syncBuffer, method string) RpcExtensionUIRequest {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(buf.String(), "\n") {
+			var req RpcExtensionUIRequest
+			if json.Unmarshal([]byte(line), &req) == nil && req.Method == method {
+				return req
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no %q request emitted within deadline; captured:\n%s", method, buf.String())
+	return RpcExtensionUIRequest{}
+}
+
+// TestBuildUIContext_RequestShape verifies the dialog closures populate the
+// reference's wire fields: title on every dialog, statusKey on setStatus, and
+// ycode's defaultIdx on select. Input must NOT carry Message (the reference
+// sends title + placeholder only; the old port stuffed the prompt there).
+func TestBuildUIContext_RequestShape(t *testing.T) {
+	var buf syncBuffer
+	s := &rpcServer{out: &buf, pending: make(map[string]chan RpcExtensionUIResponse)}
+	ui := s.buildUIContext()
+
+	// Blocking dialogs: emit immediately, then time out (resolver behavior is
+	// covered by the dialog*Value tests above).
+	_, _ = ui.Select("Pick", []string{"a", "b"}, 1, 40)
+	req := waitForRequest(t, &buf, MethodSelect)
+	if req.Title != "Pick" || len(req.Options) != 2 || req.DefaultIdx != 1 || req.Timeout != 40 {
+		t.Errorf("select request = %+v", req)
+	}
+
+	_, _ = ui.Confirm("Confirm", "Proceed?", 40)
+	req = waitForRequest(t, &buf, MethodConfirm)
+	if req.Title != "Confirm" || req.Message != "Proceed?" || req.Timeout != 40 {
+		t.Errorf("confirm request = %+v", req)
+	}
+
+	_, _ = ui.Input("Name", "hint", 40)
+	req = waitForRequest(t, &buf, MethodInput)
+	if req.Title != "Name" || req.Placeholder != "hint" || req.Timeout != 40 {
+		t.Errorf("input request = %+v", req)
+	}
+	if req.Message != "" {
+		t.Errorf("input request carries Message %q; reference sends title+placeholder only", req.Message)
+	}
+
+	// Fire-and-forget.
+	ui.Status("sync", "running")
+	req = waitForRequest(t, &buf, MethodSetStatus)
+	if req.StatusKey != "sync" || req.StatusText != "running" {
+		t.Errorf("setStatus request = %+v", req)
+	}
+
+	// Editor blocks until the host responds (no timeout in the reference) —
+	// emit, observe, then answer from the test goroutine.
+	type editorResult struct {
+		text string
+		err  error
+	}
+	done := make(chan editorResult, 1)
+	go func() {
+		text, err := ui.Editor("Commit", "feat: ")
+		done <- editorResult{text, err}
+	}()
+	editorReq := waitForRequest(t, &buf, MethodEditor)
+	if editorReq.Title != "Commit" || editorReq.Prefill != "feat: " {
+		t.Errorf("editor request = %+v", editorReq)
+	}
+	s.routeUIResponse(RpcExtensionUIResponse{Type: ExtUIResponseType, ID: editorReq.ID, Value: "body"})
+	select {
+	case r := <-done:
+		if r.err != nil || r.text != "body" {
+			t.Errorf("Editor = (%q, %v), want (\"body\", nil)", r.text, r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Editor did not resolve after host response")
 	}
 }

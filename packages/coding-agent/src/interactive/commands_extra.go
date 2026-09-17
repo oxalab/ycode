@@ -41,7 +41,7 @@ func (o *Orchestrator) cmdImport(rest string) {
 		// Confirm via the wired UI context (matches reference's confirm dialog).
 		var confirmed bool
 		if o.uiCtx.Confirm != nil {
-			confirmed, _ = o.uiCtx.Confirm(fmt.Sprintf("Replace current session with %s?", path), 0)
+			confirmed, _ = o.uiCtx.Confirm("Import session", fmt.Sprintf("Replace current session with %s?", path), 0)
 		}
 		if !confirmed {
 			o.engine.Mutate(func() { o.addNotice(o.th.Fg("dim", "Import cancelled")) })
