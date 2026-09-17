@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 21 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 22 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -320,9 +320,40 @@
 - **Reference:** pi/packages/coding-agent/src/main.ts:640-644;
   settings-manager.ts:966-976; agent-session.ts:2334-2345; read.ts:255-262.
 
-### 28. Dialog requests lose `title`/`statusKey`; select discards `defaultIdx`
-- rpc-mode.ts:131-170 sends them; `ExtensionUIContext` signatures lack the
-  params so the wire fields never populate.
+### 28. Dialog requests lose `title`/`statusKey`; select discards `defaultIdx` — ✅ FIXED (2026-09-17)
+- **Was:** `ExtensionUIContext` signatures had no title/key params
+  (`Select(options, defaultIdx, timeout)`, `Confirm(message, timeout)`,
+  `Input(message, placeholder, timeout)`, `Status(message)`), so the wire
+  fields `Title`/`StatusKey` never populated (rpc_mode.go emitted
+  `{method, options, timeout}` / `{method, statusText}`); RPC's Select
+  discarded defaultIdx (`_`); Input stuffed the prompt into wire `Message`
+  where the reference sends title+placeholder only; RPC had no `Editor` at
+  all; interactive confirm never displayed title/message (bare Yes/No list).
+- **Fix:** signatures now pi-shaped with title first (`Select(title, options,
+  defaultIdx, timeoutMs)`, `Confirm(title, message, timeoutMs)`,
+  `Input(title, placeholder, timeoutMs)`, `Editor(title, prefill)`,
+  `Status(key, message)`); rpc buildUIContext populates Title/StatusKey and
+  forwards `defaultIdx` on the select wire (ycode extension — the reference
+  has no defaultIndex; unknown fields are ignored by hosts that lack it) and
+  wires the RPC editor dialog (no timeout, like pi rpc-mode.ts:247-264); the
+  JS glue is pi-shaped (`ui.select(title, options, {timeout, defaultIdx})`,
+  `ui.confirm(title, message, opts)`, `ui.input(title, placeholder, opts)`,
+  `ui.editor(title, prefill)`, `ui.status(key, text)`); interactive
+  extensionSelect renders an accent-bold title header (extension-selector.ts
+  layout: border → spacer → title → spacer → list → border) and confirm shows
+  `title\nmessage` above Yes/No (interactive-mode.ts:2056). Tests: RPC
+  request-shape test (title/statusKey/defaultIdx/input-has-no-Message/editor
+  round-trip, via an injectable `out io.Writer` on rpcServer) + rewritten
+  pi-shaped JS glue tests.
+- **Noted (follow-ups):** JS `ui.select` still resolves an index; the
+  reference resolves the option string (`string | undefined`) — real
+  pi-extension compat gap, separate story. Keyed footer statuses (reference
+  keeps a `Map<key, text>`; Go footer has one slot). Dialog timeout countdown
+  + AbortSignal in interactive. RPC `setWidget`/`setTitle`/`set_editor_text`
+  remain unwired.
+- **Reference:** pi/packages/coding-agent/src/modes/rpc/rpc-mode.ts:83-143,
+  247-264; rpc/rpc-types.ts:213-238; core/extensions/types.ts:89-94, 124-138;
+  modes/interactive/components/extension-selector.ts:42-46; footer-data-provider.ts:132-138.
 
 ### 29. `cycle_model` "no result" omits `data` instead of `null`
 - TS sends `data: null`; Go `Data any` + `omitempty` drops the key.
