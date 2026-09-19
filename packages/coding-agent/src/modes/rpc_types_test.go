@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	sdk "ycode/packages/agent-sdk/src"
 	core "ycode/packages/coding-agent/src/core"
 	"ycode/packages/coding-agent/src/core/compaction"
 	llm "ycode/packages/llm/src"
@@ -213,4 +214,29 @@ func TestRpcDataShapes_CamelCase(t *testing.T) {
 	mustRoundTrip(t, core.SourceInfo{
 		Path: "p", Source: "built-in", Origin: core.OriginPackage,
 	}, `"path":"p"`, `"origin":"package"`)
+}
+
+// TestRpcResponse_NullDataVsOmitted pins the undefined-vs-null wire contract
+// (audit #29): untyped nil omits the data key (TS success(id, cmd) — key
+// absent), while a typed nil pointer marshals as "data":null (TS
+// success(id, cmd, null)) — what cycle_model/cycle_thinking_level send when
+// there is nothing to cycle to.
+func TestRpcResponse_NullDataVsOmitted(t *testing.T) {
+	// Untyped nil → key omitted.
+	raw, _ := json.Marshal(NewSuccessResponse("r1", CmdAbort, nil))
+	if strings.Contains(string(raw), `"data"`) {
+		t.Errorf("untyped nil should omit data: %s", raw)
+	}
+
+	// Typed nil *ModelCycleResult → "data":null (cycle_model no-result).
+	raw, _ = json.Marshal(NewSuccessResponse("r2", CmdCycleModel, (*core.ModelCycleResult)(nil)))
+	if !strings.Contains(string(raw), `"data":null`) {
+		t.Errorf("typed nil should emit data:null: %s", raw)
+	}
+
+	// Typed nil *sdk.ThinkingLevel → "data":null (cycle_thinking_level no-result).
+	raw, _ = json.Marshal(NewSuccessResponse("r3", CmdCycleThinkingLevel, (*sdk.ThinkingLevel)(nil)))
+	if !strings.Contains(string(raw), `"data":null`) {
+		t.Errorf("typed nil should emit data:null: %s", raw)
+	}
 }

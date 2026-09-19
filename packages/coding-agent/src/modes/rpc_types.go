@@ -197,8 +197,10 @@ type RpcResponse struct {
 	Data    any    `json:"data,omitempty"`         // success=true, command-specific
 }
 
-// NewSuccessResponse builds a success response envelope. Pass nil data for
-// responses with no payload (their Data is omitted via omitempty).
+// NewSuccessResponse builds a success response envelope. The nil handling
+// mirrors the TS success() helper (rpc-mode.ts:57-66), which distinguishes
+// undefined from null: untyped nil omits the data key (TS undefined); a typed
+// nil pointer survives omitempty and marshals as "data":null (TS null).
 func NewSuccessResponse(id, command string, data any) RpcResponse {
 	return RpcResponse{ID: id, Type: ResponseType, Command: command, Success: true, Data: data}
 }
