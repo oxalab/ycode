@@ -437,9 +437,10 @@ func (s *rpcServer) handleCommand(cmd RpcCommand) *RpcResponse {
 		if err != nil {
 			return errResp(id, CmdCycleModel, errMsg(err))
 		}
-		if result == nil {
-			return okResp(id, CmdCycleModel, nil)
-		}
+		// No-result passes the nil *ModelCycleResult through: a typed nil
+		// survives omitempty and marshals as "data":null, matching the TS
+		// success(id, "cycle_model", null) (rpc-mode.ts:466). Untyped nil
+		// would drop the key, which the reference only does for undefined.
 		return okResp(id, CmdCycleModel, result)
 
 	case CmdGetAvailableModels:
@@ -457,7 +458,9 @@ func (s *rpcServer) handleCommand(cmd RpcCommand) *RpcResponse {
 	case CmdCycleThinkingLevel:
 		level := s.session.CycleThinkingLevel()
 		if level == nil {
-			return okResp(id, CmdCycleThinkingLevel, nil)
+			// Typed nil → "data":null (TS success(id, …, null), rpc-mode.ts:488);
+			// untyped nil would omit the key.
+			return okResp(id, CmdCycleThinkingLevel, (*sdk.ThinkingLevel)(nil))
 		}
 		return okResp(id, CmdCycleThinkingLevel, map[string]any{"level": string(*level)})
 
