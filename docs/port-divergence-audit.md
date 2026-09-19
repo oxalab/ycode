@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 22 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 23 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -355,8 +355,25 @@
   247-264; rpc/rpc-types.ts:213-238; core/extensions/types.ts:89-94, 124-138;
   modes/interactive/components/extension-selector.ts:42-46; footer-data-provider.ts:132-138.
 
-### 29. `cycle_model` "no result" omits `data` instead of `null`
-- TS sends `data: null`; Go `Data any` + `omitempty` drops the key.
+### 29. `cycle_model` "no result" omits `data` instead of `null` — ✅ FIXED (2026-09-17)
+- **Was:** `okResp(id, CmdCycleModel, nil)` put an untyped nil in `Data any`,
+  so `omitempty` dropped the key — wire was `{"success":true}` where TS sends
+  `{"success":true,"data":null}` (rpc-mode.ts:466; response type `…| null`).
+  `cycle_thinking_level` had the byte-identical divergence (rpc-mode.go:460 vs
+  rpc-mode.ts:488, response type rpc-types.ts:148-153).
+- **Fix:** typed-nil pass-through — `omitempty` only omits when the interface
+  itself is nil, so the nil `*ModelCycleResult` flows through (special case
+  deleted) and cycle_thinking_level emits `(*sdk.ThinkingLevel)(nil)`; both
+  marshal as `"data":null`, mirroring the TS success() helper's
+  undefined-vs-null distinction. `NewSuccessResponse` doc updated. Test:
+  `TestRpcResponse_NullDataVsOmitted` (untyped nil omits / typed nils emit
+  `"data":null`).
+- **Noted (left as-is):** `get_last_assistant_text` — TS's
+  `getLastAssistantText` returns `string | undefined`, so with no text TS
+  actually serializes `{"text":{}}` (undefined-in-object quirk) while its own
+  declared type says `string | null`; Go's `{"text":""}` is benign.
+- **Reference:** pi/packages/coding-agent/src/modes/rpc/rpc-mode.ts:57-66,
+  463-469, 485-490; rpc-types.ts:130-137, 148-153, 171-176.
 
 ---
 
