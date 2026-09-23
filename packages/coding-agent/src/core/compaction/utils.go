@@ -141,8 +141,8 @@ func SerializeConversation(messages []llm.Message) string {
 				case llm.ToolCall:
 					var argParts []string
 					for k, _ := range b.Arguments {
-						jsonVal, _ := json.Marshal(b)
-						argParts = append(argParts, fmt.Sprintf("%s=%s", k ,string(jsonVal)))
+						jsonVal, _ := json.Marshal(b.Arguments[k])
+						argParts = append(argParts, fmt.Sprintf("%s=%s", k, string(jsonVal)))
 					}
 					sort.Strings(argParts)
 					toolCalls = append(toolCalls, fmt.Sprintf("%s(%s)", b.Name, strings.Join(argParts, ", ")))
