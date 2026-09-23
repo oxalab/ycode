@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 23 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 24 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -379,10 +379,21 @@
 
 ## 🟡 OPEN — Compaction internals (quality, not correctness)
 
-### 30. Tool-call args serialized with whole ToolCall per key
-- TS utils.ts:134-137 `` `${k}=${JSON.stringify(v)}` ``; Go
-  `compaction/utils.go:143-148` marshals the entire ToolCall per key — garbage
-  input degrades summaries.
+### 30. Tool-call args serialized with whole ToolCall per key — ✅ FIXED (2026-09-17)
+- **Was:** `SerializeConversation` (compaction/utils.go:144) did
+  `json.Marshal(b)` inside the per-argument loop — the summarizer prompt
+  contained the entire ToolCall struct (`type`/`id`/`name`/nested
+  `arguments`/thought signature) duplicated once per argument key, and the
+  argument values themselves never appeared.
+- **Fix:** marshal the per-key value only — `json.Marshal(b.Arguments[k])` —
+  matching TS utils.ts:132-138 (`read(path="/a.go", limit=10)`). The sorted
+  arg order (vs TS insertion order) stays the documented intentional
+  deviation. New `utils_test.go` pins `read(limit=10, path="/a.go")` and
+  rejects struct-JSON leakage (first test in the compaction package).
+- **Noted (next compaction story):** Go's `getMessageFromEntry`
+  (compaction.go:109-112) drops `ToolResultMessage` entries where TS's
+  (compaction.ts:80-82) includes them — separate divergence, unfixed.
+- **Reference:** pi/packages/coding-agent/src/core/compaction/utils.ts:132-138.
 
 ### 31. `FindCutPoint` keeps walking when it should break
 - TS compaction.ts:411-420 outer break is unconditional; Go `compaction.go:335-344`
