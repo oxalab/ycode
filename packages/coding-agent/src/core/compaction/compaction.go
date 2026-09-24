@@ -340,6 +340,10 @@ func FindCutPoint(entries []*SessionEntry, startIndex, endIndex, keepRecentToken
 					goto done
 				}
 			}
+			// No valid cut point at/after i (budget exceeded at a tool
+			// result, etc.): stop and keep the default cutPoints[0] — the
+			// TS walk breaks unconditionally here (compaction.ts:419).
+			break
 		}
 	}
 done:
