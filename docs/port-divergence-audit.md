@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 24 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 25 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -395,9 +395,26 @@
   (compaction.ts:80-82) includes them — separate divergence, unfixed.
 - **Reference:** pi/packages/coding-agent/src/core/compaction/utils.ts:132-138.
 
-### 31. `FindCutPoint` keeps walking when it should break
-- TS compaction.ts:411-420 outer break is unconditional; Go `compaction.go:335-344`
-  `goto done` only when found → slightly over-aggressive compaction.
+### 31. `FindCutPoint` keeps walking when it should break — ✅ FIXED (2026-09-17)
+- **Was:** when the keep-recent token budget was first exceeded at an entry
+  with no valid cut point at/after it (typically a trailing tool result),
+  the backward walk continued to older entries and cut at a user/assistant
+  deeper in history — Go summarized more and kept fewer recent messages than
+  TS, which breaks unconditionally after the inner search (compaction.ts:419),
+  keeping the default `cutPoints[0]`. Worst case: TS keeps everything from
+  the first message; Go discarded a whole span.
+- **Fix:** unconditional `break` after the inner cut-point search inside the
+  budget-exceeded block (the found case exits via the existing `goto done`).
+  New `TestFindCutPoint` pins the regression (budget exceeded at a tool
+  result → `FirstKeptEntryIndex == 0`), the within-budget case, and the
+  split-turn case (cut at assistant → `IsSplitTurn`, `TurnStartIndex` at the
+  starting user).
+- **Noted (adjacent, unfixed):** Go treats `BranchSummary`/`CustomMessage`
+  as user messages for split-turn purposes (TS only role `"user"` → TS
+  reports split turn there); Go's `findValidCutPoints` omits the
+  `bashExecution`/`custom`/`compactionSummary` roles TS includes
+  (compaction.ts:307-310).
+- **Reference:** pi/packages/coding-agent/src/core/compaction/compaction.ts:386-448.
 
 ### 32. `completeSimple` ignores `maxTokens`
 - TS clamps to `min(0.8×reserve, model.maxTokens)`; Go computes the constants
