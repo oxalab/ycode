@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 25 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 26 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -416,9 +416,24 @@
   (compaction.ts:307-310).
 - **Reference:** pi/packages/coding-agent/src/core/compaction/compaction.ts:386-448.
 
-### 32. `completeSimple` ignores `maxTokens`
-- TS clamps to `min(0.8×reserve, model.maxTokens)`; Go computes the constants
-  but never passes them → summaries can blow the budget.
+### 32. `completeSimple` ignores `maxTokens` — ✅ FIXED (2026-09-17)
+- **Was:** `completeSimple` (agent_session_compaction.go) accepted
+  `maxTokens int` but never assigned it to `opts.StreamOptions.MaxTokens` —
+  compiles silently (unused params are legal). Providers then substituted
+  their defaults (`min(model.maxTokens, 32000)` OpenAI-family,
+  `model.maxTokens/3` Anthropic) instead of the caller's budget (compaction
+  summary `80%` of reserve capped by model, turn prefix `50%`, branch
+  summary `2048`); summaries could hit the `max_tokens` stop reason and
+  truncate.
+- **Fix:** `opts.StreamOptions.MaxTokens = &maxTokens` guarded on `>0` — the
+  guard matters because Go's `getDefaultMaxTokens` would send a literal `0`
+  where TS's `options?.maxTokens || default` falls back. New
+  `TestCompleteSimple_PassesMaxTokens` pins both paths via a capturing
+  provider registered against the llm api registry (4096 → authoritative;
+  0 → nil, defaults preserved).
+- **Reference:** pi/packages/ai/src/stream.ts:52-58;
+  providers/simple-options.ts:3-20; anthropic.ts:893;
+  coding-agent/test/compaction-summary-reasoning.test.ts:119-132.
 
 ### 33. Interactive TUI ignores the CLI initial message — ✅ FIXED (2026-09-10, found during #24 live check)
 - **Was:** `launchInteractivePi` discarded `cli.InitialMessageResult`
