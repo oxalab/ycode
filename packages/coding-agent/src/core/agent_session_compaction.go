@@ -461,6 +461,13 @@ func (s *AgentSession) completeSimple(
 		},
 		Reasoning: thinkingLevel,
 	}
+	// Honor the caller's output-token budget (TS passes options.maxTokens
+	// through; providers default only when it's absent). Guarded on >0 so a
+	// zero budget falls back to provider defaults, matching TS's falsy `||`
+	// in the Anthropic max_tokens path.
+	if maxTokens > 0 {
+		opts.StreamOptions.MaxTokens = &maxTokens
+	}
 
 	// 3. Build chat context
 	chatCtx := llm.ChatContext{
