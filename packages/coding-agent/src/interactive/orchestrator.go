@@ -62,6 +62,8 @@ type Orchestrator struct {
 
 	loginDialog *LoginDialog // active login dialog, if any (cancelled on Stop)
 	retryTimer  *CountdownTimer // active auto-retry countdown, if any (disposed on Stop)
+	retryLoader *components.Loader // animated retry spinner in the status area, if any
+	retryEscapeHandler func() // editor OnEscape saved while the retry handler is swapped in
 	workingLoader *components.Loader // P4b working spinner in the status area, if any
 
 	headerExpandable *ExpandableText // built by buildHeader; toggled by app.tools.expand
@@ -210,6 +212,9 @@ func (o *Orchestrator) Stop() {
 		}
 		if o.retryTimer != nil {
 			o.retryTimer.Dispose() // stop the auto-retry countdown
+		}
+		if o.retryLoader != nil {
+			o.retryLoader.Stop() // stop the animated retry spinner
 		}
 		if o.workingLoader != nil {
 			o.workingLoader.Stop() // stop the animated working spinner
