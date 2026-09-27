@@ -66,14 +66,16 @@ func TestCountdownTimerCountsDownAndExpires(t *testing.T) {
 
 func TestRetryStatusText(t *testing.T) {
 	ensureTheme()
+	installAppKeybindings()
 	o := &Orchestrator{th: theme.GetTheme()}
-	got := o.retryStatusText(7, 2, 3)
-	if got == "" {
-		t.Error("retryStatusText empty")
+	// Reference word order: attempt/max first, then delay, then cancel hint
+	// (interactive-mode.ts:2912-2914).
+	if got := stripANSI(o.retryStatusText(7, 2, 3)); got != "Retrying (2/3) in 7s... (escape to cancel)" {
+		t.Errorf("retryStatusText = %q, want %q", got, "Retrying (2/3) in 7s... (escape to cancel)")
 	}
 	// Negative remaining clamps to 0 (no negative in the text).
-	if o.retryStatusText(-5, 1, 3) == "" {
-		t.Error("negative remaining produced empty text")
+	if got := stripANSI(o.retryStatusText(-5, 1, 3)); got != "Retrying (1/3) in 0s... (escape to cancel)" {
+		t.Errorf("negative remaining = %q, want clamped to 0s", got)
 	}
 }
 
