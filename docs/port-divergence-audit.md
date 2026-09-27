@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 26 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 27 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -225,11 +225,26 @@
 
 ## 🟠 OPEN — TUI chrome (medium)
 
-### 17. Auto-retry status: no loader, no escape-to-cancel, word order flipped
-- TS interactive-mode.ts:2913-2931 — `Retrying (X/Y) in Ns... (esc to cancel)`
-  as animated Loader; Escape re-wired to `abortRetry()` (:2906-2909).
-- Go `interactive/retry.go` — plain Text, `"Retrying in %ds... (attempt %d/%d)"`,
-  no escape wiring. (Core `AbortRetry` now works after fix #2 — wire it.)
+### 17. Auto-retry status: no loader, no escape-to-cancel, word order flipped — ✅ FIXED (2026-09-17)
+- **Was:** Go retry status was a static Text with flipped word order and no
+  cancel affordance: `"Retrying in %ds... (attempt %d/%d)"` (retry.go); no
+  escape wiring at all (OnEscape never set — escape only cancelled
+  autocomplete); `handleRetryEnd` ignored `RetrySuccess`/`RetryError`, so a
+  final failure was invisible.
+- **Fix:** animated `components.Loader` (warning spinner/muted message, like
+  the TS statusContainer loader) with the reference's word order + key hint:
+  `Retrying (X/Y) in Ns... (escape to cancel)` (keyText(appInterrupt); the Go
+  key formatter spells "escape"); live countdown via the existing
+  CountdownTimer → `SetMessage`; OnEscape saved/swapped to
+  `go session.AbortRetry()` during retry and restored on end; final failure
+  appends `Retry failed after N attempt(s): <error>` to the chat (the
+  user-aborted chain reports "Retry cancelled", which keeps its own notice
+  path — no duplicate line). Loader + escape state disposed on Stop().
+  Tests: `TestRetryStatusText` (exact wording + clamp), new
+  `TestRetryLifecycleLoaderEscapeAndFailureNotice` (loader present/cleared,
+  OnEscape swapped/restored, failure/success/cancelled notice behavior)
+  using a local `nullTerminal` engine.
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:2904-2957.
 
 ### 18. Working spinner vanishes between tool calls
 - TS ties loader to `agent_start`→`agent_end` (:2651-2655, :2818-2822); Go ties
