@@ -49,11 +49,11 @@ func (o *Orchestrator) handleRetryStart(event core.AgentSessionEvent) {
 	)
 }
 
-// handleRetryEnd clears the retry status, restores the escape handler, stops
-// the countdown + loader, and surfaces the final failure (TS shows
-// "Retry failed after N attempts" only when the chain gave up — the
-// user-aborted chain reports "Retry cancelled", which is its own notice).
-func (o *Orchestrator) handleRetryEnd(event core.AgentSessionEvent) {
+// stopRetryChrome tears down any active retry loader/countdown/escape swap.
+// Shared by handleRetryEnd's cleanup, the agent_start handler (TS stops the
+// retry loader on agent_start, interactive-mode.ts:2643-2650, since
+// auto_retry_end may not have arrived), and Stop().
+func (o *Orchestrator) stopRetryChrome() {
 	if o.retryTimer != nil {
 		o.retryTimer.Dispose()
 		o.retryTimer = nil
@@ -64,6 +64,14 @@ func (o *Orchestrator) handleRetryEnd(event core.AgentSessionEvent) {
 	}
 	o.editor.OnEscape = o.retryEscapeHandler
 	o.retryEscapeHandler = nil
+}
+
+// handleRetryEnd clears the retry status, restores the escape handler, stops
+// the countdown + loader, and surfaces the final failure (TS shows
+// "Retry failed after N attempts" only when the chain gave up — the
+// user-aborted chain reports "Retry cancelled", which is its own notice).
+func (o *Orchestrator) handleRetryEnd(event core.AgentSessionEvent) {
+	o.stopRetryChrome()
 	o.engine.Mutate(func() { o.status.Clear() })
 
 	if event.RetrySuccess || event.RetryError == "Retry cancelled" {

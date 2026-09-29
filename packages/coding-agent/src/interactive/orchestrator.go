@@ -210,12 +210,7 @@ func (o *Orchestrator) Stop() {
 		if o.loginDialog != nil {
 			o.loginDialog.cancelLogin() // abort any in-flight OAuth flow
 		}
-		if o.retryTimer != nil {
-			o.retryTimer.Dispose() // stop the auto-retry countdown
-		}
-		if o.retryLoader != nil {
-			o.retryLoader.Stop() // stop the animated retry spinner
-		}
+		o.stopRetryChrome() // stop the auto-retry countdown/loader, restore escape
 		if o.workingLoader != nil {
 			o.workingLoader.Stop() // stop the animated working spinner
 		}

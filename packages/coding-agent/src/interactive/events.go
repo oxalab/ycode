@@ -33,6 +33,14 @@ func (o *Orchestrator) subscribeAgent() func() {
 // handleAgentEvent maps SDK agent events to chat-container mutations.
 func (o *Orchestrator) handleAgentEvent(event sdk.AgentEvent) {
 	switch e := event.(type) {
+	case sdk.EventAgentStart:
+		// The working loader spans the whole agent run (TS stops any retry
+		// chrome first, interactive-mode.ts:2643-2657 — auto_retry_end may
+		// not have arrived when the retried attempt starts).
+		o.stopRetryChrome()
+		o.showStatusLoader("Working...") // P4b working indicator (setWorkingVisible)
+	case sdk.EventAgentEnd:
+		o.hideStatusLoader() // P4b working indicator
 	case sdk.EventMessageStart:
 		if am, ok := asAssistant(e.Message); ok {
 			comp := NewAssistantMessage(am, o.th, o.mdTheme(), false, "Thinking...")
@@ -41,7 +49,6 @@ func (o *Orchestrator) handleAgentEvent(event sdk.AgentEvent) {
 				o.streamingComp = comp
 			})
 		}
-		o.showStatusLoader("Working...") // P4b working indicator (setWorkingVisible)
 	case sdk.EventMessageUpdate:
 		if am, ok := asAssistant(e.Message); ok {
 			o.engine.Mutate(func() {
@@ -59,7 +66,6 @@ func (o *Orchestrator) handleAgentEvent(event sdk.AgentEvent) {
 				o.streamingComp = nil
 			})
 		}
-		o.hideStatusLoader() // P4b working indicator
 	case sdk.EventToolExecutionStart:
 		o.handleToolStart(e.ToolCallID, e.ToolName, e.Args)
 	case sdk.EventToolExecutionUpdate:
