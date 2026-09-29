@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	sdk "ycode/packages/agent-sdk/src"
 	core "ycode/packages/coding-agent/src/core"
 	"ycode/packages/coding-agent/src/core/tui/theme"
+	llm "ycode/packages/llm/src"
 	"ycode/packages/tui"
 	"ycode/packages/tui/components"
 )
@@ -100,11 +102,12 @@ func newTestOrchestratorEngine(t *testing.T) *Orchestrator {
 	ensureTheme()
 	base := components.NewEditor(nil, buildEditorTheme(theme.GetTheme()))
 	return &Orchestrator{
-		editor: &CustomEditor{Editor: base},
-		engine: tui.NewTUI(nullTerminal{}),
-		status: &tui.Container{},
-		chat:   &tui.Container{},
-		th:     theme.GetTheme(),
+		editor:    &CustomEditor{Editor: base},
+		engine:    tui.NewTUI(nullTerminal{}),
+		status:    &tui.Container{},
+		chat:      &tui.Container{},
+		toolComps: map[string]*ToolExecution{},
+		th:        theme.GetTheme(),
 	}
 }
 
@@ -169,4 +172,63 @@ func containerText(c *tui.Container) string {
 		}
 	}
 	return b.String()
+}
+
+// TestWorkingLoaderSpansToolGap is the #18 regression: the working spinner is
+// created on agent_start and hidden on agent_end — it must stay alive through
+// message_end/tool-execution gaps between model calls (it used to flicker
+// per-message and vanish for the whole tool gap).
+func TestWorkingLoaderSpansToolGap(t *testing.T) {
+	o := newTestOrchestratorEngine(t)
+	assistantMsg := llm.AssistantMessage{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		llm.TextContent{Type: "text", Text: "hi"},
+	}}
+
+	o.handleAgentEvent(sdk.EventAgentStart{})
+	if o.workingLoader == nil {
+		t.Fatal("working loader not created on agent_start")
+	}
+
+	steps := []sdk.AgentEvent{
+		sdk.EventMessageStart{Message: assistantMsg},
+		sdk.EventMessageEnd{Message: assistantMsg}, // used to hide the spinner here
+		sdk.EventToolExecutionStart{ToolCallID: "tc1", ToolName: "read"},
+		sdk.EventToolExecutionEnd{ToolCallID: "tc1", ToolName: "read"},
+		sdk.EventMessageStart{Message: assistantMsg}, // second model call
+		sdk.EventMessageEnd{Message: assistantMsg},
+	}
+	for i, ev := range steps {
+		o.handleAgentEvent(ev)
+		if o.workingLoader == nil {
+			t.Fatalf("working loader vanished after step %d (%T)", i, ev)
+		}
+	}
+
+	o.handleAgentEvent(sdk.EventAgentEnd{})
+	if o.workingLoader != nil {
+		t.Error("working loader not hidden on agent_end")
+	}
+}
+
+// TestAgentStartTearsDownRetryChrome: a retried attempt emits agent_start
+// before auto_retry_end may have arrived — the retry loader/countdown/escape
+// swap must be torn down and the working loader shown (TS
+// interactive-mode.ts:2643-2657).
+func TestAgentStartTearsDownRetryChrome(t *testing.T) {
+	o := newTestOrchestratorEngine(t)
+	o.handleRetryStart(core.AgentSessionEvent{EventType: "auto_retry_start", RetryAttempt: 1, RetryMaxAttempt: 5, RetryDelayMs: 5000})
+	if o.retryLoader == nil {
+		t.Fatal("retry loader not started")
+	}
+
+	o.handleAgentEvent(sdk.EventAgentStart{})
+	if o.retryLoader != nil || o.retryTimer != nil || o.retryEscapeHandler != nil {
+		t.Error("retry chrome not torn down on agent_start")
+	}
+	if o.editor.OnEscape != nil {
+		t.Error("escape handler not restored on agent_start")
+	}
+	if o.workingLoader == nil {
+		t.Error("working loader not created on agent_start")
+	}
 }
