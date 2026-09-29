@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 27 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 28 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -246,9 +246,23 @@
   using a local `nullTerminal` engine.
 - **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:2904-2957.
 
-### 18. Working spinner vanishes between tool calls
-- TS ties loader to `agent_start`→`agent_end` (:2651-2655, :2818-2822); Go ties
-  to message start/end (`interactive/events.go`) — blanks during tool runs.
+### 18. Working spinner vanishes between tool calls — ✅ FIXED (2026-09-17)
+- **Was:** the working loader was shown on `message_start` and hidden on
+  `message_end` (events.go), so it vanished for the entire tool-execution
+  gap between model calls; Go had no `EventAgentStart`/`EventAgentEnd`
+  handling at all. TS creates the loader once on `agent_start` and stops it
+  on `agent_end`; no mid-run event touches it.
+- **Fix:** loader lifecycle moved to `agent_start` (which also tears down any
+  still-active retry chrome via a shared `stopRetryChrome()` helper — TS
+  stops the retry loader there since `auto_retry_end` may not have arrived)
+  and `agent_end`; the retry-path cleanup in Stop() now uses the same
+  helper. Tests: `TestWorkingLoaderSpansToolGap` (loader alive across
+  message_end + tool execution + second model call, hidden on agent_end) and
+  `TestAgentStartTearsDownRetryChrome`.
+- **Noted (cosmetic, unfixed):** TS appends " (esc to interrupt)" to the
+  working message via a hint update (interactive-mode.ts:1797-1798); Go
+  shows static "Working...".
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:2632-2657, 2818-2822.
 
 ### 19. Compaction status: one generic label, no escape-to-cancel
 - TS :2845-2855 — three variants (manual / overflow / auto) + Escape→abort.
