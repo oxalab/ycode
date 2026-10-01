@@ -64,6 +64,8 @@ type Orchestrator struct {
 	retryTimer  *CountdownTimer // active auto-retry countdown, if any (disposed on Stop)
 	retryLoader *components.Loader // animated retry spinner in the status area, if any
 	retryEscapeHandler func() // editor OnEscape saved while the retry handler is swapped in
+	compactionLoader *components.Loader // animated compaction spinner, if any
+	compactionEscapeHandler func() // editor OnEscape saved while compaction abort is wired
 	workingLoader *components.Loader // P4b working spinner in the status area, if any
 
 	headerExpandable *ExpandableText // built by buildHeader; toggled by app.tools.expand
@@ -211,6 +213,7 @@ func (o *Orchestrator) Stop() {
 			o.loginDialog.cancelLogin() // abort any in-flight OAuth flow
 		}
 		o.stopRetryChrome() // stop the auto-retry countdown/loader, restore escape
+		o.stopCompactionChrome() // stop the compaction loader, restore escape
 		if o.workingLoader != nil {
 			o.workingLoader.Stop() // stop the animated working spinner
 		}
