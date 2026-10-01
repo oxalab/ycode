@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 28 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 29 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -264,10 +264,31 @@
   shows static "Working...".
 - **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:2632-2657, 2818-2822.
 
-### 19. Compaction status: one generic label, no escape-to-cancel
-- TS :2845-2855 — three variants (manual / overflow / auto) + Escape→abort.
-  Go `events.go` — hardcoded string always. (Core abort now works after fix
-  #3 — wire it.)
+### 19. Compaction status: one generic label, no escape-to-cancel — ✅ FIXED (2026-09-17)
+- **Was:** compaction_start showed one hardcoded `"Compacting context…
+  (esc to cancel)"` (also `…` where TS uses `...`), reason ignored; escape
+  was a dead hint — never wired, even though `AgentSession.AbortCompaction()`
+  exists and cancels the real context; compaction_end silently dropped
+  `CompactionAborted`/`ComapctionError` and reused the generic working
+  loader (clobberable by Working.../compaction swaps).
+- **Fix:** dedicated compaction chrome (compaction_status.go, mirroring
+  retry.go): reason-specific labels — `Compacting context... (escape to
+  cancel)` / `Context overflow detected, Auto-compacting... (escape to
+  cancel)` / `Auto-compacting... (escape to cancel)` (TS
+  interactive-mode.ts:2845-2849); escape swapped to
+  `go session.AbortCompaction()` and restored on end; end states render
+  TS's notices — `Compaction cancelled` (error-styled, manual) vs
+  `Auto-compaction cancelled` (dim, auto), the error message as an
+  error-styled line, and the summary card on success (unchanged). Teardown
+  in Stop() via `stopCompactionChrome()`. Test:
+  `TestCompactionLifecycleLoaderEscapeAndNotices` (all three labels, escape
+  swap/restore, all three end states).
+- **Noted (unfixed, separate rendering divergence):** TS rebuilds the chat
+  from post-compaction messages on success (`rebuildChatFromMessages`) and
+  invalidates the footer; Go appends the summary card only.
+  `CompactionWillRetry` queue flushing and terminal `setProgress` wiring
+  also remain out of scope (no Go compaction queue).
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:2835-2902.
 
 ### 20. Footer provider count cached at construction
 - TS footer.ts:167 evaluates per render; Go `footer.go` `NewFooter` caches —
