@@ -310,13 +310,9 @@ func (o *Orchestrator) handleSessionEvent(event core.AgentSessionEvent) {
 		// P4b pending-message queue preview (updatePendingMessagesDisplay).
 		o.renderPending(event.Steering, event.FollowUp)
 	case "compaction_start":
-		o.showStatusLoader("Compacting context… (esc to cancel)") // P4b working indicator
+		o.handleCompactionStart(event)
 	case "compaction_end":
-		o.hideStatusLoader()
-		if event.CompactionResult != nil {
-			comp := NewCompactionSummary(event.CompactionResult, o.th, o.mdTheme())
-			o.engine.Mutate(func() { o.chat.AddChild(comp) })
-		}
+		o.handleCompactionEnd(event)
 	case "auto_retry_start":
 		o.handleRetryStart(event)
 	case "auto_retry_end":

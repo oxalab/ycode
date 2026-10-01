@@ -11,6 +11,7 @@ import (
 
 	sdk "ycode/packages/agent-sdk/src"
 	core "ycode/packages/coding-agent/src/core"
+	"ycode/packages/coding-agent/src/core/compaction"
 	"ycode/packages/coding-agent/src/core/tui/theme"
 	llm "ycode/packages/llm/src"
 	"ycode/packages/tui"
@@ -230,5 +231,96 @@ func TestAgentStartTearsDownRetryChrome(t *testing.T) {
 	}
 	if o.workingLoader == nil {
 		t.Error("working loader not created on agent_start")
+	}
+}
+
+// ============================================================================
+// Compaction status chrome (audit #19)
+// ============================================================================
+
+// TestCompactionLifecycleLoaderEscapeAndNotices pins the compaction status
+// chrome: reason-specific labels, escape-to-cancel, and the end-state
+// notices (cancelled / error / summary card).
+func TestCompactionLifecycleLoaderEscapeAndNotices(t *testing.T) {
+	installAppKeybindings()
+	o := newTestOrchestratorEngine(t)
+
+	start := func(reason core.CompactionReason) {
+		o.handleCompactionStart(core.AgentSessionEvent{EventType: "compaction_start", CompactionReason: reason})
+	}
+	end := func(ev core.AgentSessionEvent) {
+		o.handleCompactionEnd(ev)
+	}
+	statusText := func() string {
+		var b strings.Builder
+		for _, child := range o.status.Children {
+			type renderer interface{ Render(width int) []string }
+			if r, ok := child.(renderer); ok {
+				for _, line := range r.Render(200) {
+					b.WriteString(stripANSI(line))
+				}
+			}
+		}
+		return b.String()
+	}
+
+	// Reason-specific labels (TS interactive-mode.ts:2845-2849).
+	start(core.CompactionManual)
+	if got := statusText(); !strings.Contains(got, "Compacting context... (escape to cancel)") {
+		t.Errorf("manual label = %q", got)
+	}
+	if o.compactionLoader == nil || o.compactionEscapeHandler != nil || o.editor.OnEscape == nil {
+		t.Fatal("manual start: chrome not wired (loader/escape swap missing)")
+	}
+	o.stopCompactionChrome()
+
+	start(core.CompactionOverflow)
+	if got := statusText(); !strings.Contains(got, "Context overflow detected, Auto-compacting... (escape to cancel)") {
+		t.Errorf("overflow label = %q", got)
+	}
+	o.stopCompactionChrome()
+
+	start(core.CompactionThreshold)
+	if got := statusText(); !strings.Contains(got, "Auto-compacting... (escape to cancel)") {
+		t.Errorf("threshold label = %q", got)
+	}
+
+	// Aborted manual → "Compaction cancelled"; escape restored, loader cleared.
+	end(core.AgentSessionEvent{EventType: "compaction_end", CompactionAborted: true, CompactionReason: core.CompactionManual})
+	if o.compactionLoader != nil || o.editor.OnEscape != nil {
+		t.Error("chrome not cleared after aborted end")
+	}
+	if text := containerText(o.chat); !strings.Contains(text, "Compaction cancelled") {
+		t.Errorf("manual abort notice missing, got %q", text)
+	}
+
+	// Aborted auto → "Auto-compaction cancelled".
+	o.chat = &tui.Container{}
+	start(core.CompactionOverflow)
+	end(core.AgentSessionEvent{EventType: "compaction_end", CompactionAborted: true, CompactionReason: core.CompactionOverflow})
+	if text := containerText(o.chat); !strings.Contains(text, "Auto-compaction cancelled") {
+		t.Errorf("auto abort notice missing, got %q", text)
+	}
+
+	// Error end → error line with the message.
+	o.chat = &tui.Container{}
+	start(core.CompactionThreshold)
+	end(core.AgentSessionEvent{EventType: "compaction_end", ComapctionError: "Compaction failed: boom"})
+	if text := containerText(o.chat); !strings.Contains(text, "Compaction failed: boom") {
+		t.Errorf("error notice missing, got %q", text)
+	}
+
+	// Success → summary card appended, no notice.
+	o.chat = &tui.Container{}
+	start(core.CompactionThreshold)
+	end(core.AgentSessionEvent{EventType: "compaction_end", CompactionResult: &compaction.CompactionResult{Summary: "done", TokensBefore: 10, TokensAfter: 2}})
+	if o.compactionLoader != nil || o.editor.OnEscape != nil {
+		t.Error("chrome not cleared after successful end")
+	}
+	if text := containerText(o.chat); strings.Contains(text, "cancelled") || strings.Contains(text, "boom") {
+		t.Errorf("unexpected notice on success: %q", text)
+	}
+	if len(o.chat.Children) == 0 {
+		t.Error("summary card not appended on success")
 	}
 }
