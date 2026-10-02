@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 29 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 30 of 33 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -290,9 +290,22 @@
   also remain out of scope (no Go compaction queue).
 - **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:2835-2902.
 
-### 20. Footer provider count cached at construction
-- TS footer.ts:167 evaluates per render; Go `footer.go` `NewFooter` caches —
-  `(provider) model` prefix never appears after `/login` until restart.
+### 20. Footer provider count cached at construction — ✅ FIXED (2026-09-17)
+- **Was:** `Footer.provCount` was computed once in `NewFooter` with the
+  comment "providers don't change mid-session" — wrong: `/login`,
+  add-provider, logout, and `SetScopedModels` all change the set at runtime,
+  so the `(provider) model` prefix stayed stale until restart. The helper
+  also ignored scoped models where TS's `getModelCandidates` prefers them
+  (interactive-mode.ts:3942-3945).
+- **Fix:** count computed live in `Render` — `GetAvailable()` is a mutex +
+  in-memory filter (model_registry.go:581-610), trivial per frame, and no
+  trigger site can go stale; logout needs no `registry.Refresh()` because
+  `HasConfiguredAuth` reads auth storage live. `distinctAvailableProviders`
+  now prefers scoped models (TS parity) via a `countUniqueProviders` helper.
+  Tests: `TestCountUniqueProviders`, `TestDistinctAvailableProviders_PrefersScoped`
+  (scoped precedence proven against a registry-less session).
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:3942-3960;
+  components/footer.ts:167.
 
 ### 21. Model selector hides registry errors when list non-empty
 - TS model-selector.ts:266-284 appends error lines even with models present +
