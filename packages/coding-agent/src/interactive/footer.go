@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 
+	llm "ycode/packages/llm/src"
 	"ycode/packages/tui"
 	core "ycode/packages/coding-agent/src/core"
 	"ycode/packages/coding-agent/src/core/compaction"
@@ -35,21 +36,21 @@ import (
 // Footer is the 2-line status bar (pwd; token/context/model stats). It mirrors
 // reference FooterComponent; render reads session state fresh each frame.
 type Footer struct {
-	session   *core.AgentSession
-	provider  *core.FooterDataProvider
-	th        *theme.Theme
-	auto      bool
-	provCount int // distinct available providers (cached; providers don't change mid-session)
+	session  *core.AgentSession
+	provider *core.FooterDataProvider
+	th       *theme.Theme
+	auto     bool
 }
 
-// NewFooter builds the footer. provCount is computed once from available models.
+// NewFooter builds the footer. The provider count is computed live on each
+// Render (the provider set changes mid-session: /login, add-provider,
+// logout, scoped models).
 func NewFooter(session *core.AgentSession, provider *core.FooterDataProvider, th *theme.Theme, autoCompact bool) *Footer {
 	return &Footer{
-		session:   session,
-		provider:  provider,
-		th:        th,
-		auto:      autoCompact,
-		provCount: distinctAvailableProviders(session),
+		session:  session,
+		provider: provider,
+		th:       th,
+		auto:     autoCompact,
 	}
 }
 
@@ -185,7 +186,7 @@ func (f *Footer) Render(width int) []string {
 			rightSide = modelName + " • " + level
 		}
 	}
-	if f.provCount > 1 && model.ID != "" {
+	if provCount := distinctAvailableProviders(f.session); provCount > 1 && model.ID != "" {
 		withProv := "(" + string(model.Provider) + ") " + rightSide
 		if statsLeftWidth+minPadding+tui.VisibleWidth(withProv) <= width {
 			rightSide = withProv
@@ -233,11 +234,26 @@ func formatTokens(count int) string {
 	}
 }
 
-// distinctAvailableProviders counts unique providers among available models
-// (footer.ts getAvailableProviderCount). Computed once in NewFooter.
+// distinctAvailableProviders counts unique providers among the models the
+// footer's provider indicator is based on (footer.ts getAvailableProviderCount
+// via updateAvailableProviderCount). Computed live on each render — the
+// provider set changes mid-session (login/logout/add-provider/scoped models).
+// Mirrors TS getModelCandidates (interactive-mode.ts:3942-3945): scoped models
+// take precedence over the registry when set.
 func distinctAvailableProviders(session *core.AgentSession) int {
 	if session == nil {
 		return 0
+	}
+	// Scoped models shadow the registry (TS: scopedModels.length > 0 early
+	// return). Entries hold *llm.Model[llm.Api]; skip anything else.
+	if scoped := session.GetScopedModels(); len(scoped) > 0 {
+		seen := make(map[string]struct{}, len(scoped))
+		for _, entry := range scoped {
+			if m, ok := entry.Model.(*llm.Model[llm.Api]); ok {
+				seen[string(m.Provider)] = struct{}{}
+			}
+		}
+		return len(seen)
 	}
 	reg := session.GetModelRegistry()
 	if reg == nil {
@@ -247,8 +263,13 @@ func distinctAvailableProviders(session *core.AgentSession) int {
 	if err != nil {
 		return 0
 	}
-	seen := make(map[string]struct{}, len(avail))
-	for _, m := range avail {
+	return countUniqueProviders(avail)
+}
+
+// countUniqueProviders counts distinct providers in a model slice.
+func countUniqueProviders(models []*llm.Model[llm.Api]) int {
+	seen := make(map[string]struct{}, len(models))
+	for _, m := range models {
 		seen[string(m.Provider)] = struct{}{}
 	}
 	return len(seen)

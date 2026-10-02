@@ -5,7 +5,13 @@ package interactive
 // so it is verified end-to-end with a configured provider on a real terminal;
 // formatTokens is pure and the most error-prone piece, so it gets a table test.
 
-import "testing"
+import (
+	"testing"
+
+	llm "ycode/packages/llm/src"
+
+	core "ycode/packages/coding-agent/src/core"
+)
 
 func TestFormatTokens(t *testing.T) {
 	cases := []struct {
@@ -38,5 +44,39 @@ func TestDistinctAvailableProvidersNilSafe(t *testing.T) {
 	// No session/registry → 0, never panics.
 	if got := distinctAvailableProviders(nil); got != 0 {
 		t.Errorf("distinctAvailableProviders(nil) = %d, want 0", got)
+	}
+}
+
+// TestCountUniqueProviders pins the provider-count logic (audit #20): the
+// footer indicator is based on distinct providers, computed live per render.
+func TestCountUniqueProviders(t *testing.T) {
+	if got := countUniqueProviders(nil); got != 0 {
+		t.Errorf("nil models → %d, want 0", got)
+	}
+	models := []*llm.Model[llm.Api]{
+		{ID: "a1", Provider: "openai"},
+		{ID: "a2", Provider: "openai"},
+		{ID: "b1", Provider: "anthropic"},
+	}
+	if got := countUniqueProviders(models); got != 2 {
+		t.Errorf("3 models / 2 providers → %d, want 2", got)
+	}
+}
+
+// TestDistinctAvailableProviders_PrefersScoped pins the TS getModelCandidates
+// precedence (interactive-mode.ts:3942-3945): scoped models shadow the
+// registry when set — proven here against a session with NO registry.
+func TestDistinctAvailableProviders_PrefersScoped(t *testing.T) {
+	s := &core.AgentSession{}
+	if got := distinctAvailableProviders(s); got != 0 {
+		t.Errorf("empty session → %d, want 0", got)
+	}
+	s.SetScopedModels([]core.ScopedModelEntry{
+		{Model: &llm.Model[llm.Api]{ID: "a", Provider: "openai"}},
+		{Model: &llm.Model[llm.Api]{ID: "b", Provider: "anthropic"}},
+		{Model: &llm.Model[llm.Api]{ID: "c", Provider: "openai"}},
+	})
+	if got := distinctAvailableProviders(s); got != 2 {
+		t.Errorf("scoped 2 providers → %d, want 2", got)
 	}
 }
