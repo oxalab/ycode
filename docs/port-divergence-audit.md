@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 30 of 33 findings fixed
+> **Created:** 2026-08-26 · **Status:** 33 of 34 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -307,13 +307,33 @@
 - **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:3942-3960;
   components/footer.ts:167.
 
-### 21. Model selector hides registry errors when list non-empty
-- TS model-selector.ts:266-284 appends error lines even with models present +
-  unconditional `Model Name:` footer; Go returns early on empty list.
+### 21. Model selector hides registry errors when list non-empty — ✅ FIXED (2026-10-02)
+- **Was:** TS model-selector.ts:266-284 appends error lines even with models
+  present + unconditional `Model Name:` footer; Go returned early on empty
+  list, and `loadModels` discarded `GetError()` entirely — a broken
+  models.json was invisible whenever built-in models were available.
+- **Fix:** `ModelSelectorComponent` now captures `registry.GetError()` during
+  `loadModels` and renders it as red error lines after the list (error takes
+  precedence over the footer and the empty text, matching the TS if-chain).
+  The generic `Selector` gained an optional `FooterFn` hook — rendered after
+  the scroll indicator and even on the empty list — used here for the muted
+  `Model Name: <highlighted model>` footer that follows the cursor through
+  filtering. Tests: `TestModelSelectorShowsRegistryErrorWithModelsPresent`,
+  `TestModelSelectorShowsModelNameFooter`, `TestSelectorFooterRendersOnEmptyList`.
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/components/model-selector.ts:139-163,266-284.
 
-### 22. Pending-queue previews: hard 80-char cut, no spacer
-- TS :3593-3608 — Spacer + width-aware TruncatedText + "↳ … to edit all"
+### 22. Pending-queue previews: hard 80-char cut, no spacer — ✅ FIXED (2026-10-02)
+- **Was:** TS :3593-3608 — Spacer + width-aware TruncatedText + "↳ … to edit all"
   hint (hint omission is documented); Go `working.go` rune-slices at 80.
+- **Fix:** `renderPending` now adds the leading `Spacer(1)` when anything is
+  queued and renders each preview via the TUI's width-aware `TruncatedText`
+  (padding 1,0 — same as the TS constructor), dropping the hard 80-rune
+  `truncateOneLine` cut. Newlines are no longer collapsed: TruncatedText shows
+  the first line only, matching the reference. The "↳ … to edit all" hint stays
+  omitted (documented: no Go handler). Tests: `TestRenderPendingSpacerAndPreviews`,
+  `TestRenderPendingTruncatesToWidth`, `TestRenderPendingMultilineFirstLineOnly`
+  (obsolete `TestTruncateOneLine` removed).
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:3593-3610.
 
 ### 23. Compaction summary always fully expanded
 - TS collapsed by default with ctrl+o toggle; Go renders full markdown.
@@ -510,6 +530,22 @@
   each rendering the user bubble via `sendInitialPrompt` (handleSubmit's tail
   without editor history or slash/bash routing).
 - **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:738-756.
+
+### 34. OpenAI-completions provider sets a 60s overall client timeout (Go-only) — ✅ FIXED (2026-10-02)
+- **Was:** `openai-completions.go` built its client as
+  `&http.Client{Timeout: 60 * time.Second}` — the only provider with a
+  timeout (every other one uses a bare `&http.Client{}`, as does the TS
+  reference). `http.Client.Timeout` spans the entire response body read, so
+  any stream longer than 60s died mid-body with
+  `context deadline exceeded (Client.Timeout or context cancellation while
+  reading body)` — a failure generator, not hang protection. The reference
+  sets no timeout; hang protection is the user's escape-to-interrupt.
+- **Fix:** timeout removed, bare client (TS parity); guard test
+  `TestProvidersHaveNoOverallClientTimeout` forbids `http.Client{Timeout`
+  in any provider file, plus `TestStreamOpenAICompletionsSpacedChunksComplete`
+  proves a trickle-fed SSE body completes whole against an httptest server.
+- **Reference:** pi/packages/llm/src/providers/openai-completions.ts (no
+  timeout anywhere in pi/packages/llm/src/providers).
 
 ---
 
