@@ -16,8 +16,6 @@ package interactive
 // Steering/FollowUp fields are already plain []string (agent_session_types.go:65).
 
 import (
-	"strings"
-
 	"ycode/packages/tui/components"
 )
 
@@ -57,28 +55,23 @@ func (o *Orchestrator) hideStatusLoader() {
 
 // renderPending rebuilds the pendingMessages container from the latest
 // steering/follow-up queues. Runs under Mutate from the event goroutine. Mirrors
-// reference updatePendingMessagesDisplay's dim previews (the "edit queued" hint is
-// omitted — there is no handler for it in the Go TUI).
+// reference updatePendingMessagesDisplay (interactive-mode.ts:3593-3610): a
+// leading spacer when anything is queued, then width-aware dim previews (the
+// "edit queued" hint is omitted — there is no handler for it in the Go TUI).
 func (o *Orchestrator) renderPending(steering, followUp []string) {
 	o.engine.Mutate(func() {
 		o.pendingMessages.Clear()
+		if len(steering) == 0 && len(followUp) == 0 {
+			return
+		}
+		o.pendingMessages.AddChild(components.NewSpacer(1))
 		for _, m := range steering {
-			o.pendingMessages.AddChild(components.NewText(
-				o.th.Fg("dim", "Steering: "+truncateOneLine(m)), 0, 0, nil))
+			o.pendingMessages.AddChild(components.NewTruncatedText(
+				o.th.Fg("dim", "Steering: "+m), 1, 0))
 		}
 		for _, m := range followUp {
-			o.pendingMessages.AddChild(components.NewText(
-				o.th.Fg("dim", "Follow-up: "+truncateOneLine(m)), 0, 0, nil))
+			o.pendingMessages.AddChild(components.NewTruncatedText(
+				o.th.Fg("dim", "Follow-up: "+m), 1, 0))
 		}
 	})
-}
-
-// truncateOneLine collapses a queued message to a single dim preview line.
-func truncateOneLine(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
-	r := []rune(s)
-	if len(r) > 80 {
-		return string(r[:77]) + "..."
-	}
-	return s
 }
