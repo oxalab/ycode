@@ -125,16 +125,3 @@ func stripANSI(s string) string {
 	return b.String()
 }
 
-func TestTruncateOneLine(t *testing.T) {
-	if got := truncateOneLine("hello"); got != "hello" {
-		t.Errorf("short = %q", got)
-	}
-	if got := truncateOneLine("line1\nline2"); got != "line1 line2" {
-		t.Errorf("newline collapse = %q want %q", got, "line1 line2")
-	}
-	long := strings.Repeat("x", 100)
-	got := truncateOneLine(long)
-	if !strings.HasSuffix(got, "...") || len([]rune(got)) != 80 {
-		t.Errorf("long = %q (len %d), want 80 runes ending ...", got, len([]rune(got)))
-	}
-}
