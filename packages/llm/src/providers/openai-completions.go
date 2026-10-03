@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	src "ycode/packages/llm/src"
 	"ycode/packages/llm/src/utils"
@@ -83,9 +82,11 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 				StopReason: src.StopReasonStop,
 			}
 
-			// Build and send request. A timeout ensures a hung/unreachable provider
-			// surfaces as an error instead of blocking the stream forever.
-			client := &http.Client{Timeout: 60 * time.Second}
+			// Build and send request. No overall client timeout — the reference
+			// sets none, and one would kill long streaming responses mid-body
+			// (http.Client.Timeout spans the whole body read). Hang protection
+			// is the user's escape-to-interrupt, same as the TS port.
+			client := &http.Client{}
 			compat := detectOpenAICompat(model)
 			params := buildOpenAICompletionsParams(model, context, options, compat)
 
