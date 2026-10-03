@@ -22,6 +22,11 @@ type SelectorOptions[T any] struct {
 	EmptyText string
 	// PreselectIndex sets the initial cursor position.
 	PreselectIndex int
+	// FooterFn optionally renders extra lines appended after the list (and
+	// scroll indicator), mirroring the TS components' list-container tail.
+	// It receives the filtered items and cursor so footers can follow the
+	// current selection. Called even when the list is empty.
+	FooterFn func(filtered []T, cursor int) []string
 }
 
 // Selector is a generic, reusable fuzzy-search list used by every picker
@@ -60,6 +65,8 @@ type Selector[T any] struct {
 	// isSelectedFn optionally marks an item as "current" (e.g. active model)
 	// so the renderer can show a checkmark. May be nil.
 	isSelectedFn func(item T) bool
+	// footerFn optionally renders trailing lines after the list. May be nil.
+	footerFn func(filtered []T, cursor int) []string
 
 	// Callbacks invoked on confirm/cancel. They return optional tea.Cmd.
 	onSelect func(item T) tea.Cmd
@@ -108,6 +115,7 @@ func NewSelector[T any](
 		maxVisible: maxVisible,
 		emptyText:  emptyText,
 		title:      opts.Title,
+		footerFn:   opts.FooterFn,
 		focused:    true,
 		search:     ti,
 	}
@@ -272,7 +280,9 @@ func (s Selector[T]) renderList() []string {
 
 	// Empty state
 	if n == 0 {
-		return []string{s.theme.Dim("  " + s.emptyText)}
+		lines := []string{s.theme.Dim("  " + s.emptyText)}
+		lines = append(lines, s.renderFooter()...)
+		return lines
 	}
 
 	// Compute visible window centered on the cursor.
@@ -300,7 +310,17 @@ func (s Selector[T]) renderList() []string {
 		lines = append(lines, s.theme.Dim("  ("+itoa(s.cursor+1)+"/"+itoa(n)+")"))
 	}
 
+	lines = append(lines, s.renderFooter()...)
+
 	return lines
+}
+
+// renderFooter invokes the caller's footer renderer, if any.
+func (s Selector[T]) renderFooter() []string {
+	if s.footerFn == nil {
+		return nil
+	}
+	return s.footerFn(s.filtered, s.cursor)
 }
 
 // renderRow renders one item, augmenting the caller's renderFn with a

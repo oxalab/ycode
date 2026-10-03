@@ -2,6 +2,7 @@ package components
 
 import (
 	"strconv"
+	"strings"
 
 	core "ycode/packages/coding-agent/src/core"
 	"ycode/packages/coding-agent/src/core/tui/theme"
@@ -43,6 +44,10 @@ type ModelSelectorComponent struct {
 	allModels    []ModelItem
 	scopedItems  []ModelItem
 	activeModels []ModelItem
+
+	// errorMessage surfaces registry load failures (e.g. bad models.json);
+	// shown even when the model list is non-empty, matching the reference.
+	errorMessage string
 
 	scope modelScope
 }
@@ -101,6 +106,7 @@ func NewModelSelectorComponent(
 			Title:         "Select Model",
 			EmptyText:     "No matching models",
 			PreselectIndex: m.findCurrentIndex(),
+			FooterFn:      m.renderFooter,
 		},
 	)
 	m.selector.SetIsSelectedFn(m.isCurrent)
@@ -168,6 +174,9 @@ func (m *ModelSelectorComponent) loadModels() {
 	}
 
 	m.modelRegistry.Refresh()
+
+	// Check for models.json errors; built-in models still work when it fails.
+	m.errorMessage = m.modelRegistry.GetError()
 
 	available, err := m.modelRegistry.GetAvailable()
 	if err != nil || len(available) == 0 {
@@ -300,6 +309,45 @@ func (m *ModelSelectorComponent) renderItem(item ModelItem, selected bool) strin
 		providerBadge = m.theme.Fg("muted", "["+item.Provider+"]")
 	}
 	return idText + " " + providerBadge
+}
+
+// registryError returns the registry's current load error (test visibility).
+func (m *ModelSelectorComponent) registryError() string {
+	if m.modelRegistry == nil {
+		return ""
+	}
+	return m.modelRegistry.GetError()
+}
+
+// renderFooter renders the trailing lines of the list: error lines when the
+// registry failed to load, otherwise a muted footer naming the highlighted
+// model. Mirrors the reference's updateList tail.
+func (m *ModelSelectorComponent) renderFooter(filtered []ModelItem, cursor int) []string {
+	if m.errorMessage != "" {
+		var lines []string
+		for _, line := range strings.Split(m.errorMessage, "\n") {
+			lines = append(lines, m.theme.Fg("error", line))
+		}
+		return lines
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	idx := cursor
+	if idx < 0 || idx >= len(filtered) {
+		idx = len(filtered) - 1
+	}
+	if idx < 0 {
+		return nil
+	}
+	selected := filtered[idx]
+	if selected.Model == nil {
+		return nil
+	}
+	return []string{
+		"",
+		m.theme.Fg("muted", "  Model Name: "+selected.Model.Name),
+	}
 }
 
 // String returns a debug representation.
