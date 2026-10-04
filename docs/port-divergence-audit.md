@@ -1,6 +1,6 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 33 of 34 findings fixed
+> **Created:** 2026-08-26 · **Status:** 34 of 34 findings fixed
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -335,9 +335,27 @@
   (obsolete `TestTruncateOneLine` removed).
 - **Reference:** pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts:3593-3610.
 
-### 23. Compaction summary always fully expanded
-- TS collapsed by default with ctrl+o toggle; Go renders full markdown.
-  Header documents the deferral — decide whether to keep deferring.
+### 23. Compaction summary always fully expanded — ✅ FIXED (2026-10-03)
+- **Was:** TS compaction-summary-message.ts renders collapsed by default —
+  `Compacted from N tokens (ctrl+o to expand)` — and ctrl+o
+  (`app.tools.expand` → `toolOutputExpanded`, interactive-mode.ts:3418-3427)
+  toggles every expandable chat child; Go rendered the full markdown
+  unconditionally and its toggle only reached Tool/Bash components via an
+  explicit type switch. Deferral was documented in the file header.
+- **Fix:** `CompactionSummary` stores its inputs and rebuilds its box children
+  via `updateDisplay()` — collapsed one-liner with the dim `keyText` hint vs
+  expanded markdown body — with `SetExpanded(bool)` (reference
+  `setExpanded`/`updateDisplay`). `toggleToolOutputExpansion` now uses an
+  `expandable interface{ SetExpanded(bool) }` type assertion, the Go equivalent
+  of TS `isExpandable` duck-typing, so the summary joins Tool/Bash components
+  automatically. `handleCompactionEnd` adds the leading Spacer(1) TS adds and
+  creates the card with `SetExpanded(o.headerExpanded)`. Out of scope:
+  `rebuildTranscript` still skips compaction entries (part of the #19-documented
+  rebuild gap); TS `toLocaleString` comma-grouping of the token count
+  (cosmetic). Tests: `TestCompactionSummaryCollapsedByDefaultAndToggles`,
+  `TestCompactionSummaryInheritsExpandStateAtCreation`.
+- **Reference:** pi/packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts:10-59;
+  interactive-mode.ts:3024-3029,3418-3427.
 
 ---
 
