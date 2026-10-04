@@ -256,20 +256,23 @@ func (o *Orchestrator) setupEditorCallbacks() {
 	o.editor.OnAction("app.thinking.toggle", o.toggleThinking)
 }
 
+// expandable is the Go equivalent of the reference's isExpandable duck-type
+// check: any chat child with SetExpanded responds to the ctrl+o toggle.
+type expandable interface {
+	SetExpanded(bool)
+}
+
 // toggleToolOutputExpansion flips the shared expand flag (reference
-// app.tools.expand / toolOutputExpanded) and applies it to BOTH the header and
-// every tool/bash component currently in the chat (interactive-mode.ts:3420-3424).
+// app.tools.expand / toolOutputExpanded) and applies it to the header and
+// every expandable component currently in the chat (interactive-mode.ts:3418-3427).
 func (o *Orchestrator) toggleToolOutputExpansion() {
 	o.headerExpanded = !o.headerExpanded
 	if o.headerExpandable != nil {
 		o.headerExpandable.SetExpanded(o.headerExpanded)
 	}
 	for _, child := range o.chat.Children {
-		switch c := child.(type) {
-		case *ToolExecution:
-			c.SetExpanded(o.headerExpanded)
-		case *BashExecution:
-			c.SetExpanded(o.headerExpanded)
+		if e, ok := child.(expandable); ok {
+			e.SetExpanded(o.headerExpanded)
 		}
 	}
 }

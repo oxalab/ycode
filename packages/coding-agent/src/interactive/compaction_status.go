@@ -56,7 +56,14 @@ func (o *Orchestrator) handleCompactionEnd(event core.AgentSessionEvent) {
 		o.engine.Mutate(func() { o.addNotice(o.th.Fg("error", msg)) })
 	case event.CompactionResult != nil:
 		comp := NewCompactionSummary(event.CompactionResult, o.th, o.mdTheme())
-		o.engine.Mutate(func() { o.chat.AddChild(comp) })
+		// Inherit the current global expand state (TS sets
+		// component.setExpanded(this.toolOutputExpanded) at creation,
+		// interactive-mode.ts:3026), after the leading spacer TS adds.
+		comp.SetExpanded(o.headerExpanded)
+		o.engine.Mutate(func() {
+			o.chat.AddChild(components.NewSpacer(1))
+			o.chat.AddChild(comp)
+		})
 	}
 }
 
