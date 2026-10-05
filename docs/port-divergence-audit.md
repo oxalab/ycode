@@ -567,13 +567,132 @@
 
 ---
 
+## 🔧 Tools re-audit findings (2026-10-03) — OPEN, fix story-by-story
+
+Re-ran the killed tools audit via a three-way parallel comparison of every
+file in `core/tools/` against pi's `core/tools/*.ts`. The killed run's
+"major issues in edit_diff.go" are confirmed real (verified by a throwaway
+test: `GenerateDiffString` panics with `index out of range` on any non-empty
+diff; no recover in the tool path; no edit_diff tests exist). Findings
+grouped by area; severities: HIGH = wrong behavior/output or crash, MEDIUM =
+missing feature/surface, LOW = cosmetic/wording.
+
+### A. edit_diff.go / edit.go / write.go — the "major issues"
+
+- **A1 HIGH edit_diff.go:315 — ✅ FIXED (2026-10-03)** — LCS inner loop condition is `i <= n` instead
+  of `j <= n` → `dp[i][j]` index-out-of-range panic on any non-empty diff,
+  i.e. **every successful edit panics** (edit.go:207, no recover, file already
+  written). Empirically confirmed. Fixed + `TestGenerateDiffString_NoPanicAndOutput`.
+- **A2 HIGH edit_diff.go:25 — ✅ FIXED (2026-10-03)** — `NormalizeToLF` replaces `"\r\n"` with the
+  literal `"n"` → CRLF files corrupted on match and written back corrupted.
+  Fixed + `TestNormalizeToLF`.
+- **A3 HIGH edit_diff.go:263 — ✅ FIXED (2026-10-03)** — splice uses `edit.matchIndex+edit.matchIndex`
+  instead of `+matchLength` → wrong content written or slice panic.
+  Fixed + `TestApplyEditsToNormalizedContent_Splice`.
+- **A4 HIGH edit_diff.go:12-22 — ✅ FIXED (2026-10-03)** — `DetectLineEnding` branches inverted →
+  LF-only files get rewritten as CRLF. Fixed (TS-verbatim port) +
+  `TestDetectLineEnding`, `TestEditRoundTrip_PreservesLineEndings`.
+- **A5 MED edit_diff.go:49** — fuzzy normalization trims only tabs, TS
+  trims all trailing whitespace (`trimEnd`).
+- **A6 MED edit_diff.go:45** — missing NFKC normalization for fuzzy match.
+- **A7 MED edit_diff.go:279-305** — files >5000 lines fall back to whole-file
+  remove+add diff; npm `diff` computes a real diff at any size.
+- **A8 MED edit.go:66-100** — `prepareEditArguments` (repairs `edits` sent as
+  JSON string) never wired into the ToolDefinition; TS `prepareArguments` is.
+- **A9 MED edit.go:233-249** — result lacks all diff UI chrome: no
+  `renderDiff` colors/intra-line highlight, no streaming preview diff, no
+  success/error header backgrounds (TS edit.ts:434-483, diff.ts:79-147).
+- **A10 MED write.go:105-130** — content preview drops ALL blank lines (TS
+  keeps interior ones), no `... (N more lines, M total, to expand)` hint, no
+  syntax highlighting.
+- **A11 LOW** — error-string drift across edit_diff.go/edit.go ("THe old
+  text", "overalp", "whitespaces", "atleast", "inavlid arguments", lowercase
+  first letters, missing periods); read.go:108 same.
+- **A12 LOW** — `firstChangedLine` `-1` sentinel survives `omitempty` (TS
+  omits); `file_path` alias not accepted by edit/write input structs; access
+  check `os.Stat` vs R_OK|W_OK; write.go byte count vs TS UTF-16 length.
+
+### B. read.go / truncate.go / render_utils.go / path_utils.go
+
+- **B1 HIGH render_utils.go:152-193** — `GetTextOutput` type-switches on
+  `*TextContentBlock`/`*ImageContentBlock`, but tools store
+  `*llm.TextContent`/`*llm.ImageContent` → always returns `""`; TUI tool
+  results show no output.
+- **B2 HIGH truncate.go:106** — `TruncateHead` loop missing the `i < maxLines`
+  bound → files with >2000 short lines (<50KB) are NOT truncated while the
+  footer claims they were.
+- **B3 MED read.go:112-114** — access check is `os.Stat` + generic
+  "cannot read file"; TS uses R_OK access and surfaces the real fs error
+  (EACCES/ENOENT indistinguishable in Go).
+- **B4 MED read.go:136** — image-omitted text missing the
+  `Read image file [mime]` first line; **B5 MED** non-vision-model image note
+  not ported (no model context in Go Execute).
+- **B6 MED path_utils.go:26-30** — `tryNFDVariant` is a no-op TODO (TS does
+  `normalize("NFD")`); **B7 MED** Windows `/foo`-style root-relative paths
+  resolve against cwd, TS resolves against the drive root.
+- **B8 MED render_utils.go:12** — ANSI stripper only handles simple SGR CSI;
+  OSC/private-mode escapes leak into the TUI (npm strip-ansi handles all).
+- **B9 LOW** — terminal-capability detection diverges (case-sensitive
+  `iTerm.app`, misses ghostty/wezterm/kitty paths); image fallback text
+  format; `ycode-output` vs `pi-output` temp prefix; rune-vs-UTF-16
+  truncation cut points; offset-error casing; `TruncatedBy: ""` vs `null`;
+  output_accumulator split-UTF-8 (footnoted).
+
+### C. bash / find / grep / ls / queue / schema
+
+- **C1 HIGH bash.go:253-258** — `wg.Wait()` blocks on inherited stdio of
+  backgrounded children (`daemon &` hangs the tool until the descendant
+  exits); TS engineered a 100ms post-exit grace + stream destroy
+  (`waitForChildProcess`) precisely to avoid this.
+- **C2 HIGH output_accumulator.go:23-27** — random ID buffer never filled →
+  every spilled temp file is `ycode-base-0000000000000000.log`; runs overwrite
+  each other (also C-low: `ycode-base` vs `pi-bash` prefix).
+- **C3 HIGH bash.go:396-400** — timeout drops the collected output + formatted
+  "Command timed out after N seconds" message, returns raw `timeout:30` (LLM
+  loses all output); `%0.f` rounds fractional timeouts.
+- **C4 HIGH bash_unix.go:15** — abort kills process group with SIGTERM; TS
+  uses SIGKILL (trappable SIGTERM may not stop the command).
+- **C5 HIGH find.go:227** — `strings.TrimRight(p, "/r")` strips trailing `/`
+  AND `r` characters → mangled result paths (`driver` → `drive`).
+- **C6 HIGH find.go:321** — fd pattern rewrite builds `"**/*"+pattern` (TS
+  `"**/"+pattern`) → `src/*.ts` misses top-level matches.
+- **C7 HIGH grep.go:173-211** — 64KB `bufio.Scanner` cap on `rg --json` lines;
+  a long minified line silently ends scanning and can deadlock (rg blocked on
+  pipe, `cmd.Wait()` waiting); scanner.Err() unchecked, rg exit status
+  ignored (bad regex → "No matches found.").
+- **C8 MED** — no fd/rg auto-download (TS `ensureTool` fetches; Go silently
+  falls back to non-gitignore-aware WalkDir while the description promises
+  .gitignore respect); ripgrep download error wording.
+- **C9 MED bash.go:349-408** — no 100ms-throttled streaming partial output
+  (Go footnote acknowledges); **C10 MED** nil-pointer risk: `*opts.Timeout`
+  deref when caller ctx has deadline; **C11 MED** signal-kill mapped to
+  exit -1 → error, TS treats null exit as success.
+- **C12 MED ls.go:84-92** — missing `PromptSnippet: "List directory contents"`
+  (system prompt loses the ls snippet).
+- **C13 MED schema.go:70** — Go injects `additionalProperties: false` into
+  every tool schema; TS TypeBox emits none (wire-visible to providers).
+- **C14 MED tool_definition_wrapper.go** — drops `prepareArguments` and
+  ignores `ctxFactory` (extension tools get no context).
+- **C15 LOW** — wording/casing drift (bash cwd/abort/"(no output)", find
+  limit notices, grep "limti"/abort/period, ls error casing); find/ls apply
+  the 2000-line default where TS is byte-only; `integer` vs `number` schema
+  types; file-mutation-queue lock map never cleaned + relative-path key
+  normalization latent.
+- **OSC 133 note resolved:** no shell-integration markers exist in the bash
+  tool on either side — the earlier "OSC 133 partial" note is about message
+  rendering in pi (assistant/user-message.ts), nothing to port here.
+
+Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
+✅ done 2026-10-03 (tests in `edit_diff_test.go`), (2) B1/B2, (3) C1-C3,
+(4) C5-C7, then mediums/lows by area. B1 deserves a fast check — if the TUI
+really shows no tool output, it may be masked by another render path.
+
+---
+
 ## ⚠️ Unverified / needs re-audit
 
-- **Tools audit was killed partway** — it reported "major issues in
-  edit_diff.go" with no detail before stopping. Re-run that audit before
-  trusting read/write/edit/bash/glob/grep parity.
-- Audit also mentioned without detail: OSC 133 shell integration partial;
-  markdown theme cache missing; provider parity unverified.
+- Audit also mentioned without detail: markdown theme cache missing;
+  provider parity unverified. (OSC 133 resolved — see tools re-audit above.)
 - Known documented deferrals (do NOT re-audit as divergences): qjs threading
   (tracked in `.versions/upcoming/0.1.1.md`), `tools.ResizeImage` stub, image
   dimension notes, branch/skill/custom message renderers.
