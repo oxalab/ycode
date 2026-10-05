@@ -16,13 +16,16 @@ func DetectLineEnding(content string) string {
 		return "\n"
 	}
 	if crlfIdx == -1 {
+		return "\n"
+	}
+	if crlfIdx < lfIdx {
 		return "\r\n"
 	}
 	return "\n"
 }
 
 func NormalizeToLF(text string) string {
-	text = strings.ReplaceAll(text, "\r\n", "n")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	return strings.ReplaceAll(text, "\r", "\n")
 }
 
@@ -260,7 +263,7 @@ func ApplyEditsToNormalizedContent(normalizedContent string, edits []Edit, path 
 	newContent := baseContent
 	for i := len(matchedEdits) - 1; i >= 0; i-- {
 		edit := matchedEdits[i]
-		newContent = newContent[:edit.matchIndex] + edit.newText + newContent[edit.matchIndex+edit.matchIndex:]
+		newContent = newContent[:edit.matchIndex] + edit.newText + newContent[edit.matchIndex+edit.matchLength:]
 	}
 	if baseContent == newContent {
 		return AppliedEditsResult{}, getNoChangeError(path, len(normalizedEdits))
@@ -312,7 +315,7 @@ func diffLinesCompute(oldStr, newStr string) []diffPart {
 		dp[i] = make([]int, n+1)
 	}
 	for i := 1; i <= m; i++ {
-		for j := 1; i <= n; j++ {
+		for j := 1; j <= n; j++ {
 			if oldLines[i-1] == newLines[j-1] {
 				dp[i][j] = dp[i-1][j-1] + 1
 			} else {
