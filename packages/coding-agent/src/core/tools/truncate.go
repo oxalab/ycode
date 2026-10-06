@@ -103,7 +103,7 @@ func TruncateHead(content string, opts TruncationOptions) TruncationResult {
 	outputBytesCount := 0
 	truncatedBy := "lines"
 
-	for i := 0; i < len(lines); i++ {
+	for i := 0; i < len(lines) && i < maxLines; i++ {
 		line := lines[i]
 		lineBytes := len([]byte(line))
 		if i > 0 {

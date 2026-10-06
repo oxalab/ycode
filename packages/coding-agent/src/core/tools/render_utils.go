@@ -7,6 +7,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	llm "ycode/packages/llm/src"
 )
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -120,26 +122,13 @@ func ImageFallback(mimeType string, dims *ImageDimensions) string {
 	return fmt.Sprintf("[Image: %s]", mimeType)
 }
 
-// TextContentBlock: Represents a text content block in a tool result
-type TextContentBlock struct {
-	Type string `json:"types"`
-	Text string `json:"text,omitempty"`
-}
-
-// ImageContentBlock: Represents an image content block in a tool result.
-type ImageContentBlock struct {
-	Type 	string 	`json:"type"`
-	Data 	string 	`json:"data,omitempty"`
-	MimeType string `json:"mimeType,omitempty"`
-}
-
 // ToolResult: Represents the common shape of a tool execution result.
 type ToolResult struct {
 	Content []any 	`json:"content"`
 }
 
 /*GetTextOutput: Extracts text output from a tool result.
- - NOTE: When images are present but cannot be displayed, 
+ - NOTE: When images are present but cannot be displayed,
  generates fallback text indicators.
 */
 func GetTextOutput(result *ToolResult, showImages bool) string {
@@ -151,23 +140,23 @@ func GetTextOutput(result *ToolResult, showImages bool) string {
 	var imageBlocks []map[string]string
 	for _, c := range result.Content {
 		switch block := c.(type) {
-		case *TextContentBlock:
+		case *llm.TextContent:
 			textBlocks = append(textBlocks, map[string]string{
 				"type": block.Type,
 				"text": block.Text,
 			})
-		case TextContentBlock:
+		case llm.TextContent:
 			textBlocks = append(textBlocks, map[string]string{
 				"type": block.Type,
 				"text": block.Text,
 			})
-		case *ImageContentBlock:
+		case *llm.ImageContent:
 			imageBlocks = append(imageBlocks, map[string]string{
 				"type":     block.Type,
 				"data":     block.Data,
 				"mimeType": block.MimeType,
 			})
-		case ImageContentBlock:
+		case llm.ImageContent:
 			imageBlocks = append(imageBlocks, map[string]string{
 				"type":     block.Type,
 				"data":     block.Data,
@@ -188,6 +177,20 @@ func GetTextOutput(result *ToolResult, showImages bool) string {
 					"type":     t,
 					"data":     data,
 					"mimeType": mimeType,
+				})
+			}
+		case map[string]string:
+			t := block["type"]
+			if t == "text" {
+				textBlocks = append(textBlocks, map[string]string{
+					"type": t,
+					"text": block["text"],
+				})
+			} else if t == "image" {
+				imageBlocks = append(imageBlocks, map[string]string{
+					"type":     t,
+					"data":     block["data"],
+					"mimeType": block["mimeType"],
 				})
 			}
 		}
