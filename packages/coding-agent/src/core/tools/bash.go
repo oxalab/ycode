@@ -187,6 +187,21 @@ func getShellEnv() []string {
 	return env
 }
 
+// exitStdioGraceMs is the post-exit grace window before force-closing the
+// stdio pipes (TS EXIT_STDIO_GRACE_MS): a process that exited but still has
+// streams open (descendants inheriting the write-ends) gets 100ms to flush.
+const exitStdioGraceMs = 100 * time.Millisecond
+
+// timeoutSentinel builds the internal timeout error. Formatted with %g so
+// fractional timeouts survive ("2.5", not TS-unlike rounding); guarded for a
+// nil Timeout (deadline inherited from the parent context).
+func timeoutSentinel(opts BashExecOptions) error {
+	if opts.Timeout == nil {
+		return fmt.Errorf("timeout")
+	}
+	return fmt.Errorf("timeout:%g", *opts.Timeout)
+}
+
 func (l *localBashOps) Exec(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
 	if _, err := os.Stat(cwd); err != nil {
 		return nil, fmt.Errorf("working directory does not exist: %s\nCannot execute bash commands", cwd)
@@ -254,26 +269,54 @@ func (l *localBashOps) Exec(ctx context.Context, command string, cwd string, opt
 	go streamOutput(stdout)
 	go streamOutput(stderr)
 
-	wg.Wait()
-	waitErr := cmd.Wait()
-	close(done)
+	// Wait for process exit in its own goroutine. cmd.Wait closes the pipe
+	// write-ends when the process exits, so the pumps drain buffered data and
+	// see EOF — the equivalent of TS destroying the streams after exit.
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- cmd.Wait() }()
 
-	if ctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("timeout:%0.f", *opts.Timeout)
-	}
-	if ctx.Err() == context.Canceled {
-		return nil, fmt.Errorf("aborted")
-	}
-
-	exitCode := 0
-	if waitErr != nil {
-		if exitErr, ok := waitErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return nil, waitErr
+	// finalize waits for the stream pumps with a short grace window, then
+	// force-closes the pipe read-ends (TS stream destroy) so a descendant
+	// inheriting the write-ends (`sleep 300 &`) can never block completion.
+	finalize := func(waitErr error) (*BashExecResult, error) {
+		streamsDone := make(chan struct{})
+		go func() { wg.Wait(); close(streamsDone) }()
+		select {
+		case <-streamsDone:
+		case <-time.After(exitStdioGraceMs):
 		}
+		stdout.Close()
+		stderr.Close()
+		<-streamsDone
+		close(done)
+
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, timeoutSentinel(opts)
+		}
+		if ctx.Err() == context.Canceled {
+			return nil, fmt.Errorf("aborted")
+		}
+
+		exitCode := 0
+		if waitErr != nil {
+			if exitErr, ok := waitErr.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				return nil, waitErr
+			}
+		}
+		return &BashExecResult{ExitCode: exitCode}, nil
 	}
-	return &BashExecResult{ExitCode: exitCode}, nil
+
+	select {
+	case waitErr := <-exitCh:
+		return finalize(waitErr)
+	case <-ctx.Done():
+		// Timeout or abort: the watcher goroutine kills the process; wait for
+		// the exit so Wait's pipe handling completes before finalizing.
+		waitErr := <-exitCh
+		return finalize(waitErr)
+	}
 }
 
 
@@ -368,34 +411,40 @@ func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.Too
 			accum.CloseTempFile()
 
 			snapshot := accum.Snapshot(true)
-			outputText := snapshot.Content
-			if outputText == "" {
-				outputText = "(no output)"
-			}
-
-			
+			statusText := snapshot.Content
 			if snapshot.Truncation.Truncated {
 				startLine := snapshot.Truncation.TotalLines - snapshot.Truncation.OutputLines + 1
 				endLine := snapshot.Truncation.TotalLines
 				if snapshot.Truncation.LastLinePartial {
 					lastLineSize := FormatSize(accum.GetLastLineBytes())
-					outputText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
+					statusText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
 						FormatSize(snapshot.Truncation.OutputBytes), endLine, lastLineSize, snapshot.FullOutputPath)
 				} else if snapshot.Truncation.TruncatedBy == "lines" {
-					outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
+					statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
 						startLine, endLine, snapshot.Truncation.TotalLines, snapshot.FullOutputPath)
 				} else {
-					outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
+					statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
 						startLine, endLine, snapshot.Truncation.TotalLines, FormatSize(DefaultMaxBytes), snapshot.FullOutputPath)
 				}
 			}
+			// Error paths use the raw content without the "(no output)"
+			// placeholder (TS formatOutput(snapshot, "")); the placeholder is
+			// only for the success result.
+			outputText := statusText
+			if outputText == "" {
+				outputText = "(no output)"
+			}
 			if execErr != nil {
 				if execErr.Error() == "aborted" {
-					return nil, fmt.Errorf("%s", appendStatus(outputText, "Command Aborted"))
+					return nil, fmt.Errorf("%s", appendStatus(statusText, "Command aborted"))
 				}
-				if strings.HasPrefix(execErr.Error(), "timeout:") {
-					timeoutSecs := strings.TrimPrefix(execErr.Error(), "timeout:")
-					(appendStatus(outputText, fmt.Sprintf("Command timed out after %s seconds", timeoutSecs)))
+				if execErr.Error() == "timeout" || strings.HasPrefix(execErr.Error(), "timeout:") {
+					secs := strings.TrimPrefix(execErr.Error(), "timeout:")
+					msg := "Command timed out"
+					if secs != "" {
+						msg = fmt.Sprintf("Command timed out after %s seconds", secs)
+					}
+					return nil, fmt.Errorf("%s", appendStatus(statusText, msg))
 				}
 				return nil, execErr
 			}
