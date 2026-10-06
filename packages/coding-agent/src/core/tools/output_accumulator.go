@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ type OutputSnapshot struct {
 
 func defaultTempFilePath(prefix string) string {
 	b := make([]byte, 8)
+	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
 	return filepath.Join(os.TempDir(), prefix+"-"+id+".log")
 }
