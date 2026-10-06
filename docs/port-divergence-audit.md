@@ -614,13 +614,20 @@ missing feature/surface, LOW = cosmetic/wording.
 
 ### B. read.go / truncate.go / render_utils.go / path_utils.go
 
-- **B1 HIGH render_utils.go:152-193** — `GetTextOutput` type-switches on
+- **B1 HIGH render_utils.go:152-193 — ✅ FIXED (2026-10-04)** — `GetTextOutput` type-switches on
   `*TextContentBlock`/`*ImageContentBlock`, but tools store
   `*llm.TextContent`/`*llm.ImageContent` → always returns `""`; TUI tool
-  results show no output.
-- **B2 HIGH truncate.go:106** — `TruncateHead` loop missing the `i < maxLines`
+  results show no output. Fixed: switch now reads the llm types (+ value
+  forms), keeps the `map[string]any` case, adds `map[string]string` (the
+  app_update.go error path), and the dead local block structs are removed;
+  post-loop text-join/image-fallback logic was already a faithful TS port and
+  is unchanged. Tests: `render_utils_test.go` (llm blocks, image fallback,
+  both map shapes, nil/empty).
+- **B2 HIGH truncate.go:106 — ✅ FIXED (2026-10-04)** — `TruncateHead` loop missing the `i < maxLines`
   bound → files with >2000 short lines (<50KB) are NOT truncated while the
-  footer claims they were.
+  footer claims they were. Fixed (one condition, TS truncate.ts:115 parity);
+  `TruncateTail` already had the bound. Tests: `truncate_test.go` (max-lines
+  cap, first-line-exceeds path, mid-file byte cap, under-limits pass-through).
 - **B3 MED read.go:112-114** — access check is `os.Stat` + generic
   "cannot read file"; TS uses R_OK access and surfaces the real fs error
   (EACCES/ENOENT indistinguishable in Go).
@@ -683,7 +690,8 @@ missing feature/surface, LOW = cosmetic/wording.
   rendering in pi (assistant/user-message.ts), nothing to port here.
 
 Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
-✅ done 2026-10-03 (tests in `edit_diff_test.go`), (2) B1/B2, (3) C1-C3,
+✅ done 2026-10-03 (tests in `edit_diff_test.go`), (2) ~~B1/B2~~ ✅ done
+2026-10-04 (tests in `render_utils_test.go`, `truncate_test.go`), (3) C1-C3,
 (4) C5-C7, then mediums/lows by area. B1 deserves a fast check — if the TUI
 really shows no tool output, it may be masked by another render path.
 
