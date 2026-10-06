@@ -647,16 +647,30 @@ missing feature/surface, LOW = cosmetic/wording.
 
 ### C. bash / find / grep / ls / queue / schema
 
-- **C1 HIGH bash.go:253-258** — `wg.Wait()` blocks on inherited stdio of
+- **C1 HIGH bash.go:253-258 — ✅ FIXED (2026-10-04)** — `wg.Wait()` blocks on inherited stdio of
   backgrounded children (`daemon &` hangs the tool until the descendant
   exits); TS engineered a 100ms post-exit grace + stream destroy
-  (`waitForChildProcess`) precisely to avoid this.
-- **C2 HIGH output_accumulator.go:23-27** — random ID buffer never filled →
+  (`waitForChildProcess`) precisely to avoid this. Fixed: `cmd.Wait` moved to
+  its own goroutine; after exit the stream pumps get the 100ms grace
+  (`exitStdioGraceMs`), then both pipe read-ends are force-closed (the Go
+  equivalent of TS stream destroy) and `close(done)` moved after
+  finalization so the kill watcher can't leak. `sleep 30 & echo hi` now
+  returns in ~0.1s (`TestExecBackgroundChildDoesNotHang`).
+- **C2 HIGH output_accumulator.go:23-27 — ✅ FIXED (2026-10-04)** — random ID buffer never filled →
   every spilled temp file is `ycode-base-0000000000000000.log`; runs overwrite
-  each other (also C-low: `ycode-base` vs `pi-bash` prefix).
-- **C3 HIGH bash.go:396-400** — timeout drops the collected output + formatted
+  each other. Fixed with `crypto/rand` (`rand.Read(b)`, the bash_executor.go
+  pattern). Test: `TestDefaultTempFilePathUnique`.
+- **C3 HIGH bash.go:396-400 — ✅ FIXED (2026-10-04)** — timeout drops the collected output + formatted
   "Command timed out after N seconds" message, returns raw `timeout:30` (LLM
-  loses all output); `%0.f` rounds fractional timeouts.
+  loses all output); `%0.f` rounds fractional timeouts. Fixed: the timeout
+  mapping now returns `appendStatus(statusText, ...)` (output preserved;
+  error paths use raw snapshot content, no "(no output)" placeholder — TS
+  `formatOutput(snapshot, "")` parity); sentinel formatted with `%g`
+  (preserves `2.5`) and nil-Timeout guarded (parent-ctx deadline no longer
+  derefs); folded in the LOW abort-wording finding ("Command Aborted" +
+  placeholder → "Command aborted"). Tests: `TestExecTimeoutPreservesOutput`,
+  `TestExecAbortWording` (in `bash_exec_test.go` — the first real-execution
+  bash tests).
 - **C4 HIGH bash_unix.go:15** — abort kills process group with SIGTERM; TS
   uses SIGKILL (trappable SIGTERM may not stop the command).
 - **C5 HIGH find.go:227** — `strings.TrimRight(p, "/r")` strips trailing `/`
@@ -691,7 +705,8 @@ missing feature/surface, LOW = cosmetic/wording.
 
 Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 ✅ done 2026-10-03 (tests in `edit_diff_test.go`), (2) ~~B1/B2~~ ✅ done
-2026-10-04 (tests in `render_utils_test.go`, `truncate_test.go`), (3) C1-C3,
+2026-10-04 (tests in `render_utils_test.go`, `truncate_test.go`), (3) ~~C1-C3~~
+✅ done 2026-10-04 (tests in `bash_exec_test.go`), (4) C5-C7,
 (4) C5-C7, then mediums/lows by area. B1 deserves a fast check — if the TUI
 really shows no tool output, it may be masked by another render path.
 
