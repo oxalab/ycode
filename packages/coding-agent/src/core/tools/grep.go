@@ -73,6 +73,15 @@ type rgEvent struct {
 }
 
 
+// exitCodeOf extracts the process exit code from a cmd.Wait error, or -1 if
+// it isn't an ExitError.
+func exitCodeOf(waitErr error) int {
+	if exitErr, ok := waitErr.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
 func formatGrepPath(filePath string, searchPath string, isDirectory bool) string {
 	if isDirectory {
 		rel, err := filepath.Rel(searchPath, filePath)
@@ -111,7 +120,7 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 			}
 			var input GrepToolInput
 			if err := json.Unmarshal(args, &input); err != nil {
-				return nil, fmt.Errorf("invalid agruments: %w", err)
+				return nil, fmt.Errorf("invalid arguments: %w", err)
 			}
 			
 			searchPath := ResolveToCwd(".", cwd)
@@ -154,7 +163,8 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 			if err != nil {
 				return nil, fmt.Errorf("failed to create pipe: %w", err)
 			}
-			cmd.Stderr = new(strings.Builder)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
 			if err := cmd.Start(); err != nil {
 				return nil, fmt.Errorf("failed to run ripgrep: %w", err)
 			}
@@ -171,6 +181,10 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 			matchLimitReached := false
 			linesTruncated := false
 			scanner := bufio.NewScanner(stdout)
+			// rg --json lines embed the full matched line, which can be
+			// arbitrarily long (minified files); the 64KB default cap would
+			// silently end scanning (TS readline is unbounded).
+			scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 			for scanner.Scan() {
 				line := scanner.Text()
 				if strings.TrimSpace(line) == "" {
@@ -208,16 +222,36 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 					}
 				}
 			}
-			cmd.Wait()
+			if scanErr := scanner.Err(); scanErr != nil {
+				// The scanner stopped early — nothing is draining the pipe, so
+				// rg would block on a full one and cmd.Wait() would deadlock.
+				cmd.Process.Kill()
+				cmd.Wait()
+				return nil, fmt.Errorf("ripgrep output error: %v", scanErr)
+			}
+			waitErr := cmd.Wait()
 
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("Operation aborted")
 			default:
+			}
+			// Real rg failure (bad regex etc.) must not masquerade as "no
+			// matches" (TS grep.ts:293-313: codes 0/1 are the only successes).
+			if !matchLimitReached && waitErr != nil {
+				if exitErr, ok := waitErr.(*exec.ExitError); ok && (exitErr.ExitCode() == 0 || exitErr.ExitCode() == 1) {
+					// treated as success below
+				} else {
+					msg := strings.TrimSpace(stderr.String())
+					if msg == "" {
+						msg = fmt.Sprintf("ripgrep exited with code %d", exitCodeOf(waitErr))
+					}
+					return nil, fmt.Errorf("%s", msg)
+				}
 			}
 			if matchCount == 0 {
 				return &ToolExecuteResult{
-					Content: []llm.ContentBlock{&llm.TextContent{Type:"text", Text:"No matches found."}},
+					Content: []llm.ContentBlock{&llm.TextContent{Type:"text", Text:"No matches found"}},
 				}, nil
 			}
 			// Format matches
@@ -279,7 +313,7 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 			details := &GrepToolDetails{}
 			var notices []string
 			if matchLimitReached {
-				notices = append(notices, fmt.Sprintf("%d matches limti reached. Use limit=%d for more, or refine pattern", effectiveLimit, effectiveLimit *2))
+				notices = append(notices, fmt.Sprintf("%d matches limit reached. Use limit=%d for more, or refine pattern", effectiveLimit, effectiveLimit *2))
 				details.MatchLimitReached = effectiveLimit
 			}
 			if truncation.Truncated {
