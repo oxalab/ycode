@@ -222,21 +222,7 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 			}
 
 			// Relativize paths
-			relativized := make([]string, 0, len(results))
-			for _, p := range results {
-				p = strings.TrimRight(p, "/r")
-				p = strings.TrimSpace(p)
-				if p == "" {
-					continue
-				}
-				if filepath.IsAbs(p) && strings.HasPrefix(p, searchPath) {
-					p = p[len(searchPath)+1:]
-				} else if filepath.IsAbs(p) {
-					rel, _ := filepath.Rel(searchPath, p)
-					p = rel
-				}
-				relativized = append(relativized, toPosixPath(p))
-			}
+			relativized := relativizeFindResults(results, searchPath)
 			
 			resultLimitReached := len(relativized) >= effectiveLimit
 			rawOutput := strings.Join(relativized, "\n")
@@ -301,6 +287,54 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 runFdOrFallback: Tries to use the fd command for glob matching.
  - Falls back to WalkDir-based implementation if fd is not available.
 */
+// buildFdPattern rewrites a user glob for fd's --full-path mode: a relative
+// pattern containing "/" must be anchored so it matches at any depth
+// (TS find.ts:242-248 uses "**/" + pattern). Returns whether --full-path is
+// needed.
+func buildFdPattern(pattern string) (string, bool) {
+	if strings.Contains(pattern, "/") {
+		if !strings.HasPrefix(pattern, "/") && !strings.HasPrefix(pattern, "**/") && pattern != "**" {
+			return "**/" + pattern, true
+		}
+		return pattern, true
+	}
+	return pattern, false
+}
+
+// relativizeFindResults turns fd/WalkDir output lines into searchPath-relative
+// POSIX paths. Mirrors TS find.ts:303-316: strip a trailing CR, trim
+// whitespace, preserve a trailing directory slash (recorded before
+// relativizing, re-appended after), prefix-strip searchPath or Rel() it.
+// (The old Go code TrimRight'd the cutset "/r", mangling names like
+// "driver" → "drive" and destroying dir markers.)
+func relativizeFindResults(results []string, searchPath string) []string {
+	relativized := make([]string, 0, len(results))
+	for _, raw := range results {
+		line := strings.TrimSuffix(raw, "\r")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		hadTrailingSlash := strings.HasSuffix(line, "/") || strings.HasSuffix(line, "\\")
+		var relativePath string
+		if strings.HasPrefix(line, searchPath) && len(line) > len(searchPath) {
+			relativePath = line[len(searchPath)+1:]
+		} else {
+			rel, err := filepath.Rel(searchPath, line)
+			if err != nil {
+				relativePath = line
+			} else {
+				relativePath = rel
+			}
+		}
+		if hadTrailingSlash && !strings.HasSuffix(relativePath, "/") {
+			relativePath += "/"
+		}
+		relativized = append(relativized, toPosixPath(relativePath))
+	}
+	return relativized
+}
+
 func runFdOrFallback(pattern, searchPath string, ignore []string, limit int, ctx context.Context) []string {
 	// Check if fd is available
 	fdPath, err := exec.LookPath("fd")
@@ -314,12 +348,9 @@ func runFdOrFallback(pattern, searchPath string, ignore []string, limit int, ctx
 		"--no-require-git", "--max-results", fmt.Sprintf("%d", limit),
 	}
 
-	effectivePattern := pattern
-	if strings.Contains(pattern, "/") {
+	effectivePattern, needsFullPath := buildFdPattern(pattern)
+	if needsFullPath {
 		args = append(args, "--full-path")
-		if !strings.HasPrefix(pattern, "/") && !strings.HasPrefix(pattern, "**/") && pattern != "**" {
-			effectivePattern = "**/*" + pattern
-		}
 	}
 	args = append(args, "--", effectivePattern, searchPath)
 
