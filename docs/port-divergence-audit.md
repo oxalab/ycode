@@ -673,14 +673,28 @@ missing feature/surface, LOW = cosmetic/wording.
   bash tests).
 - **C4 HIGH bash_unix.go:15** — abort kills process group with SIGTERM; TS
   uses SIGKILL (trappable SIGTERM may not stop the command).
-- **C5 HIGH find.go:227** — `strings.TrimRight(p, "/r")` strips trailing `/`
-  AND `r` characters → mangled result paths (`driver` → `drive`).
-- **C6 HIGH find.go:321** — fd pattern rewrite builds `"**/*"+pattern` (TS
-  `"**/"+pattern`) → `src/*.ts` misses top-level matches.
-- **C7 HIGH grep.go:173-211** — 64KB `bufio.Scanner` cap on `rg --json` lines;
+- **C5 HIGH find.go:227 — ✅ FIXED (2026-10-05)** — `strings.TrimRight(p, "/r")` strips trailing `/`
+  AND `r` characters → mangled result paths (`driver` → `drive`). Fixed:
+  post-processing extracted to `relativizeFindResults`, a TS-verbatim port of
+  find.ts:303-316 (strip single trailing `\r`, trim, preserve trailing dir
+  slash recorded before relativizing and re-appended, prefix-strip/Rel).
+  Test: `TestRelativizeFindResults`.
+- **C6 HIGH find.go:321 — ✅ FIXED (2026-10-05)** — fd pattern rewrite builds `"**/*"+pattern` (TS
+  `"**/"+pattern`) → `src/*.ts` misses top-level matches. Fixed: extracted
+  `buildFdPattern` helper, `"**/"` anchor per TS find.ts:242-248 (`--full-path`
+  only when the pattern contains `/`). Test: `TestBuildFdPattern`.
+- **C7 HIGH grep.go:173-211 — ✅ FIXED (2026-10-05)** — 64KB `bufio.Scanner` cap on `rg --json` lines;
   a long minified line silently ends scanning and can deadlock (rg blocked on
   pipe, `cmd.Wait()` waiting); scanner.Err() unchecked, rg exit status
-  ignored (bad regex → "No matches found.").
+  ignored (bad regex → "No matches found."). Fixed: 1MB initial/10MB max
+  scanner buffer; `scanner.Err()` checked → kill + error instead of
+  deadlocking `cmd.Wait()`; stderr captured (`new(strings.Builder)` was
+  written and discarded) and mapped TS-style (non-0/1 exit → stderr text or
+  `ripgrep exited with code N`; ctx cancel → `Operation aborted`); folded in
+  LOW wordings: "No matches found." → "No matches found", "limti" typo,
+  "invalid agruments" typo. Tests: `TestGrepLongLineNoDeadlock`,
+  `TestGrepBadRegexIsError`, `TestGrepNoMatchesWording`,
+  `TestGrepLimitNoticeTypo` (in `find_grep_test.go`; real-rg, skip-gated).
 - **C8 MED** — no fd/rg auto-download (TS `ensureTool` fetches; Go silently
   falls back to non-gitignore-aware WalkDir while the description promises
   .gitignore respect); ripgrep download error wording.
@@ -706,9 +720,11 @@ missing feature/surface, LOW = cosmetic/wording.
 Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 ✅ done 2026-10-03 (tests in `edit_diff_test.go`), (2) ~~B1/B2~~ ✅ done
 2026-10-04 (tests in `render_utils_test.go`, `truncate_test.go`), (3) ~~C1-C3~~
-✅ done 2026-10-04 (tests in `bash_exec_test.go`), (4) C5-C7,
-(4) C5-C7, then mediums/lows by area. B1 deserves a fast check — if the TUI
-really shows no tool output, it may be masked by another render path.
+✅ done 2026-10-04 (tests in `bash_exec_test.go`), (4) ~~C5-C7~~ ✅ done
+2026-10-05 (tests in `find_grep_test.go`), then C-group mediums/lows by area;
+remaining unverified: markdown theme cache, provider parity. (B1's masked-path
+question was resolved in story 2 — the interactive path uses
+`extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
 
 ---
 
