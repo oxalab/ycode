@@ -276,6 +276,10 @@ type ToolDefinition struct {
 	Execute 		func(ctx context.Context, args json.RawMessage) (any, error)
 	RenderCall  	func(args any) any
 	RenderResult	func(args any, result any, options any) any
+	// PrepareArguments is an optional compatibility shim applied to raw tool
+	// call arguments before Execute (TS prepareArguments). It repairs
+	// model-specific argument shapes (e.g. `edits` sent as a JSON string).
+	PrepareArguments 	func(args any) (any, error)
 }
 
 // --- Registered Types ---

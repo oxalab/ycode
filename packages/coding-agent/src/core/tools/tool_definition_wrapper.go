@@ -20,6 +20,7 @@ func WrapToolDefinition(def *extensions.ToolDefinition, ctxFactory func() any) *
 		Description: 	def.Description,
 		Parameters: 	params,
 		ExecutionMode:  sdk.ToolExecutionMode(def.ExecutionMode),
+		PrepareArguments: def.PrepareArguments,
 		Execute: func(toolCallID string, params any, signal context.Context, onUpdate sdk.AgentToolUpdateCallback[any]) (sdk.AgentToolResult[any], error) {
     		args, _ := json.Marshal(params)
     		result, err := def.Execute(signal, args)
@@ -64,6 +65,7 @@ func CreateToolDefinitionFromAgentTool(tool *sdk.AgentTool[any]) *extensions.Too
 		Description:   tool.Description,
 		Parameters:    params,
 		ExecutionMode: extensions.ToolExecutionMode(tool.ExecutionMode),
+		PrepareArguments: tool.PrepareArguments,
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var p any
 			if args != nil {

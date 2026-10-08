@@ -61,7 +61,9 @@ type EditToolOptions struct {
 
 /*
 prepareEditArguments: Normalized edit input, handling legact oldText/newText at top level
-and models that send edits as a JSON instead of an array.
+and models that send edits as a JSON instead of an array. Wired as the tool
+definition's PrepareArguments shim (TS edit.ts:308); the agent loop applies it
+before Execute.
 */
 func prepareEditArguments(input any) any {
 	argsMap, ok := input.(map[string]any)
@@ -69,9 +71,10 @@ func prepareEditArguments(input any) any {
 		return input
 	}
 
-	// Some models send edits as a JSON string instead of an array
+	// Some models send edits as a JSON string instead of an array. Parsed as
+	// []any (TS JSON.parse + Array.isArray) so objects with extra keys survive.
 	if editStr, ok := argsMap["edits"].(string); ok {
-		var parsed []ReplaceEdit
+		var parsed []any
 		if err := json.Unmarshal([]byte(editStr), &parsed); err == nil {
 			argsMap["edits"] = parsed
 		}
@@ -141,6 +144,9 @@ func CreateEditToolDefinition(cwd string, opts *EditToolOptions) *extensions.Too
 				}, []string{"oldText", "newText"}),
 			},
 		}, []string{"path", "edits"}),
+		PrepareArguments: func(args any) (any, error) {
+			return prepareEditArguments(args), nil
+		},
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			select {
 			case <-ctx.Done():
@@ -256,16 +262,15 @@ func CreateEditTool(cwd string, opts *EditToolOptions) *sdk.AgentTool[any] {
 
 /*
 FOOTNOTE:
- 1. prepareEditArguments not wired to ToolDefinition — The TS ToolDefinition 
- has a prepareArguments field, but our Go version doesn't. The Go ToolDefinition 
- only has Execute which receives raw JSON. Legacy argument normalization 
- (top-level oldText/newText → edits array) would need to happen inside Execute 
- before unmarshaling. I included OldText/NewText as optional fields in 
- EditToolInput and handle them in validateEditInput as a workaround.
+ 1. prepareEditArguments wired 2026-10-05 (audit A8) — ToolDefinition now has a
+ PrepareArguments shim field, copied to the AgentTool by WrapToolDefinition and
+ applied by the SDK agent loop before Execute (mirroring TS prepareArguments →
+ agent-loop). The OldText/NewText optional fields + validateEditInput fallback
+ remain as a second net.
 
- 2. Diff preview in renderCall deferred — TS has a sophisticated preview system 
- (EditCallRenderComponent) that computes diffs on-the-fly as the user types. 
- This requires async rendering and component state management from the TUI. 
+ 2. Diff preview in renderCall deferred — TS has a sophisticated preview system
+ (EditCallRenderComponent) that computes diffs on-the-fly as the user types.
+ This requires async rendering and component state management from the TUI.
  Simplified to just showing the filename.
 
  3. renderShell: "self" not ported — TS marks the edit tool with renderShell: "self" 
