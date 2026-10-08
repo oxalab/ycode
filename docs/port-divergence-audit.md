@@ -597,8 +597,18 @@ missing feature/surface, LOW = cosmetic/wording.
 - **A6 MED edit_diff.go:45** — missing NFKC normalization for fuzzy match.
 - **A7 MED edit_diff.go:279-305** — files >5000 lines fall back to whole-file
   remove+add diff; npm `diff` computes a real diff at any size.
-- **A8 MED edit.go:66-100** — `prepareEditArguments` (repairs `edits` sent as
+- **A8 MED edit.go:66-100 — ✅ FIXED (2026-10-05)** — `prepareEditArguments` (repairs `edits` sent as
   JSON string) never wired into the ToolDefinition; TS `prepareArguments` is.
+  Fixed: `extensions.ToolDefinition` gained a `PrepareArguments func(args any)
+  (any, error)` shim field; `WrapToolDefinition`, `CreateToolDefinitionFromAgentTool`,
+  and `buildAgentToolFromDefinition` copy it (the SDK `AgentTool.PrepareArguments`
+  + agent-loop invocation already existed — only the bridges were missing);
+  `CreateEditToolDefinition` wires `prepareEditArguments` into it. The string
+  parse is now `[]any` (TS `JSON.parse`+`Array.isArray` parity — extra keys in
+  edit objects survive). The stale edit.go footnote claiming it's unwired is
+  updated. Tests: `edit_tool_test.go` (7 tests: string repair, extra-keys
+  survival, legacy top-level, non-map passthrough, AgentTool shim presence,
+  prepare→marshal→Execute end-to-end, single-apply no-double-append).
 - **A9 MED edit.go:233-249** — result lacks all diff UI chrome: no
   `renderDiff` colors/intra-line highlight, no streaming preview diff, no
   success/error header backgrounds (TS edit.ts:434-483, diff.ts:79-147).
