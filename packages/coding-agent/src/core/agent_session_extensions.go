@@ -583,6 +583,7 @@ func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry) sdk.Ag
 		Label:       entry.Definition.Label,
 		Description: entry.Definition.Description,
 		Parameters:  params,
+		PrepareArguments: entry.Definition.PrepareArguments,
 		Execute: func(toolCallID string, params any, signal context.Context, onUpdate sdk.AgentToolUpdateCallback[any]) (sdk.AgentToolResult[any], error) {
 			// If the definition has its own Execute function, use it
 			if entry.Definition.Execute != nil {
