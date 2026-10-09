@@ -5,6 +5,10 @@ import (
 	"strconv"
 	"strings"
 	"os"
+	"unicode"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
+	"golang.org/x/text/unicode/norm"
 )
 
 // --- Line ending utilities ---
@@ -40,18 +44,20 @@ func RestoreLineEndings(text string, ending string) string {
 
 /*
 NormalizeForFuzzyMatch: Normalized text for fuzzy matching.
- - Applies progressive transformations: strip trailing whitespaces, normalize smart quotes, Unicode dashes and special cases.
- - NOTE: NKFC Normalization (.normalize("NKFC") in TS) is not applied.
- - Requires golang.org/x/text/unicode/norm. Without it, fullwidth/compatibility characters
- - won't be matched. Rare in code editing contexts.
+ - Applies progressive transformations: NFKC normalization, strip trailing
+ whitespaces per line, normalize smart quotes, Unicode dashes and special cases.
+ Order mirrors TS edit-diff.ts:34-55 (NFKC → trimEnd → rune map).
 */
 func NormalizeForFuzzyMatch(text string) string {
-	// Strip trailing whitespace per line
-	lines := strings.Split(text, "\n")
+	// TS .normalize("NFKC"): folds fullwidth/compatibility chars to ASCII so
+	// e.g. "！" matches "!".
+	result := norm.NFKC.String(text)
+	// Strip trailing whitespace per line (TS line.trimEnd())
+	lines := strings.Split(result, "\n")
 	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, "\t")
+		lines[i] = strings.TrimRightFunc(line, unicode.IsSpace)
 	}
-	result := strings.Join(lines, "\n")
+	result = strings.Join(lines, "\n")
 	// Normalize characters via rune mapping
 	result = strings.Map(normalizeFuzzyRune, result)
 	return result
@@ -279,8 +285,6 @@ type diffPart struct {
 	removed bool
 }
 
-const maxDiffLines = 5000
-
 func diffLinesCompute(oldStr, newStr string) []diffPart {
 	oldLines := splitForDiff(oldStr)
 	newLines := splitForDiff(newStr)
@@ -295,55 +299,27 @@ func diffLinesCompute(oldStr, newStr string) []diffPart {
 		return []diffPart{{value: strings.Join(oldLines, "\n") + "\n", removed: true}}
 	}
 
-	// Fall back to simple diff for very large files
-	if len(oldLines) > maxDiffLines || len(newLines) > maxDiffLines {
-		var parts []diffPart
-		if len(oldLines) > 0 {
-			parts = append(parts, diffPart{value: strings.Join(oldLines, "\n") + "\n", removed: true})
-		}
-		if len(newLines) > 0 {
-			parts = append(parts, diffPart{value: strings.Join(newLines, "\n") + "\n", added: true})
-		}
-		return parts
-	}
-
-	m, n := len(oldLines), len(newLines)
-	
-	// LCS DP Table
-	dp := make([][]int, m+1)
-	for i := range dp {
-		dp[i] = make([]int, n+1)
-	}
-	for i := 1; i <= m; i++ {
-		for j := 1; j <= n; j++ {
-			if oldLines[i-1] == newLines[j-1] {
-				dp[i][j] = dp[i-1][j-1] + 1
-			} else {
-				dp[i][j] = max(dp[i-1][j], dp[i][j-1])
-			}
-		}
-	}
-
-	// Backtrack to generate diff parts
+	// Line-mode Myers via go-diff — the mapping note's substitute for the npm
+	// `diff` package's diffLines (TS edit-diff.ts:271). O(ND) in edit size, so
+	// like the TS reference there is no file-size cap (the old hand-rolled LCS
+	// needed an (m+1)×(n+1) table and fell back to a whole-file remove+add
+	// "diff" above 5000 lines).
+	dmp := diffmatchpatch.New()
+	a, b, lineMap := dmp.DiffLinesToRunes(oldStr, newStr)
 	var parts []diffPart
-	i, j := m, n
-	for i > 0 || j > 0 {
-		if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
-			parts = append(parts, diffPart{value: oldLines[i-1]+ "\n"})
-			i--
-			j--
-		} else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
-			parts = append(parts, diffPart{value: newLines[j-1] + "\n", added: true})
-			j--
-		} else {
-			parts = append(parts, diffPart{value: oldLines[i-1] + "\n", removed: true})
-			i--
+	for _, d := range dmp.DiffMainRunes(a, b, false) {
+		var sb strings.Builder
+		for _, r := range d.Text {
+			sb.WriteString(lineMap[int(r)])
 		}
-	}
-
-	// Reverse (we backtracked)
-	for l, r := 0, len(parts) - 1; l < r; l, r = l+1, r-1 {
-		parts[l], parts[r] = parts[r], parts[l]
+		switch d.Type {
+		case diffmatchpatch.DiffEqual:
+			parts = append(parts, diffPart{value: sb.String()})
+		case diffmatchpatch.DiffInsert:
+			parts = append(parts, diffPart{value: sb.String(), added: true})
+		case diffmatchpatch.DiffDelete:
+			parts = append(parts, diffPart{value: sb.String(), removed: true})
+		}
 	}
 	return mergeDiffParts(parts)
 }
@@ -551,17 +527,18 @@ func ComputeEditDiff(path string, oldText string, newText string, cwd string) (E
 
 /*
 FOOTNOTES:
- 1. npm diff package replaced with custom LCS-based diff — The TS reference uses the diff 
- npm package (Myers algorithm). Our Go version uses LCS-based line diff. Produces valid diffs 
- but may differ slightly in edge cases (e.g., tie-breaking between adds/removes). Files over 
- 5000 lines fall back to a simple "everything changed" diff.
+ 1. npm diff package replaced with go-diff line mode (2026-10-05, audit A7) —
+ The TS reference uses the diff npm package (Myers); we now use the
+ repo-standard sergi/go-diff line-mode Myers (same substitute used for
+ diffWords elsewhere), with no file-size cap — TS has none and Myers is
+ O(ND) in edit size. Produces valid diffs but may differ slightly in edge
+ cases (tie-breaking between adds/removes) — the same accepted divergence
+ class as the word-diff usage.
 
- 2. NFKC normalization missing (same as path-utils) — normalizeForFuzzyMatch does all the 
- ASCII-space normalizations (quotes, dashes, spaces, trailing whitespace) but 
- skips .normalize("NFKC"). Fullwidth characters (U+FF01 etc.) won't be matched. 
- Requires golang.org/x/text/unicode/norm.
+ 2. NFKC normalization added 2026-10-05 (audit A6) — NormalizeForFuzzyMatch
+ now applies norm.NFKC first (mirroring TS order: NFKC → trimEnd → rune map).
 
- 3. ComputeEditsDiff is synchronous in Go — The TS version is async (reads file asynchronously). 
- Go's os.ReadFile is synchronous. Same end result, different concurrency model. The caller can 
+ 3. ComputeEditsDiff is synchronous in Go — The TS version is async (reads file asynchronously).
+ Go's os.ReadFile is synchronous. Same end result, different concurrency model. The caller can
  wrap in a goroutine if needed.
 */
