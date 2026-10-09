@@ -567,20 +567,23 @@
 
 ---
 
-## 🐛 Agent-loop context bug (2026-10-09) — OPEN, CRITICAL (top priority)
+## 🐛 Agent-loop context bug (2026-10-09) — ✅ FIXED (story 7); secondaries OPEN
 
 Found while investigating a live TUI loop (model repeatedly misread its own tool
 results as "injected into the human turn" and re-ran the same command). Root
-cause: `packages/agent-sdk/src/agent_loop.go` passes `AgentContext` **by value**
-to `streamAssistantResponse`, so the assistant message carrying `tool_calls` is
-never appended back to the loop's context — every tool follow-up request sends
-**orphaned `role:"tool"` messages with no preceding assistant tool_calls**, which
-lenient backends (GLM/z.ai) fold into the user turn. Full write-up — mechanism,
-TS parity, one-line fix, regression-test plan, and three secondary porting bugs
-found in the same sweep (GLM thinking replay dropped + signature-as-key bug;
-per-model `Compat` overrides never consulted; late tool-call ids never
-backfilled) — lives in **[agent-loop-context-bug.md](agent-loop-context-bug.md)**.
-Fix order: agent-loop append first (story 7), then the secondaries.
+cause: `packages/agent-sdk/src/agent_loop.go` passed `AgentContext` **by value**
+to `streamAssistantResponse`, so the assistant message carrying `tool_calls`
+was never appended back to the loop's context — every tool follow-up request
+sent **orphaned `role:"tool"` messages with no preceding assistant tool_calls**,
+which lenient backends (GLM/z.ai) fold into the user turn. Fixed 2026-10-09:
+one append in `runLoop` (shared by both entry points) +
+`TestAgentLoopKeepsAssistantToolCallsInContext` (mutation-verified). Full
+write-up — mechanism, TS parity, and three secondary porting bugs found in the
+same sweep, still open — lives in
+**[agent-loop-context-bug.md](agent-loop-context-bug.md)**: (5a) GLM thinking
+replay dropped + signature-as-key bug, (5b) per-model `Compat` overrides never
+consulted, (5c) late tool-call ids never backfilled; (5d) rendering ruled
+innocent.
 
 ---
 
