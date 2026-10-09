@@ -567,6 +567,23 @@
 
 ---
 
+## 🐛 Agent-loop context bug (2026-10-09) — OPEN, CRITICAL (top priority)
+
+Found while investigating a live TUI loop (model repeatedly misread its own tool
+results as "injected into the human turn" and re-ran the same command). Root
+cause: `packages/agent-sdk/src/agent_loop.go` passes `AgentContext` **by value**
+to `streamAssistantResponse`, so the assistant message carrying `tool_calls` is
+never appended back to the loop's context — every tool follow-up request sends
+**orphaned `role:"tool"` messages with no preceding assistant tool_calls**, which
+lenient backends (GLM/z.ai) fold into the user turn. Full write-up — mechanism,
+TS parity, one-line fix, regression-test plan, and three secondary porting bugs
+found in the same sweep (GLM thinking replay dropped + signature-as-key bug;
+per-model `Compat` overrides never consulted; late tool-call ids never
+backfilled) — lives in **[agent-loop-context-bug.md](agent-loop-context-bug.md)**.
+Fix order: agent-loop append first (story 7), then the secondaries.
+
+---
+
 ## 🔧 Tools re-audit findings (2026-10-03) — OPEN, fix story-by-story
 
 Re-ran the killed tools audit via a three-way parallel comparison of every
@@ -592,11 +609,25 @@ missing feature/surface, LOW = cosmetic/wording.
 - **A4 HIGH edit_diff.go:12-22 — ✅ FIXED (2026-10-03)** — `DetectLineEnding` branches inverted →
   LF-only files get rewritten as CRLF. Fixed (TS-verbatim port) +
   `TestDetectLineEnding`, `TestEditRoundTrip_PreservesLineEndings`.
-- **A5 MED edit_diff.go:49** — fuzzy normalization trims only tabs, TS
-  trims all trailing whitespace (`trimEnd`).
-- **A6 MED edit_diff.go:45** — missing NFKC normalization for fuzzy match.
-- **A7 MED edit_diff.go:279-305** — files >5000 lines fall back to whole-file
-  remove+add diff; npm `diff` computes a real diff at any size.
+- **A5 MED edit_diff.go:49 — ✅ FIXED (2026-10-08)** — fuzzy normalization trims only tabs, TS
+  trims all trailing whitespace (`trimEnd`). Fixed with
+  `strings.TrimRightFunc(line, unicode.IsSpace)` (trailing-only, like
+  `trimEnd` — leading whitespace survives).
+- **A6 MED edit_diff.go:45 — ✅ FIXED (2026-10-08)** — missing NFKC normalization for fuzzy match.
+  Fixed: `norm.NFKC.String(text)` prepended, giving TS's exact order
+  (edit-diff.ts:34-55: NFKC → trimEnd → rune map); `golang.org/x/text`
+  promoted from indirect to direct dependency.
+- **A7 MED edit_diff.go:279-305 — ✅ FIXED (2026-10-08)** — files >5000 lines fall back to whole-file
+  remove+add diff; npm `diff` computes a real diff at any size. Fixed:
+  hand-rolled full-table LCS + `maxDiffLines` fallback replaced with
+  `sergi/go-diff` line-mode Myers (`DiffLinesToRunes` + `DiffMainRunes`) —
+  the repo's documented npm-`diff` substitute; O(ND) in edit size so the cap
+  is gone entirely (TS has none). Output shape preserved
+  (`mergeDiffParts`/`GenerateDiffString` untouched); tie-breaking may differ
+  from the old LCS — the accepted npm-substitute divergence class. Tests:
+  `TestNormalizeForFuzzyMatch`, `TestFuzzyFindTextTrailingWhitespace`,
+  `TestGenerateDiffString_LargeFile` (6000-line one-line change → local hunk
+  in ~10ms, no whole-file fallback), `TestGenerateDiffString_UnchangedStillExact`.
 - **A8 MED edit.go:66-100 — ✅ FIXED (2026-10-05)** — `prepareEditArguments` (repairs `edits` sent as
   JSON string) never wired into the ToolDefinition; TS `prepareArguments` is.
   Fixed: `extensions.ToolDefinition` gained a `PrepareArguments func(args any)
