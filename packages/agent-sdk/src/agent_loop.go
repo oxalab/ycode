@@ -175,6 +175,13 @@ func runLoop(
 				return nil
 			}
 			*newMessages = append(*newMessages, message)
+			// The assistant message (with its tool_calls) must join the loop
+			// context — streamAssistantResponse mutates a pass-by-value copy,
+			// so without this every follow-up request sends orphaned tool
+			// results with no preceding assistant tool_calls (the TS reference
+			// pushes the partial into context.messages by reference,
+			// agent-loop.ts:313-346).
+			currentContext.Messages = append(currentContext.Messages, message)
 			if message.StopReason == llm.StopReasonError || message.StopReason == llm.StopReasonAborted {
 				emit(NewTurnEndEvent(message, []llm.ToolResultMessage[any]{}))
 				emit(NewAgentEndEvent(*newMessages))
