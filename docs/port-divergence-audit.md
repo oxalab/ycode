@@ -567,6 +567,27 @@
 
 ---
 
+## 🐛 Session-resume deserialization bug (2026-10-09) — ✅ FIXED (story 8)
+
+User-reported: `/resume` (alias of `/switch`) lands in an empty transcript — and
+the restored agent has **no memory of the session either**. Root cause (verified
+empirically): `SessionEntry.Message` is the non-empty interface `llm.Message`
+with no custom `UnmarshalJSON` anywhere, so every persisted message entry fails
+`json.Unmarshal` ("cannot unmarshal object into ... llm.Message") and is
+silently dropped by both `GetEntries` (session_manager.go:977) and `buildIndex`
+(~845). Consequences: empty transcript after resume/`--continue`, AND
+`agent.SetMessages` never restores history (`BuildSessionContext` sees zero
+messages) — the model resumes with no prior conversation. TS never hits this
+(`JSON.parse` is type-erased); it is a port-introduced defect class. **Fixed
+2026-10-09:** `core/session_decode.go` (shared role-keyed entry decoder for
+both readers, content-block decode, legacy tagless-shape sniffing) +
+`rebuildTranscript` brought to pi `renderSessionContext` parity (tool
+components matched to results by id, bash cards, compaction cards, editor
+history) + round-trip/render tests. Full write-up in
+**[session-resume-bug.md](session-resume-bug.md)** (§6 = applied fix).
+
+---
+
 ## 🐛 Agent-loop context bug (2026-10-09) — ✅ FIXED (story 7); secondaries OPEN
 
 Found while investigating a live TUI loop (model repeatedly misread its own tool
