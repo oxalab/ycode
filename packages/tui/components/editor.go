@@ -244,6 +244,12 @@ func (e *Editor) GetExpandedText() string {
 	return result
 }
 
+// History returns a copy of the prompt history (newest first). Read-only
+// accessor — used by tests and transcript rebuilds to verify history feeds.
+func (e *Editor) History() []string {
+	return append([]string(nil), e.history...)
+}
+
 // AddToHistory adds a prompt to history (dedup consecutive, cap 100).
 func (e *Editor) AddToHistory(text string) {
 	trimmed := strings.TrimSpace(text)
