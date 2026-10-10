@@ -841,8 +841,8 @@ func (sm *SessionManager) buildIndex() {
 		if json.Unmarshal(raw, &partial) != nil || partial.Type == "session" {
 			continue
 		}
-		entry := &compaction.SessionEntry{}
-		if json.Unmarshal(raw, entry) != nil {
+		entry, err := decodeSessionEntry(raw)
+		if err != nil {
 			continue
 		}
 		sm.byID[entry.ID] = entry
@@ -972,10 +972,11 @@ func (sm *SessionManager) GetEntries() []*compaction.SessionEntry {
 		if json.Unmarshal(raw, &partial) != nil || partial.Type == "session" {
 			continue
 		}
-		entry := &compaction.SessionEntry{}
-		if json.Unmarshal(raw, entry) == nil {
-			entries = append(entries, entry)
+		entry, err := decodeSessionEntry(raw)
+		if err != nil {
+			continue
 		}
+		entries = append(entries, entry)
 	}
 	return entries
 }

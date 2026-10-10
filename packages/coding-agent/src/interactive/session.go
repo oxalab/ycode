@@ -112,26 +112,83 @@ func (o *Orchestrator) switchToSession(path string) {
 	}()
 }
 
-// rebuildTranscript re-renders the chat from the session's message entries.
+// rebuildTranscript re-renders the chat from the session's entries. Mirrors
+// the reference renderSessionContext (interactive-mode.ts:3096-3164):
+// assistant messages render plus one tool component per toolCall block
+// (aborted/error turns get an immediate error result), following toolResult
+// messages are matched onto those components by toolCallId, bash executions
+// rebuild their command/output card, compaction entries render the summary
+// card, and user messages feed the editor history. branchSummary and
+// custom_message entries are skipped (no Go component; context restore does
+// not depend on them).
 func (o *Orchestrator) rebuildTranscript() {
 	o.chat.Clear()
+	pendingTools := make(map[string]*ToolExecution)
 	for _, entry := range o.session.SessionManager.GetEntries() {
-		if entry.Type != compaction.EntryTypeMessage {
-			continue
+		switch entry.Type {
+		case compaction.EntryTypeMessage:
+			switch m := entry.Message.(type) {
+			case llm.AssistantMessage:
+				o.rebuildAssistantMessage(&m, pendingTools)
+			case *llm.AssistantMessage:
+				o.rebuildAssistantMessage(m, pendingTools)
+			case llm.UserMessage:
+				if text := userMessageText(m); text != "" {
+					if len(o.chat.Children) > 0 {
+						o.chat.AddChild(components.NewSpacer(1))
+					}
+					o.chat.AddChild(NewUserMessage(text, o.th, o.mdTheme()))
+					o.editor.AddToHistory(text)
+				}
+			case llm.ToolResultMessage[any]:
+				if tc, ok := pendingTools[m.ToolCallID]; ok {
+					delete(pendingTools, m.ToolCallID)
+					tc.UpdateResult(extractResultText(m.Content), m.IsError, false)
+				}
+			case core.BashExecutionMessage:
+				bash := NewBashExecution(o.engine, m.Command, m.ExcludeFromContext, o.th)
+				if m.Output != "" {
+					bash.AppendOutput(m.Output)
+				}
+				isError := m.ExitCode != nil && *m.ExitCode != 0
+				bash.SetComplete(m.ExitCode, m.Cancelled, isError)
+				o.chat.AddChild(bash)
+			}
+		case compaction.EntryTypeCompaction:
+			o.chat.AddChild(components.NewSpacer(1))
+			o.chat.AddChild(NewCompactionSummary(&compaction.CompactionResult{
+				Summary:      entry.Summary,
+				TokensBefore: entry.TokensBefore,
+			}, o.th, o.mdTheme()))
 		}
-		switch m := entry.Message.(type) {
-		case llm.AssistantMessage:
-			o.chat.AddChild(components.NewSpacer(1))
-			o.chat.AddChild(NewAssistantMessage(&m, o.th, o.mdTheme(), false, "Thinking..."))
-		case *llm.AssistantMessage:
-			o.chat.AddChild(components.NewSpacer(1))
-			o.chat.AddChild(NewAssistantMessage(m, o.th, o.mdTheme(), false, "Thinking..."))
-		case llm.UserMessage:
-			if text := userMessageText(m); text != "" {
-				o.chat.AddChild(components.NewSpacer(1))
-				o.chat.AddChild(NewUserMessage(text, o.th, o.mdTheme()))
+	}
+}
+
+// rebuildAssistantMessage renders one persisted assistant message and opens a
+// pending tool component for each of its toolCall blocks. Aborted/error turns
+// get their error result immediately (pi interactive-mode.ts:3135-3148).
+func (o *Orchestrator) rebuildAssistantMessage(m *llm.AssistantMessage, pendingTools map[string]*ToolExecution) {
+	o.chat.AddChild(components.NewSpacer(1))
+	o.chat.AddChild(NewAssistantMessage(m, o.th, o.mdTheme(), false, "Thinking..."))
+	for _, block := range m.Content {
+		tc, ok := block.(*llm.ToolCall)
+		if !ok {
+			if tcv, isValue := block.(llm.ToolCall); isValue {
+				tc = &tcv
+			} else {
+				continue
 			}
 		}
+		comp := NewToolExecution(tc.Name, tc.Arguments, o.th)
+		comp.MarkStarted()
+		if m.StopReason == llm.StopReasonAborted {
+			comp.UpdateResult("Operation aborted", true, false)
+		} else if m.StopReason == llm.StopReasonError && m.ErrorMessage != "" {
+			comp.UpdateResult(m.ErrorMessage, true, false)
+		} else {
+			pendingTools[tc.ID] = comp
+		}
+		o.chat.AddChild(comp)
 	}
 }
 
