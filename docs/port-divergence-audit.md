@@ -602,9 +602,10 @@ one append in `runLoop` (shared by both entry points) +
 write-up — mechanism, TS parity, and three secondary porting bugs found in the
 same sweep, still open — lives in
 **[agent-loop-context-bug.md](agent-loop-context-bug.md)**: (5a) GLM thinking
-replay dropped + signature-as-key bug, (5b) per-model `Compat` overrides never
-consulted, (5c) late tool-call ids never backfilled; (5d) rendering ruled
-innocent.
+replay dropped + signature-as-key bug — ✅ FIXED (story 9: streaming stores the
+wire field name into ThinkingSignature, replay emits under it; SSE +
+convert-messages tests), (5b) per-model `Compat` overrides never consulted,
+(5c) late tool-call ids never backfilled; (5d) rendering ruled innocent.
 
 ---
 

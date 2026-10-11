@@ -909,6 +909,12 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 				if idx >= 0 {
 					if tk, ok := output.Content[idx].(*src.ThinkingContent); ok {
 						tk.Thinking = currentBlock.Thinking // sync accumulated thinking into the block
+						// Remember which wire field the reasoning arrived on —
+						// replay emits the thinking back under this key (TS
+						// ensureThinkingBlock stores foundReasoningField).
+						if tk.ThinkingSignature == "" {
+							tk.ThinkingSignature = field
+						}
 					}
 				}
 				ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: &idx, Delta: reasoning, Partial: output}
