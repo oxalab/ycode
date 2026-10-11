@@ -119,7 +119,7 @@ verified: with the append removed the test fails with
 
 ## 5. Secondary findings from the same investigation (real, not the loop cause)
 
-### 5a. GLM thinking replay silently dropped + signature-as-key bug
+### 5a. GLM thinking replay silently dropped + signature-as-key bug — ✅ FIXED (2026-10-09, story 9)
 
 - GLM streams thinking via `reasoning_content` (openai-completions.go:894-916) but
   **never sets `ThinkingSignature`**, so the replay gate at :519
@@ -131,6 +131,19 @@ verified: with the append removed the test fails with
 - TS mechanism (pi openai-completions.ts:213-224, 313-336): during streaming,
   `ensureThinkingBlock` stores the original wire **field name**
   (`reasoning_content` / `reasoning` / `reasoning_text`) in `thinkingSignature`;
+  **Fix (one block, streaming side only):** the reasoning-delta handler now
+  stores the matched wire field name into the live `ThinkingContent` block
+  (`if tk.ThinkingSignature == "" { tk.ThinkingSignature = field }`) — the
+  replay path (:519-525) then works as-is, emitting the thinking back under
+  the same wire key the model used (correct TS semantics — the "signature" on
+  this provider is a field name, and no other consumer of ThinkingSignature
+  interprets it on this path). Unsigned thinking still drops (TS parity).
+  Tests: `openai_completions_thinking_test.go` — SSE streaming records
+  `reasoning_content`/`reasoning`/`reasoning_text` as the signature;
+  `convertOpenAICompletionsMessages` replays a same-model signed assistant
+  message under the key (and drops unsigned). Test gotcha: crafted messages
+  must match the request model's Api+Provider+Model or TransformMessages
+  classifies them cross-model and converts thinking to text.
   replay (pi :821-846) then emits `(assistantMsg)[signature] = joined thinking` —
   i.e. the field is a *name*, not a value. Port both halves: capture the field
   name during streaming, replay under it.
