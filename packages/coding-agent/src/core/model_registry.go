@@ -19,7 +19,9 @@ import (
 
 type ProviderOverride struct {
 	BaseURL string
-	Compat  llm.Compat
+	// Provider-level `compat` from models.json, kept raw because the target
+	// sub-struct depends on each built-in model's api.
+	Compat json.RawMessage
 }
 
 type ProviderRequestConfig struct {
@@ -218,6 +220,11 @@ func (mr *ModelRegistry) loadBuiltInModels(
 				if providerOverride.BaseURL != "" {
 					model.BaseURL = providerOverride.BaseURL
 				}
+				if len(providerOverride.Compat) > 0 {
+					if compat, ok := parseCompatRaw(providerOverride.Compat, model.Api); ok {
+						model.Compat = llm.MergeCompat(model.Compat, compat)
+					}
+				}
 			}
 
 			if perModelOverrides != nil {
@@ -261,6 +268,12 @@ func (mr *ModelRegistry) applyModelOverride(model *llm.Model[llm.Api], override 
 			c.CacheWrite = model.Cost.CacheWrite
 		}
 		result.Cost = c
+	}
+
+	if len(override.Compat) > 0 {
+		if compat, ok := parseCompatRaw(override.Compat, result.Api); ok {
+			result.Compat = llm.MergeCompat(result.Compat, compat)
+		}
 	}
 
 	return &result
@@ -344,6 +357,7 @@ func (mr *ModelRegistry) loadCustomModels(modelsJsonPath string) *customModelsRe
 		if providerConfig.BaseURL != "" || providerConfig.Compat != nil {
 			overrides[providerName] = &ProviderOverride{
 				BaseURL: providerConfig.BaseURL,
+				Compat:  providerConfig.Compat,
 			}
 		}
 
@@ -449,6 +463,37 @@ func (mr *ModelRegistry) validateConfig(config *modelsConfig) error {
 	return nil
 }
 
+// parseCompatRaw decodes a models.json `compat` object into the sub-struct for
+// the given api. The reference schema types it as a union of the three
+// API-specific compat objects (not keyed by api), so the effective api picks
+// the target struct.
+func parseCompatRaw(raw json.RawMessage, api llm.Api) (llm.Compat, bool) {
+	var compat llm.Compat
+	switch api {
+	case llm.OpenAICompletions:
+		var oc llm.OpenAICompletionsCompat
+		if err := json.Unmarshal(raw, &oc); err != nil {
+			return compat, false
+		}
+		compat.OpenAICompletions = &oc
+	case llm.OpenAIResponses:
+		var oc llm.OpenAIResponsesCompat
+		if err := json.Unmarshal(raw, &oc); err != nil {
+			return compat, false
+		}
+		compat.OpenAIResponses = &oc
+	case llm.AnthropicMessages:
+		var ac llm.AnthropicMessagesCompat
+		if err := json.Unmarshal(raw, &ac); err != nil {
+			return compat, false
+		}
+		compat.AnthropicMessages = &ac
+	default:
+		return compat, false
+	}
+	return compat, true
+}
+
 func (mr *ModelRegistry) parseModels(config *modelsConfig) []*llm.Model[llm.Api] {
 	var models []*llm.Model[llm.Api]
 	builtInProviders := make(map[string]bool)
@@ -540,6 +585,20 @@ func (mr *ModelRegistry) parseModels(config *modelsConfig) []*llm.Model[llm.Api]
 				maxTokens = 16384
 			}
 
+			// Compat: provider-level base, model-level overlay (reference:
+			// mergeCompat(providerConfig.compat, modelDef.compat)).
+			compat := llm.Compat{}
+			if len(providerConfig.Compat) > 0 {
+				if parsed, ok := parseCompatRaw(providerConfig.Compat, llm.Api(api)); ok {
+					compat = parsed
+				}
+			}
+			if len(modelDef.Compat) > 0 {
+				if parsed, ok := parseCompatRaw(modelDef.Compat, llm.Api(api)); ok {
+					compat = llm.MergeCompat(compat, parsed)
+				}
+			}
+
 			models = append(models, &llm.Model[llm.Api]{
 				ID:            modelDef.ID,
 				Name:          name,
@@ -551,6 +610,7 @@ func (mr *ModelRegistry) parseModels(config *modelsConfig) []*llm.Model[llm.Api]
 				Cost:          cost,
 				ContextWindow: contextWindow,
 				MaxTokens:     maxTokens,
+				Compat:        compat,
 			})
 		}
 	}

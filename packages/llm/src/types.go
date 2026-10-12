@@ -299,19 +299,19 @@ type OpenAICompletionsCompat struct {
 	/* Whether the providers supports `reasoning_effort`. Default: auto-detected from URL */
 	SupportsReasoningEffort 					*bool 						`json:"supportsReasoningEffort,omitempty"`
 	/* Optional Mapping from y-ai reasoning level to provider/model-specific `reasoning_effort` values. */
-	ReasoningEffortMap 							map[ThinkingLevel]string 	`json:"reasoningeffortMap,omitempty"`
+	ReasoningEffortMap 							map[ThinkingLevel]string 	`json:"reasoningEffortMap,omitempty"`
 	/* Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
-	SupportUsageInStreaming						*bool 						`json:"supportUsageInStreaming,omitempty"`
+	SupportUsageInStreaming						*bool 						`json:"supportsUsageInStreaming,omitempty"`
 	/* Which field to use for max tokens. Default: auto-detected from URL. */
 	MaxTokensField 								*string 					`json:"maxTokensField,omitempty"`
 	/* Whether tool results require the `name` field. Default: auto-detected from URL. */
-	RequireToolResultName						*bool						`json:"requireToolResultName,omitempty"`
+	RequireToolResultName						*bool						`json:"requiresToolResultName,omitempty"`
 	/* Whether a user message after tool results requires an assistant message in between. Default: auto-detected from URL. */
-	RequireAssistantAfterToolResult 			*bool 						`json:"requireAssitantAferToolResult,omitempty"`
+	RequireAssistantAfterToolResult 			*bool 						`json:"requiresAssistantAfterToolResult,omitempty"`
 	/* Whether thinking blocks must be converted to text blocks with <thinking> delimiters. Default: auto-detected from URL. */
-	RequireThinkingAsText 						*bool 						`json:"requireThinkingAsText,omitempty"`
+	RequireThinkingAsText 						*bool 						`json:"requiresThinkingAsText,omitempty"`
 	/* Whether all replayed assistant messages must include an empty reasoning_content field when reasoning is enabled. Default: auto-detected from URL. */
-	RequireReasoningContentOnAsssitantMessages	*bool 						`json:"requireReasoningContentOnAssistantMessages"`
+	RequireReasoningContentOnAssistantMessages	*bool 						`json:"requiresReasoningContentOnAssistantMessages,omitempty"`
 	/* Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort, "zai" uses top-level enable_thinking: boolean, "qwen" uses top-level enable_thinking: boolean, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
 	ThinkingFormat 								*string 					`json:"thinkingFormat,omitempty"`
 	/* OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
