@@ -148,7 +148,7 @@ verified: with the append removed the test fails with
   i.e. the field is a *name*, not a value. Port both halves: capture the field
   name during streaming, replay under it.
 
-### 5b. Per-model `Compat` overrides never consulted
+### 5b. Per-model `Compat` overrides never consulted — ✅ FIXED (2026-10-12, story 10)
 
 `detectOpenAICompat` (openai-completions.go:1124+, z.ai detection via
 provider/`api.z.ai`) builds compat from built-in heuristics only and never merges
@@ -162,6 +162,39 @@ provider/`api.z.ai`) builds compat from built-in heuristics only and never merge
   (:290-295) and `buildOpenAICompletionsSimpleOptions` (:1287) always passes a
   non-nil `ReasoningEffort` — TS gates it on `options?.reasoningEffort`
   (pi :553-554).
+
+**Fix (2026-10-12):**
+- `packages/llm/src/compat.go` (new): `MergeCompat` — provider-level compat as
+  base, model-level/override-level as per-field overlay (reference
+  `mergeCompat` semantics, routing sub-objects deep-merged).
+- `model_registry.go`: models.json `compat` blocks are no longer discarded —
+  `parseCompatRaw` decodes into the api-specific sub-struct and wires
+  provider-level (→ built-ins via `ProviderOverride`, now `json.RawMessage`),
+  model-definition-level (`parseModels`), and modelOverride-level
+  (`applyModelOverride`) compat into `llm.Model.Compat`.
+- `openai-completions.go`: new `resolveOpenAICompat` = detection + per-field
+  `model.Compat.OpenAICompletions` overlay (reference `getCompat`), used at
+  the stream call site. `enable_thinking`/`chat_template_kwargs.enable_thinking`
+  now send an explicit boolean gated on `*ReasoningEffort != ""` (the loop maps
+  ThinkingOff→""), and the deepseek/openrouter/default branches gate on the
+  same truthiness instead of non-nil. `OpenAICompletionsCompat` json tags fixed
+  to the reference schema keys (`requiresAssistantAfterToolResult` etc. — the
+  old typo'd tags would never match user config).
+- Tests: `compat_test.go` (merge/deep-merge/nil), `openai_completions_compat_test.go`
+  (overlay preserves detection, explicit enable_thinking true/false/omitted,
+  qwen-chat-template, `tool_stream` on/off), `model_registry_compat_test.go`
+  (provider→custom, model-level wins, provider→built-ins, modelOverride).
+
+**Follow-ups logged (not blockers):**
+- Go's `detectOpenAICompat` lacks the reference's together/moonshot/
+  cloudflare-ai-gateway heuristics (thinkingFormat "together",
+  maxTokensField/strict-mode/long-cache-retention variants).
+- `models.generated.go` carries no baked-in compat (the reference's generated
+  registry bakes `zaiToolStream: true` into zai GLM-4.5+, deepseek compat, etc.)
+  — until regenerated, those flags are reachable only via models.json.
+- Routing compat overrides (`openRouterRouting`/`vercelGatewayRouting`) are
+  parsed and merged but not carried into the resolved provider struct (its
+  routing fields are plain maps; routing was never sent before this change).
 
 ### 5c. Late-streamed tool-call IDs never backfilled
 
@@ -199,10 +232,10 @@ finish/flush path alongside Arguments.
 
 ## 7. Fix order proposed
 
-1. **Story 7 (critical):** the one-line append + regression test (§4).
-2. Story 8: 5a thinking-replay port (capture field name + replay under it).
-3. Story 9: 5b Compat merge (respect `model.Compat`; gate `enable_thinking` on
-   actual reasoning effort).
-4. Story 10: 5c tool-call id backfill.
+1. **Story 7 (critical):** the one-line append + regression test (§4). ✅ 2026-10-09
+2. Story 8: 5a thinking-replay port (capture field name + replay under it). ✅ 2026-10-09 (stories 8+9)
+3. Story 10: 5b Compat merge (respect `model.Compat`; gate `enable_thinking` on
+   actual reasoning effort). ✅ 2026-10-12
+4. Story 11: 5c tool-call id backfill.
 5. (Display) `rebuildTranscript` tool components — fold into the #19 rebuild-gap
    story when that is scheduled.

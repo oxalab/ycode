@@ -87,7 +87,7 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 			// (http.Client.Timeout spans the whole body read). Hang protection
 			// is the user's escape-to-interrupt, same as the TS port.
 			client := &http.Client{}
-			compat := detectOpenAICompat(model)
+			compat := resolveOpenAICompat(model)
 			params := buildOpenAICompletionsParams(model, context, options, compat)
 
 			if options != nil && options.OnPayload != nil {
@@ -286,33 +286,31 @@ func buildOpenAICompletionsParams(model src.Model[src.Api], context src.ChatCont
 		params["tool_choice"] = options.ToolChoice
 	}
 
-	// Reasoning configuration
+	// Reasoning configuration. The reference gates every branch on the
+	// *truthiness* of options.reasoningEffort — an empty level (thinking off)
+	// counts as off — and zai/qwen always send an explicit boolean rather than
+	// omitting the key.
+	effortActive := options != nil && options.ReasoningEffort != nil && *options.ReasoningEffort != ""
 	if model.Reasoning {
 		switch compat.ThinkingFormat {
 		case "zai":
-			if options != nil && options.ReasoningEffort != nil {
-				params["enable_thinking"] = true
-			}
+			params["enable_thinking"] = effortActive
 		case "qwen":
-			if options != nil && options.ReasoningEffort != nil {
-				params["enable_thinking"] = true
-			}
+			params["enable_thinking"] = effortActive
 		case "qwen-chat-template":
-			if options != nil && options.ReasoningEffort != nil {
-				params["chat_template_kwargs"] = map[string]interface{}{
-					"enable_thinking":   true,
-					"preserve_thinking": true,
-				}
+			params["chat_template_kwargs"] = map[string]interface{}{
+				"enable_thinking":   effortActive,
+				"preserve_thinking": true,
 			}
 		case "deepseek":
 			thinkingType := "disabled"
-			if options != nil && options.ReasoningEffort != nil {
+			if effortActive {
 				thinkingType = "enabled"
 			}
 			params["thinking"] = map[string]interface{}{
 				"type": thinkingType,
 			}
-			if options != nil && options.ReasoningEffort != nil {
+			if effortActive {
 				effort := mapOpenAIReasoningEffort(*options.ReasoningEffort, compat.ReasoningEffortMap)
 				params["reasoning_effort"] = effort
 			}
@@ -320,13 +318,13 @@ func buildOpenAICompletionsParams(model src.Model[src.Api], context src.ChatCont
 			reasoning := map[string]interface{}{
 				"effort": "none",
 			}
-			if options != nil && options.ReasoningEffort != nil {
+			if effortActive {
 				effort := mapOpenAIReasoningEffort(*options.ReasoningEffort, compat.ReasoningEffortMap)
 				reasoning["effort"] = effort
 			}
 			params["reasoning"] = reasoning
 		default:
-			if options != nil && options.ReasoningEffort != nil && compat.SupportsReasoningEffort {
+			if effortActive && compat.SupportsReasoningEffort {
 				effort := mapOpenAIReasoningEffort(*options.ReasoningEffort, compat.ReasoningEffortMap)
 				params["reasoning_effort"] = effort
 			}
@@ -1178,6 +1176,73 @@ func detectOpenAICompat(model src.Model[src.Api]) *OpenAICompletionsCompat {
 		compat.ThinkingFormat = "openrouter"
 	}
 
+	return compat
+}
+
+// resolveOpenAICompat mirrors the reference getCompat: URL/provider detection
+// with explicit per-model compat overrides (models.json) applied field-by-field
+// on top. Routing overrides are not carried over — the resolved struct keeps
+// routing as plain maps and the request builder only ever sees the (empty)
+// detected values, same as before overrides existed.
+func resolveOpenAICompat(model src.Model[src.Api]) *OpenAICompletionsCompat {
+	compat := detectOpenAICompat(model)
+
+	mc := model.Compat.OpenAICompletions
+	if mc == nil {
+		return compat
+	}
+
+	if mc.SupportStore != nil {
+		compat.SupportsStore = *mc.SupportStore
+	}
+	if mc.SupportsDeveloperRole != nil {
+		compat.SupportsDeveloperRole = *mc.SupportsDeveloperRole
+	}
+	if mc.SupportsReasoningEffort != nil {
+		compat.SupportsReasoningEffort = *mc.SupportsReasoningEffort
+	}
+	if mc.ReasoningEffortMap != nil {
+		compat.ReasoningEffortMap = make(map[string]string, len(mc.ReasoningEffortMap))
+		for level, effort := range mc.ReasoningEffortMap {
+			compat.ReasoningEffortMap[string(level)] = effort
+		}
+	}
+	if mc.SupportUsageInStreaming != nil {
+		compat.SupportsUsageInStreaming = *mc.SupportUsageInStreaming
+	}
+	if mc.MaxTokensField != nil {
+		compat.MaxTokensField = *mc.MaxTokensField
+	}
+	if mc.RequireToolResultName != nil {
+		compat.RequiresToolResultName = *mc.RequireToolResultName
+	}
+	if mc.RequireAssistantAfterToolResult != nil {
+		compat.RequiresAssistantAfterToolResult = *mc.RequireAssistantAfterToolResult
+	}
+	if mc.RequireThinkingAsText != nil {
+		compat.RequiresThinkingAsText = *mc.RequireThinkingAsText
+	}
+	if mc.RequireReasoningContentOnAssistantMessages != nil {
+		compat.RequiresReasoningContentOnAssistant = *mc.RequireReasoningContentOnAssistantMessages
+	}
+	if mc.ThinkingFormat != nil {
+		compat.ThinkingFormat = *mc.ThinkingFormat
+	}
+	if mc.ZaiToolStream != nil {
+		compat.ZaiToolStream = *mc.ZaiToolStream
+	}
+	if mc.SupportsStrictMode != nil {
+		compat.SupportsStrictMode = *mc.SupportsStrictMode
+	}
+	if mc.CacheControlFormat != nil {
+		compat.CacheControlFormat = *mc.CacheControlFormat
+	}
+	if mc.SendSessionAffinityHeaders != nil {
+		compat.SendSessionAffinityHeaders = *mc.SendSessionAffinityHeaders
+	}
+	if mc.SupportsLongCacheRetention != nil {
+		compat.SupportsLongCacheRetention = *mc.SupportsLongCacheRetention
+	}
 	return compat
 }
 

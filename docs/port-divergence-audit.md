@@ -600,12 +600,15 @@ which lenient backends (GLM/z.ai) fold into the user turn. Fixed 2026-10-09:
 one append in `runLoop` (shared by both entry points) +
 `TestAgentLoopKeepsAssistantToolCallsInContext` (mutation-verified). Full
 write-up — mechanism, TS parity, and three secondary porting bugs found in the
-same sweep, still open — lives in
+same sweep — lives in
 **[agent-loop-context-bug.md](agent-loop-context-bug.md)**: (5a) GLM thinking
 replay dropped + signature-as-key bug — ✅ FIXED (story 9: streaming stores the
 wire field name into ThinkingSignature, replay emits under it; SSE +
-convert-messages tests), (5b) per-model `Compat` overrides never consulted,
-(5c) late tool-call ids never backfilled; (5d) rendering ruled innocent.
+convert-messages tests), (5b) per-model `Compat` overrides never consulted —
+✅ FIXED (2026-10-12: `MergeCompat` + registry plumbing for models.json compat
+blocks + `resolveOpenAICompat` overlay; `enable_thinking` now an explicit
+bool gated on actual effort), (5c) late tool-call ids never backfilled;
+(5d) rendering ruled innocent.
 
 ---
 
