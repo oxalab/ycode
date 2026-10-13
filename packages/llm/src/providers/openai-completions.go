@@ -975,6 +975,19 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 						currentBlock.StreamIndex = &streamIndex
 					}
 
+					// The accumulator is separate from the live block (the
+					// reference keeps a single object), so late-arriving
+					// id/name must be written through — empty target only,
+					// first-seen wins.
+					if last, ok := output.Content[len(output.Content)-1].(*src.ToolCall); ok {
+						if last.ID == "" && currentBlock.ID != "" {
+							last.ID = currentBlock.ID
+						}
+						if last.Name == "" && currentBlock.Name != "" {
+							last.Name = currentBlock.Name
+						}
+					}
+
 					var delta string
 					if fn, ok := toolCall["function"].(map[string]interface{}); ok {
 						if args, ok := fn["arguments"].(string); ok {
@@ -1053,6 +1066,12 @@ func finishCurrentOpenAICompletionsBlock(ch chan<- src.AssistantMessageEvent, ou
 			idx := len(output.Content) - 1
 			if tc, ok := output.Content[idx].(*src.ToolCall); ok {
 				tc.Arguments = parseStreamingJson(tc.Arguments, block.PartialArgs)
+				if tc.ID == "" && block.ID != "" {
+					tc.ID = block.ID
+				}
+				if tc.Name == "" && block.Name != "" {
+					tc.Name = block.Name
+				}
 				ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: &idx, ToolCall: tc, Partial: output}
 			}
 		}
