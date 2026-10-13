@@ -607,7 +607,9 @@ wire field name into ThinkingSignature, replay emits under it; SSE +
 convert-messages tests), (5b) per-model `Compat` overrides never consulted —
 ✅ FIXED (2026-10-12: `MergeCompat` + registry plumbing for models.json compat
 blocks + `resolveOpenAICompat` overlay; `enable_thinking` now an explicit
-bool gated on actual effort), (5c) late tool-call ids never backfilled;
+bool gated on actual effort), (5c) late tool-call ids never backfilled —
+✅ FIXED (2026-10-13: guarded write-through to the live block + finish sync,
+first-seen id wins; first tests of the tool-call streaming path);
 (5d) rendering ruled innocent.
 
 ---

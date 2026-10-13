@@ -196,14 +196,33 @@ provider/`api.z.ai`) builds compat from built-in heuristics only and never merge
   parsed and merged but not carried into the resolved provider struct (its
   routing fields are plain maps; routing was never sent before this change).
 
-### 5c. Late-streamed tool-call IDs never backfilled
+### 5c. Late-streamed tool-call IDs never backfilled — ✅ FIXED (2026-10-13, story 11)
 
 `openai-completions.go:946-951` captures the tool-call `id` only when seen;
 late-arriving IDs are tracked in the local `currentBlock` (:958-962) but never
 written back into the finished `ToolCall` block (`finishCurrentOpenAICompletionsBlock`,
 :1051, syncs only `Arguments`). If GLM streams the id in a later chunk than the
-first delta, `tool_calls[].id` serializes as `""`. Backfill the id in the
-finish/flush path alongside Arguments.
+first delta, `tool_calls[].id` serializes as `""` — the replayed tool result
+then carries an empty `tool_call_id`, and the mid-stream `reasoning_details`
+matcher (:1004-1010, matches by `tc.ID`) can't find the block either.
+
+**Fix (2026-10-13):** two guarded write-throughs mirroring the reference's
+single-object semantics (pi openai-completions.ts:341-346 mutates the live
+block: `if (!block.id && toolCall.id)` / `if (!block.name && ...)` — first-seen
+id wins, never-delivered stays `""`): (1) in the delta handler right after the
+accumulator id/name updates, backfill `output.Content[len-1].(*src.ToolCall)`
+when its ID/Name are still empty; (2) in `finishCurrentOpenAICompletionsBlock`,
+sync `tc.ID`/`tc.Name` from the accumulator alongside the `Arguments` sync.
+Tests (`openai_completions_toolcall_stream_test.go` — first coverage of the
+tool-call streaming path): late id+name reach the finished block and the
+`toolcall_end` event; first-seen id wins over a later differing id; absent id
+stays `""`. Mutation-verified (fix reverted → id/name assertions fail).
+
+**Follow-up logged (not a blocker):** Go matches deltas with a single
+accumulator (index-or-id) while the reference keeps `toolCallBlocksByIndex` /
+`toolCallBlocksById` maps — interleaved/out-of-order stream indices would fork
+blocks in Go. GLM/OpenAI stream tool calls sequentially by index, so this
+stays theoretical; revisit only if a provider interleaves.
 
 ### 5d. Rendering verdict — display is innocent (with one known gap)
 
@@ -236,6 +255,6 @@ finish/flush path alongside Arguments.
 2. Story 8: 5a thinking-replay port (capture field name + replay under it). ✅ 2026-10-09 (stories 8+9)
 3. Story 10: 5b Compat merge (respect `model.Compat`; gate `enable_thinking` on
    actual reasoning effort). ✅ 2026-10-12
-4. Story 11: 5c tool-call id backfill.
+4. Story 11: 5c tool-call id backfill. ✅ 2026-10-13
 5. (Display) `rebuildTranscript` tool components — fold into the #19 rebuild-gap
    story when that is scheduled.
