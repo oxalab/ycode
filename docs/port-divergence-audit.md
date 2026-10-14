@@ -670,9 +670,27 @@ missing feature/surface, LOW = cosmetic/wording.
   updated. Tests: `edit_tool_test.go` (7 tests: string repair, extra-keys
   survival, legacy top-level, non-map passthrough, AgentTool shim presence,
   prepare→marshal→Execute end-to-end, single-apply no-double-append).
-- **A9 MED edit.go:233-249** — result lacks all diff UI chrome: no
+- **A9 MED edit.go:233-249 — ✅ FIXED (2026-10-13, story 12)** — result lacks all diff UI chrome: no
   `renderDiff` colors/intra-line highlight, no streaming preview diff, no
   success/error header backgrounds (TS edit.ts:434-483, diff.ts:79-147).
+  **Re-audit correction:** the colorizer (interactive/diff.go renderDiff +
+  isDiffLike, 16 tests) and the pending/success/error header backgrounds
+  (toolBg) already existed in the active interactive TUI — the real gap was
+  that the diff never reached it: `EventToolExecutionEnd` carried only
+  `Result.Content`, dropping `EditToolDetails.Diff` at agent_loop.go:695, so
+  the box showed "Successfully replaced N block(s)…" and nothing else. Fixed:
+  (1) event gained an additive `Details any` field (agent-sdk types + emitter);
+  (2) `toolResultText` swaps the success line for Details.Diff (reference
+  formatEditResult shows diff only), unwrapping typed / `*any` / decoded-map
+  shapes, also used by `rebuildTranscript` so `/resume` restores diffs;
+  (3) `ComputeEditPreviewDiff` (core/tools, prepare→parse→read-only diff, same
+  repair pipeline as Execute) streams the preview into the pending box from
+  `startEditPreview` while the edit runs — preview errors tint the header red
+  (toolBg reordered error-first, reference getEditHeaderBg). Tests:
+  `edit_preview_test.go` (5), `tool_result_text_test.go` (5 incl. typed-nil
+  `*any` guard). Follow-up: TS never shows "Successfully replaced" text even
+  after settle — Go matches this on the live path; the BT (non-active) TUI is
+  unchanged.
 - **A10 MED write.go:105-130** — content preview drops ALL blank lines (TS
   keeps interior ones), no `... (N more lines, M total, to expand)` hint, no
   syntax highlighting.
