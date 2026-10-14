@@ -143,7 +143,7 @@ func (o *Orchestrator) rebuildTranscript() {
 			case llm.ToolResultMessage[any]:
 				if tc, ok := pendingTools[m.ToolCallID]; ok {
 					delete(pendingTools, m.ToolCallID)
-					tc.UpdateResult(extractResultText(m.Content), m.IsError, false)
+					tc.UpdateResult(toolResultText(m.Content, m.Details, m.IsError), m.IsError, false)
 				}
 			case core.BashExecutionMessage:
 				bash := NewBashExecution(o.engine, m.Command, m.ExcludeFromContext, o.th)

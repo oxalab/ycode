@@ -690,9 +690,10 @@ func createToolResultMessage(finalized finalizedToolCallOutcome) llm.ToolResultM
 }
 
 func emitToolExecutionEnd(finalized finalizedToolCallOutcome, emit func(AgentEvent) error){
-	// Pass Content (the output blocks), not Details (which is nil for most tools).
-	// The TUI's extractResultText reads Content; passing Details sent nil → empty tool output.
-	emit(NewToolExecutionEndEvent(finalized.ToolCall.ID, finalized.ToolCall.Name, finalized.Result.Content, finalized.IsError))
+	// Result stays Content (the output blocks the TUI's extractResultText
+	// reads); Details rides in its own field so consumers can pick up typed
+	// extras (e.g. the edit diff) — it is nil for most tools.
+	emit(NewToolExecutionEndEvent(finalized.ToolCall.ID, finalized.ToolCall.Name, finalized.Result.Content, finalized.Result.Details, finalized.IsError))
 }
 
 func emitToolResultMessage(toolResultMessage llm.ToolResultMessage[any], emit func(AgentEvent) error) {
