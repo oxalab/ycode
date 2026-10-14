@@ -102,6 +102,39 @@ func prepareEditArguments(input any) any {
 	return argsMap
 }
 
+/*
+ComputeEditPreviewDiff renders the read-only preview diff for an edit call from
+raw (unrepaired) tool arguments — the same prepare → parse pipeline as Execute
+but without writing anything (reference computeEditsDiff; the TUI shows this
+while the tool runs). Returns (diffText, errorText); errorText is empty on
+success.
+*/
+func ComputeEditPreviewDiff(args any, cwd string) (string, string) {
+	var input EditToolInput
+	data, err := json.Marshal(prepareEditArguments(args))
+	if err == nil {
+		err = json.Unmarshal(data, &input)
+	}
+	if err != nil {
+		return "", fmt.Sprintf("invalid arguments: %v", err)
+	}
+
+	edits, err := validateEditInput(&input)
+	if err != nil {
+		return "", err.Error()
+	}
+
+	if input.Path == "" {
+		return "", "invalid arguments: missing path"
+	}
+
+	result, errRes := ComputeEditsDiff(input.Path, edits, cwd)
+	if errRes.Error != "" {
+		return "", errRes.Error
+	}
+	return result.Diff, ""
+}
+
 func validateEditInput(input *EditToolInput) ([]Edit, error) {
 	if len(input.Edits) == 0 {
 		if input.OldText != nil && input.NewText != nil {

@@ -232,6 +232,9 @@ type EventToolExecutionEnd struct {
 	ToolCallID 	string
 	ToolName 	string
 	Result 		any
+	// Details carries typed tool extras (e.g. the edit tool's diff) alongside
+	// the content blocks for TUI rendering; nil for most tools.
+	Details 	any
 	IsError 	bool
 }
 
@@ -422,6 +425,6 @@ func NewToolExecutionStartEvent(toolCallID, toolName string, args any) AgentEven
 func NewToolExecutionUpdateEvent(toolCallID, toolName string, args, partial any) AgentEvent {
     return EventToolExecutionUpdate{ToolCallID: toolCallID, ToolName: toolName, Args: args, PartialResult: partial}
 }
-func NewToolExecutionEndEvent(toolCallID, toolName string, result any, isError bool) AgentEvent {
-    return EventToolExecutionEnd{ToolCallID: toolCallID, ToolName: toolName, Result: result, IsError: isError}
+func NewToolExecutionEndEvent(toolCallID, toolName string, result, details any, isError bool) AgentEvent {
+    return EventToolExecutionEnd{ToolCallID: toolCallID, ToolName: toolName, Result: result, Details: details, IsError: isError}
 }

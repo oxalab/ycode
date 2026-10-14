@@ -71,7 +71,7 @@ func (o *Orchestrator) handleAgentEvent(event sdk.AgentEvent) {
 	case sdk.EventToolExecutionUpdate:
 		o.handleToolUpdate(e.ToolCallID, e.PartialResult)
 	case sdk.EventToolExecutionEnd:
-		o.handleToolEnd(e.ToolCallID, e.Result, e.IsError)
+		o.handleToolEnd(e.ToolCallID, e.Result, e.Details, e.IsError)
 
 	// A failed turn carries the error message on EventTurnEnd with no preceding
 	// MessageStart/MessageEnd (agent_loop.go:173-174), so it would otherwise be
@@ -101,6 +101,34 @@ func (o *Orchestrator) handleToolStart(id, name string, args any) {
 		o.chat.AddChild(tc)
 		o.toolComps[id] = tc
 	})
+	if strings.EqualFold(name, "edit") {
+		o.startEditPreview(id, args)
+	}
+}
+
+// startEditPreview computes the read-only preview diff for an edit call while
+// the tool runs (reference computeEditsDiff) and streams it into the pending
+// box. When the call settles first, the component is gone from toolComps (or
+// no longer partial) and the preview is dropped under the render lock.
+func (o *Orchestrator) startEditPreview(id string, args any) {
+	cwd := ""
+	if o.runtime != nil {
+		cwd = o.runtime.Cwd()
+	}
+	go func() {
+		diff, errText := tools.ComputeEditPreviewDiff(args, cwd)
+		o.engine.Mutate(func() {
+			tc, ok := o.toolComps[id]
+			if !ok || !tc.isPartial {
+				return
+			}
+			if errText != "" {
+				tc.UpdateResult(errText, true, true)
+				return
+			}
+			tc.UpdateResult(diff, false, true)
+		})
+	}()
 }
 
 // handleToolUpdate applies a partial result (for bash, streams output).
@@ -120,8 +148,8 @@ func (o *Orchestrator) handleToolUpdate(id string, partial any) {
 }
 
 // handleToolEnd finalizes a tool/bash component with its result.
-func (o *Orchestrator) handleToolEnd(id string, result any, isError bool) {
-	text := extractResultText(result)
+func (o *Orchestrator) handleToolEnd(id string, result, details any, isError bool) {
+	text := toolResultText(result, details, isError)
 	exitCode := bashExitCodeFromResult(result) // best-effort for the agent-tool path
 	o.engine.Mutate(func() {
 		if be, ok := o.bashComps[id]; ok {
@@ -137,6 +165,46 @@ func (o *Orchestrator) handleToolEnd(id string, result any, isError bool) {
 			delete(o.toolComps, id)
 		}
 	})
+}
+
+// toolResultText is the display text for a settled tool result. The reference
+// shows the edit diff instead of the success line (formatEditResult), so a
+// present EditToolDetails.Diff replaces the extracted content text; errors
+// keep their error text.
+func toolResultText(result, details any, isError bool) string {
+	if !isError {
+		if diff := editDiffFromDetails(details); diff != "" {
+			return diff
+		}
+	}
+	return extractResultText(result)
+}
+
+// editDiffFromDetails unwraps the edit tool's diff from Details. Shapes:
+// typed *tools.EditToolDetails (in-process events), a *any wrapping either
+// that or a map[string]any{"Diff": ...} (decoded session entries).
+func editDiffFromDetails(details any) string {
+	switch d := details.(type) {
+	case *tools.EditToolDetails:
+		if d != nil {
+			return d.Diff
+		}
+	case *any:
+		if d == nil {
+			return ""
+		}
+		return editDiffFromDetails(*d)
+	case map[string]any:
+		// Decoded session entries carry JSON-tag keys ("diff"); the capitalized
+		// form guards against Go-field-name marshaling.
+		if diff, ok := d["diff"].(string); ok {
+			return diff
+		}
+		if diff, ok := d["Diff"].(string); ok {
+			return diff
+		}
+	}
+	return ""
 }
 
 // bashExitCodeFromResult extracts an exit code from a bash tool result if present

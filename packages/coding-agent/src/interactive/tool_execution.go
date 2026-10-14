@@ -124,13 +124,14 @@ func (t *ToolExecution) format() string {
 }
 
 // toolBg returns the background StyleFunc for the current state
-// (reference updateDisplay :229-233).
+// (reference updateDisplay :229-233 + getEditHeaderBg — a preview or settled
+// error tints the header red even while the tool is still running).
 func toolBg(th *theme.Theme, isPartial, isError bool) tui.StyleFunc {
 	switch {
-	case isPartial:
-		return func(s string) string { return th.Bg("toolPendingBg", s) }
 	case isError:
 		return func(s string) string { return th.Bg("toolErrorBg", s) }
+	case isPartial:
+		return func(s string) string { return th.Bg("toolPendingBg", s) }
 	default:
 		return func(s string) string { return th.Bg("toolSuccessBg", s) }
 	}
