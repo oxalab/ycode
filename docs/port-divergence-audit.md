@@ -691,9 +691,23 @@ missing feature/surface, LOW = cosmetic/wording.
   `*any` guard). Follow-up: TS never shows "Successfully replaced" text even
   after settle — Go matches this on the live path; the BT (non-active) TUI is
   unchanged.
-- **A10 MED write.go:105-130** — content preview drops ALL blank lines (TS
+- **A10 MED write.go:105-130 — ✅ FIXED (2026-10-13, story 13)** — content preview drops ALL blank lines (TS
   keeps interior ones), no `... (N more lines, M total, to expand)` hint, no
-  syntax highlighting.
+  syntax highlighting. **Re-audit correction:** the active interactive TUI never
+  consumed `RenderCall` (its `formatToolCall` write case was path-only) — only
+  the older BT TUI did. Fixed both: `RenderCall` now trims trailing empties
+  only (interior blanks kept), collapses to 10 lines with the exact
+  `... (N more lines, M total, ctrl+o to expand)` hint, accepts the
+  `file_path` alias, and shows `[invalid content arg - expected string]` on
+  non-string content; the interactive TUI's write case renders the full styled
+  preview (chroma `lexers.Match` highlighting via new `highlightWritePreview`,
+  honoring ctrl+o expanded state, hint styled muted + keyHint) and hides the
+  "Successfully wrote N bytes" line on success (reference formatWriteResult
+  renders nothing on success — errors keep text). Out of scope, noted: TS's
+  incremental `WriteHighlightCache` (Go args arrive complete at tool start).
+  Tests: `write_preview_test.go` (4, first for write.go), interactive
+  `tool_result_text_test.go` (+4: collapsed hint / expanded / highlight smoke /
+  success-line suppression).
 - **A11 LOW** — error-string drift across edit_diff.go/edit.go ("THe old
   text", "overalp", "whitespaces", "atleast", "inavlid arguments", lowercase
   first letters, missing periods); read.go:108 same.

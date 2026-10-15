@@ -6,6 +6,7 @@ package interactive
 // still partial (reference getEditHeaderBg).
 
 import (
+	"strings"
 	"testing"
 
 	"ycode/packages/coding-agent/src/core/tools"
@@ -76,5 +77,65 @@ func TestToolBgErrorBeatsPartial(t *testing.T) {
 	}
 	if errPartial == toolBg(th, true, false)("x") {
 		t.Error("error background must differ from pending background")
+	}
+}
+
+// Audit A10: the live write preview (reference formatWriteCall) — interior
+// blanks kept, 10-line collapse with the expand hint when collapsed, chroma
+// highlighting by file path, and the success line suppressed (reference
+// formatWriteResult renders nothing on success).
+
+var writePreviewArgs = map[string]any{
+	"path":    "notes.txt",
+	"content": "one\n\ntwo\n\nthree\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
+}
+
+func TestWritePreviewCollapsedShowsHint(t *testing.T) {
+	th := diffTheme(t)
+	body := writePreviewBody(writePreviewArgs, "notes.txt", false, th)
+	visible := visibleText(body)
+	if !strings.Contains(visible, "one\n\ntwo") {
+		t.Errorf("interior blank line must survive, got:\n%s", visible)
+	}
+	// 14 display lines: 3 text + 2 interior blanks + 9 numbered (interior blanks
+	// count — that's the fix). Collapsed shows 10, so 4 remain behind the hint.
+	if !strings.Contains(visible, "... (4 more lines, 14 total,") {
+		t.Errorf("collapsed preview must carry the expand hint, got:\n%s", visible)
+	}
+}
+
+func TestWritePreviewExpandedShowsAll(t *testing.T) {
+	th := diffTheme(t)
+	body := writePreviewBody(writePreviewArgs, "notes.txt", true, th)
+	visible := visibleText(body)
+	if !strings.Contains(visible, "12") || strings.Contains(visible, "more lines") {
+		t.Errorf("expanded preview must show every line without the hint, got:\n%s", visible)
+	}
+}
+
+func TestWritePreviewHighlightsByPath(t *testing.T) {
+	th := diffTheme(t)
+	body := writePreviewBody(map[string]any{"content": "func main() {}"}, "main.go", true, th)
+	if !strings.Contains(body, "\x1b[") {
+		t.Error("a .go path should produce chroma-highlighted (ANSI) output")
+	}
+}
+
+func TestFormatHidesWriteSuccessLine(t *testing.T) {
+	th := diffTheme(t)
+	tc := NewToolExecution("write", writePreviewArgs, th)
+	tc.UpdateResult("Successfully wrote 60 bytes to notes.txt", false, false)
+	out := visibleText(tc.format())
+	if strings.Contains(out, "Successfully wrote") {
+		t.Errorf("write success line must not render (reference formatWriteResult), got:\n%s", out)
+	}
+	if !strings.Contains(out, "one") {
+		t.Errorf("preview body missing, got:\n%s", out)
+	}
+
+	tcErr := NewToolExecution("write", map[string]any{"path": "x.txt", "content": "y"}, th)
+	tcErr.UpdateResult("failed to write file: boom", true, false)
+	if !strings.Contains(visibleText(tcErr.format()), "failed to write file: boom") {
+		t.Error("write error result must still render")
 	}
 }

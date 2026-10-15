@@ -105,26 +105,31 @@ func CreateWriteToolDefinition(cwd string, opts *WriteToolOptions) *extensions.T
 		RenderCall: func(args any) any {
 			argsMap, _ := args.(map[string]any)
 			path := "?"
-			if p, ok := argsMap["path"].(string); ok {
+			if p, ok := argsMap["path"].(string); ok && p != "" {
+				path = ShortenPath(p)
+			} else if p, ok := argsMap["file_path"].(string); ok && p != "" {
 				path = ShortenPath(p)
 			}
-			content, _ := argsMap["content"].(string)
-			display := NormalizeDisplayText(content)
-			display = ReplaceTabs(display)
-
-			var lines []string
-			for _, line := range strings.Split(display, "\n") {
-				if strings.TrimSpace(line) == "" {
-					continue
-				}
-				lines = append(lines, line)
-				if len(lines) >= 10 {
-					break
-				}
-			}
 			text := fmt.Sprintf("write %s", path)
-			if len(lines) > 0 {
-				text += "\n\n" + strings.Join(lines, "\n" )
+
+			content, ok := argsMap["content"].(string)
+			if !ok {
+				return text + "\n\n[invalid content arg - expected string]"
+			}
+			if content == "" {
+				return text
+			}
+
+			display := ReplaceTabs(NormalizeDisplayText(content))
+			lines := trimTrailingEmptyLines(strings.Split(display, "\n"))
+			total := len(lines)
+			maxLines := total
+			if maxLines > 10 {
+				maxLines = 10
+			}
+			text += "\n\n" + strings.Join(lines[:maxLines], "\n")
+			if remaining := total - maxLines; remaining > 0 {
+				text += fmt.Sprintf("\n... (%d more lines, %d total, ctrl+o to expand)", remaining, total)
 			}
 			return text
 		},
@@ -142,6 +147,16 @@ func CreateWriteToolDefinition(cwd string, opts *WriteToolOptions) *extensions.T
 	}
 }
 
+// trimTrailingEmptyLines drops trailing empty lines only — interior blank
+// lines are part of the content and stay (reference trimTrailingEmptyLines).
+func trimTrailingEmptyLines(lines []string) []string {
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return lines[:end]
+}
+
 func CreateWriteTool(cwd string, opts *WriteToolOptions) *sdk.AgentTool[any] {
 	return WrapToolDefinition(CreateWriteToolDefinition(cwd, opts), nil)
 }
@@ -156,11 +171,10 @@ FOOTNOTE:
  but "wrote 8 bytes" for "héllo!" where TS would show "wrote 6 characters". Minor display 
  difference.
 
- 2. Syntax highlighting deferred — TS has incremental highlight caching 
- (WriteHighlightCache, refreshWriteHighlightPrefix) using highlightCode from the TUI 
- theme. Our RenderCall does plain text. Will be added when TUI theme is ported.
+ 2. Syntax highlighting lives in the interactive TUI (highlightWritePreview —
+ chroma via the file path); this RenderCall stays plain text because the BT
+ renderer that consumes it applies its own styling and passes no expanded flag.
 
- 3. file_path alias not ported — The TS renderCall accepts both path and file_path (alias). 
- Our Go version only uses path. This alias appears to be for backward compatibility. 
- If needed, add FilePath string \json:"file_path,omitempty"`` to the input struct.
+ 3. file_path alias: the render side accepts both path and file_path (the
+ input structs still only declare path — A12 tracks the model-facing alias).
 */
