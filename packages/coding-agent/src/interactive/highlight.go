@@ -27,8 +27,24 @@ func highlightCode(code, lang string, th *theme.Theme) []string {
 	if lexer == nil {
 		return nil
 	}
-	lexer = chroma.Coalesce(lexer)
+	return tokenizeLines(chroma.Coalesce(lexer), code, th)
+}
 
+// highlightWritePreview highlights file content for the write-tool preview,
+// picking the lexer by file path (reference getLanguageFromPath + highlightCode).
+// Returns nil when no lexer matches the path — the caller falls back to plain
+// lines.
+func highlightWritePreview(content, path string, th *theme.Theme) []string {
+	lexer := lexers.Match(path)
+	if lexer == nil {
+		return nil
+	}
+	return tokenizeLines(chroma.Coalesce(lexer), content, th)
+}
+
+// tokenizeLines renders code through the lexer into one ANSI-colored line per
+// code line (nil on tokenisation failure).
+func tokenizeLines(lexer chroma.Lexer, code string, th *theme.Theme) []string {
 	iter, err := lexer.Tokenise(nil, code)
 	if err != nil {
 		return nil

@@ -15,6 +15,7 @@ import (
 
 	"ycode/packages/tui"
 	"ycode/packages/tui/components"
+	"ycode/packages/coding-agent/src/core/tools"
 	"ycode/packages/coding-agent/src/core/tui/theme"
 )
 
@@ -94,12 +95,14 @@ func (t *ToolExecution) format() string {
 	// Compact per-tool call line for known tools (read/grep/edit/write/find/ls);
 	// fall back to indented JSON for unknown/MCP tools (reference core/tools/*.ts
 	// renderCall). bash is rendered by its own component.
-	if call := formatToolCall(t.toolName, t.args, t.th); call != "" {
+	if call := formatToolCall(t.toolName, t.args, t.expanded, t.th); call != "" {
 		s += " " + call
 	} else if j := argsJSON(t.args); j != "" {
 		s += "\n\n" + j
 	}
-	if t.result != "" {
+	// Reference formatWriteResult: write success renders nothing — the call
+	// preview already shows the content. Errors keep their text.
+	if t.result != "" && !(strings.EqualFold(t.toolName, "write") && !t.isError) {
 		// Cap to a preview (first toolResultMaxLines lines) when collapsed; full
 		// output when expanded (ctrl+o). + "… N more lines (ctrl+o to expand)" hint.
 		raw := t.result
@@ -182,8 +185,9 @@ func firstStr(m map[string]any, keys ...string) string {
 // formatToolCall renders a compact, tool-specific call line (path in accent,
 // pattern as /…/, edit count, etc.) for known tools. Returns "" for unknown/MCP
 // tools so the caller falls back to indented JSON (reference core/tools/*.ts
-// renderCall; bash has its own component).
-func formatToolCall(name string, args any, th *theme.Theme) string {
+// renderCall; bash has its own component). write additionally renders the
+// content preview body, so it needs the expanded flag.
+func formatToolCall(name string, args any, expanded bool, th *theme.Theme) string {
 	m := argsMap(args)
 	if m == nil {
 		return ""
@@ -198,7 +202,11 @@ func formatToolCall(name string, args any, th *theme.Theme) string {
 		}
 	case "write", "create":
 		if p := path("path", "file_path", "filePath"); p != "" {
-			return accent(p)
+			call := accent(p)
+			if body := writePreviewBody(m, p, expanded, th); body != "" {
+				call += "\n\n" + body
+			}
+			return call
 		}
 	case "edit":
 		if p := path("path", "file_path", "filePath"); p != "" {
@@ -246,4 +254,52 @@ func editCount(m map[string]any) int {
 		return len(v)
 	}
 	return 0
+}
+
+// writePreviewBody renders the write tool's content preview (reference
+// formatWriteCall): trailing empty lines trimmed, interior blanks kept,
+// collapsed to 10 lines with an expand hint unless expanded, syntax-highlighted
+// via the file path when a lexer matches.
+func writePreviewBody(m map[string]any, path string, expanded bool, th *theme.Theme) string {
+	content, ok := m["content"].(string)
+	if !ok {
+		return th.Fg("error", "[invalid content arg - expected string]")
+	}
+	if content == "" {
+		return ""
+	}
+
+	display := tools.ReplaceTabs(tools.NormalizeDisplayText(content))
+	var lines []string
+	if highlighted := highlightWritePreview(display, path, th); highlighted != nil {
+		lines = trimTrailingEmptyLines(highlighted)
+	} else {
+		for _, l := range strings.Split(display, "\n") {
+			lines = append(lines, th.Fg("toolOutput", l))
+		}
+		lines = trimTrailingEmptyLines(lines)
+	}
+
+	total := len(lines)
+	maxLines := total
+	if !expanded && maxLines > 10 {
+		maxLines = 10
+	}
+	body := strings.Join(lines[:maxLines], "\n")
+	if remaining := total - maxLines; remaining > 0 {
+		body += "\n" + th.Fg("muted", fmt.Sprintf("... (%d more lines, %d total,", remaining, total)) +
+			" " + keyHint(th, "app.tools.expand", "to expand") + ")"
+	}
+	return body
+}
+
+// trimTrailingEmptyLines drops trailing empty lines only (reference
+// trimTrailingEmptyLines) — interior blank lines are part of the content.
+// Highlighted lines carry ANSI, so emptiness is judged on the stripped text.
+func trimTrailingEmptyLines(lines []string) []string {
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(ansiStripRe.ReplaceAllString(lines[end-1], "")) == "" {
+		end--
+	}
+	return lines[:end]
 }
