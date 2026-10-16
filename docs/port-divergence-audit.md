@@ -731,9 +731,16 @@ missing feature/surface, LOW = cosmetic/wording.
   footer claims they were. Fixed (one condition, TS truncate.ts:115 parity);
   `TruncateTail` already had the bound. Tests: `truncate_test.go` (max-lines
   cap, first-line-exceeds path, mid-file byte cap, under-limits pass-through).
-- **B3 MED read.go:112-114** — access check is `os.Stat` + generic
+- **B3 MED read.go:112-114 — ✅ FIXED (2026-10-16, story 14)** — access check is `os.Stat` + generic
   "cannot read file"; TS uses R_OK access and surfaces the real fs error
-  (EACCES/ENOENT indistinguishable in Go).
+  (EACCES/ENOENT indistinguishable in Go). Fixed: `defaultReadOps.Access` now
+  probes readability via `os.Open`+`Close` (portable `access(R_OK)` —
+  `syscall.Access` isn't Windows-portable), and Execute returns the raw fs
+  error (reference re-throws unmodified; the model now sees the real reason —
+  not-found vs permission — with the path, matching edit.go's established
+  informative style). Tests: `read_test.go` (first tests for read.go: Access
+  op readable/missing, Execute missing-file raw error — mutation-verified —,
+  small-file read, directory path).
 - **B4 MED read.go:136** — image-omitted text missing the
   `Read image file [mime]` first line; **B5 MED** non-vision-model image note
   not ported (no model context in Go Execute).
