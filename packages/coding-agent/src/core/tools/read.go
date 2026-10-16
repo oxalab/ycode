@@ -35,9 +35,16 @@ func (d defaultReadOps) ReadFile(p string) ([]byte, error) {
 	return os.ReadFile(p)
 }
 
+// Access probes readability (the Go equivalent of TS fsAccess(path, R_OK)):
+// open the file for reading and close it. os.Stat would only check existence,
+// letting unreadable files pass the gate and fail later with a different
+// message.
 func (d defaultReadOps) Access(p string) error {
-	_, err := os.Stat(p)
-	return err
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // DetectImageMimeType reports the image MIME type for a path by extension, or ""
@@ -110,7 +117,10 @@ func CreateReadToolDefinition(cwd string, opts *ReadToolOptions) *extensions.Too
 			absolutePath := ResolveReadPath(input.Path, cwd)
 
 			if err := ops.Access(absolutePath); err != nil {
-				return nil, fmt.Errorf("cannot read file: %s", input.Path)
+				// Surface the raw fs error (reference re-throws it unmodified):
+				// the model sees the real reason (not-found vs permission)
+				// instead of a generic line.
+				return nil, err
 			}
 
 			mimeType := ops.DetectImageMimeType(absolutePath)
