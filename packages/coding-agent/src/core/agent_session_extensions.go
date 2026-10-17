@@ -400,8 +400,11 @@ func (s *AgentSession) refreshToolRegistry(activeToolNames []string, includeAllE
 	// Base tools come from the tools package. Extension/custom tools are wrapped
 	// as AgentTool stubs that delegate to the extension runner.
 	toolRegistry := make(map[string]any)
+	ctxFactory := func() extensions.ExtensionContext {
+		return extensions.ExtensionContext{Model: s.GetModel()}
+	}
 	for name, entry := range definitionRegistry {
-		toolRegistry[name] = buildAgentToolFromDefinition(name, entry)
+		toolRegistry[name] = buildAgentToolFromDefinition(name, entry, ctxFactory)
 	}
 	s.toolRegistry = toolRegistry
 
@@ -570,8 +573,10 @@ func flattenGuidelines(m map[string][]string) []string {
 // buildAgentToolFromDefinition creates an sdk.AgentTool[any] from a tool
 // definition entry. For base/builtin tools this will be overridden by the
 // actual tool from the tools package during setActiveToolsByName. For
-// extension/custom tools this creates a delegating AgentTool.
-func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry) sdk.AgentTool[any] {
+// extension/custom tools this creates a delegating AgentTool. ctxFactory
+// supplies the ExtensionContext (current model) to context-aware definitions
+// at execute time; nil restores the context-free behavior.
+func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry, ctxFactory func() extensions.ExtensionContext) sdk.AgentTool[any] {
 	// Unmarshal Parameters from json.RawMessage to map[string]any
 	var params map[string]any
 	if len(entry.Definition.Parameters) > 0 {
@@ -588,7 +593,13 @@ func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry) sdk.Ag
 			// If the definition has its own Execute function, use it
 			if entry.Definition.Execute != nil {
 				args, _ := json.Marshal(params)
-				result, err := entry.Definition.Execute(signal, args)
+				var result any
+				var err error
+				if entry.Definition.ExecuteContext != nil && ctxFactory != nil {
+					result, err = entry.Definition.ExecuteContext(signal, args, ctxFactory())
+				} else {
+					result, err = entry.Definition.Execute(signal, args)
+				}
 				if err != nil {
 					return sdk.AgentToolResult[any]{
 						Content: []llm.ContentBlock{

@@ -4,12 +4,19 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"regexp"
 	"strings"
 
 	llm "ycode/packages/llm/src"
 )
+
+// The blank image/* imports register the decoders image.DecodeConfig needs —
+// without them every dimension probe failed and all image reads degraded to
+// "[Image omitted]" (webp has no stdlib decoder and still degrades).
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
