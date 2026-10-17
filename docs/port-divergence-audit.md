@@ -741,9 +741,26 @@ missing feature/surface, LOW = cosmetic/wording.
   informative style). Tests: `read_test.go` (first tests for read.go: Access
   op readable/missing, Execute missing-file raw error — mutation-verified —,
   small-file read, directory path).
-- **B4 MED read.go:136** — image-omitted text missing the
-  `Read image file [mime]` first line; **B5 MED** non-vision-model image note
-  not ported (no model context in Go Execute).
+- **B4 MED read.go:136 + B5 MED — ✅ FIXED (2026-10-17, story 15)** — image-omitted text missing the
+  `Read image file [mime]` first line; **B5** non-vision-model image note
+  not ported (no model context in Go Execute). Fixed together (one code path):
+  the degrade note now leads with `Read image file [<mime>]` (read.ts:257) and
+  the ported `getNonVisionImageNote` (read.ts:90-95) appends
+  `[Current model does not support images. …]` on every image path when the
+  model's input lacks "image". The model context rides a revived
+  `ExtensionContext` (extensions: new `ExtensionContext{Model}` + optional
+  `ToolDefinition.ExecuteContext`; `buildAgentToolFromDefinition` takes a
+  ctxFactory, supplied by `buildRuntime` as `s.GetModel()` — live, so
+  mid-session model switches are honored; nil factory = old behavior). The
+  wrapper's footnote-1 "lost ExtensionContext param" is thus resolved.
+  **Bonus root-cause fix found by the new tests:** no package imported
+  `image/png|jpeg|gif`, so `image.DecodeConfig` failed for EVERY image and all
+  image reads degraded to "[Image omitted]" — formats now registered in
+  render_utils.go (webp has no stdlib decoder and still degrades; footnote
+  updated). Out of scope: `formatDimensionNote` success-path scaling note
+  (B9). Tests: read_test.go +4 (note helper, ExecuteContext vision/text-only
+  end-to-end via synthesized PNGs with patched IHDR+CRC, degrade mime line —
+  this test locked the decoder bug), agent_session_tools_test.go (+2 wiring).
 - **B6 MED path_utils.go:26-30** — `tryNFDVariant` is a no-op TODO (TS does
   `normalize("NFD")`); **B7 MED** Windows `/foo`-style root-relative paths
   resolve against cwd, TS resolves against the drive root.
