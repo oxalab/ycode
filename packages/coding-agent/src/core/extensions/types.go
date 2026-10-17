@@ -274,12 +274,25 @@ type ToolDefinition struct {
 	RenderShell 	string 		`json:"renderShell,omitempty"`
 	ExecutionMode 	ToolExecutionMode 	`json:"executionMode,omitempty"`
 	Execute 		func(ctx context.Context, args json.RawMessage) (any, error)
+	// ExecuteContext is the ExtensionContext-aware form of Execute (TS passes
+	// ctx as the 5th execute param). When both are set and a context factory
+	// was provided at wrap time, the wrapper prefers this one.
+	ExecuteContext 	func(ctx context.Context, args json.RawMessage, extCtx ExtensionContext) (any, error)
 	RenderCall  	func(args any) any
 	RenderResult	func(args any, result any, options any) any
 	// PrepareArguments is an optional compatibility shim applied to raw tool
 	// call arguments before Execute (TS prepareArguments). It repairs
 	// model-specific argument shapes (e.g. `edits` sent as a JSON string).
 	PrepareArguments 	func(args any) (any, error)
+}
+
+// ExtensionContext is the per-execute context handed to context-aware tools
+// (TS ExtensionContext, extensions/types.ts:298-310 — which also carries UI
+// methods and the model registry; the Go port starts with the model only).
+type ExtensionContext struct {
+	// Model is the session's current model, resolved at execute time (so
+	// mid-session model switches are reflected). Zero-valued when unknown.
+	Model llm.Model[llm.Api]
 }
 
 // --- Registered Types ---
