@@ -761,9 +761,23 @@ missing feature/surface, LOW = cosmetic/wording.
   (B9). Tests: read_test.go +4 (note helper, ExecuteContext vision/text-only
   end-to-end via synthesized PNGs with patched IHDR+CRC, degrade mime line —
   this test locked the decoder bug), agent_session_tools_test.go (+2 wiring).
-- **B6 MED path_utils.go:26-30** — `tryNFDVariant` is a no-op TODO (TS does
-  `normalize("NFD")`); **B7 MED** Windows `/foo`-style root-relative paths
-  resolve against cwd, TS resolves against the drive root.
+- **B6 MED path_utils.go:26-30 — ✅ FIXED (2026-10-18)** — `tryNFDVariant` was a
+  no-op TODO (the footnote claiming "no external deps yet" was stale —
+  golang.org/x/text v0.30.0 was already direct, `norm.NFKC` already used in
+  edit_diff.go). Now `norm.NFD.String`, mirroring TS `normalize("NFD")`
+  (path-utils.ts:17); the NFD fallback and the previously-dead combined
+  NFD+curly-quote variant in `ResolveReadPath` are live. Stale NOTE + footnote
+  flag removed (flag 2, swallowed UserHomeDir error, kept — out of scope).
+  **B7 MED — ✅ FIXED (2026-10-18)** — on Windows `filepath.IsAbs("/foo")` is
+  false (Node's `path.isAbsolute` is true), so `ResolveToCwd` joined `/foo`
+  under cwd. Now a `runtime.GOOS`-guarded `isWindowsRootRelative` branch
+  anchors `/foo`/`\foo` (no volume, leading separator) to the cwd's drive via
+  `filepath.Join(filepath.VolumeName(cwd), …)` — Node `path.resolve(cwd, "/foo")`
+  semantics; Unix behavior untouched (guard) and `\foo` stays cwd-relative
+  there. New path_utils_test.go: 5 tests (NFD variant, NFD+curly combined,
+  curly-only guard, resolve relative/absolute guard, Windows root-relative
+  skipped off-Windows). Mutation-verified: the three fix-dependent tests fail
+  on the unfixed tree.
 - **B8 MED render_utils.go:12** — ANSI stripper only handles simple SGR CSI;
   OSC/private-mode escapes leak into the TUI (npm strip-ansi handles all).
 - **B9 LOW** — terminal-capability detection diverges (case-sensitive
