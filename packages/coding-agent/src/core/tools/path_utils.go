@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 var unicodeSpacesRe = regexp.MustCompile("[\u00A0\u2000-\u200A\u202F\u205F\u3000]")
@@ -21,12 +24,10 @@ func tryMacOSScreenshotPath(filePath string) string {
 }
 
 // tryNFDVariant: Attempts NFD Unicode normalization for macOS compatibility.
-// NOTE: Requires golang.org/x/text/unicode/norm. Currently returns input unchanged
-// Without this, macOS NFD-encoded filenames may not match when resolved from user input.
+// macOS stores filenames in NFD (decomposed) form, so user input in NFC
+// (composed) form won't match — try converting it (TS: filePath.normalize("NFD")).
 func tryNFDVariant(filePath string) string {
-	// TODO: Implement with golang.org/x/text/unicode/norm
-	// return norm.NFD.String(filePath)
-	return filePath
+	return norm.NFD.String(filePath)
 }
 
 func tryCurlyQuoteVariant(filePath string) string {
@@ -59,11 +60,27 @@ func ExpandPath(filePath string) string {
 	return normalized
 }
 
+// isWindowsRootRelative: Reports whether p is root-relative on Windows —
+// starts with a separator but carries no volume (e.g. "/foo" or "\foo").
+// Go's filepath.IsAbs says false for these (unlike TS path.isAbsolute), so
+// ResolveToCwd must special-case them instead of joining them under cwd.
+func isWindowsRootRelative(p string) bool {
+	if runtime.GOOS != "windows" || filepath.IsAbs(p) {
+		return false
+	}
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\")
+}
+
 // ResolveToCwd: Resolves a path relative to the fived cwd, handling ~ expanding and absolute paths
 func ResolveToCwd(filePath string, cwd string) string {
 	expanded := ExpandPath(filePath)
 	if filepath.IsAbs(expanded) {
 		return expanded
+	}
+	if isWindowsRootRelative(expanded) {
+		// "/foo" anchors to the drive root (TS: path.isAbsolute("/foo") is true on
+		// Windows); resolve against the cwd's drive like Node's path.resolve(cwd, "/foo").
+		return filepath.Join(filepath.VolumeName(cwd), expanded)
 	}
 	return filepath.Join(cwd, expanded)
 }
@@ -105,11 +122,6 @@ func ResolveReadPath(filePath string, cwd string) string {
 /*
 Footnote:
 Flags:
-1. tryNFDVariant is a no-op — requires golang.org/x/text/unicode/norm external dependency. 
-Without it, macOS NFD-encoded filenames (common on HFS+/APFS) won't be resolved. 
-The project's go.mod has no external deps yet. 
-You'll need to go get golang.org/x/text when you want this working.
-
-2. os.UserHomeDir() can theoretically error — TS os.homedir() never throws. 
+1. os.UserHomeDir() can theoretically error — TS os.homedir() never throws.
 In practice on Windows/macOS/Linux it won't, but the error is silently swallowed.
 */
