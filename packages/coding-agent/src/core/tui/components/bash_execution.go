@@ -2,6 +2,7 @@ package components
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"ycode/packages/coding-agent/src/core/tools"
@@ -225,29 +226,13 @@ func (b BashExecutionComponent) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, topBorder, content, bottomBorder)
 }
 
+// ansiStripRe is the npm ansi-regex@6.2.2 pattern (the reference's strip-ansi):
+// OSC ... BEL/ESC-\ plus CSI/C1 with private markers, colon params and the full
+// final-byte class. The old ESC-run state machine leaked OSC BEL bytes and ate
+// the first visible char after them.
+var ansiStripRe = regexp.MustCompile(`(?:\x1b\][\s\S]*?(?:\x07|\x1b\\|\x9c))|[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]`)
+
 // stripANSI removes ANSI escape codes from a string.
-// This is a minimal implementation covering SGR and cursor codes.
 func stripANSI(s string) string {
-	var out strings.Builder
-	out.Grow(len(s))
-	inEscape := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == 0x1b {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			// CSI sequence ends with a letter (0x40-0x7E)
-			if c == '[' {
-				continue
-			}
-			if c >= 0x40 && c <= 0x7E {
-				inEscape = false
-			}
-			continue
-		}
-		out.WriteByte(c)
-	}
-	return out.String()
+	return ansiStripRe.ReplaceAllString(s, "")
 }

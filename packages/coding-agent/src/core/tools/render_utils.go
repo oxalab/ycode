@@ -18,10 +18,17 @@ import (
 // without them every dimension probe failed and all image reads degraded to
 // "[Image omitted]" (webp has no stdlib decoder and still degrades).
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+// ansiRe is the npm ansi-regex@6.2.2 pattern (what strip-ansi@7.2.0 — the TS
+// reference's stripper — uses): OSC ... BEL/ESC-\ plus CSI/C1 with private
+// markers, colon params and the full final-byte class. The old ESC[...m-only
+// regex leaked OSC/private-mode escapes into tool output.
+var ansiRe = regexp.MustCompile(`(?:\x1b\][\s\S]*?(?:\x07|\x1b\\|\x9c))|[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]`)
 
 // StripAnsi: Removes ANSI escape sequences from a string.
 func StripAnsi(s string) string {
+	if !strings.Contains(s, "\x1b") && !strings.Contains(s, "\u009b") {
+		return s
+	}
 	return ansiRe.ReplaceAllString(s, "")
 }
 

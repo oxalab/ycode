@@ -25,9 +25,10 @@ const (
 	bashMaxContextBytes = 50 * 1024
 )
 
-// ansiStripRe strips common SGR/CSI escape sequences from bash output (a subset
-// of the reference's strip-ansi; sufficient for typical colored output).
-var ansiStripRe = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
+// ansiStripRe strips ANSI escape sequences from bash output — the npm
+// ansi-regex@6.2.2 pattern (the reference's strip-ansi): OSC ... BEL/ESC-\,
+// CSI/C1 with private markers, colon params, full final-byte class.
+var ansiStripRe = regexp.MustCompile(`(?:\x1b\][\s\S]*?(?:\x07|\x1b\\|\x9c))|[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]`)
 
 type bashStatus int
 
