@@ -778,8 +778,23 @@ missing feature/surface, LOW = cosmetic/wording.
   curly-only guard, resolve relative/absolute guard, Windows root-relative
   skipped off-Windows). Mutation-verified: the three fix-dependent tests fail
   on the unfixed tree.
-- **B8 MED render_utils.go:12** — ANSI stripper only handles simple SGR CSI;
-  OSC/private-mode escapes leak into the TUI (npm strip-ansi handles all).
+- **B8 MED render_utils.go:12 — ✅ FIXED (2026-10-19)** — `tools.StripAnsi` only
+  matched plain CSI (`ESC[…letter`); OSC (incl. the app's own OSC 133),
+  private-mode CSI, colon SGR params and C1 introducers leaked. All three
+  runtime strippers now embed the verbatim npm `ansi-regex@6.2.2` pattern (the
+  lockfile-pinned dep of the reference's strip-ansi@7.2.0; fetched from unpkg
+  since node_modules dirs are empty): tools.StripAnsi (+ the reference's
+  no-ESC/no-0x9B fast path), interactive ansiStripRe, and the core/tui
+  components stripANSI state machine (which terminated on any 0x40-0x7E byte —
+  an OSC's `]` "ended" it, BEL bytes leaked and the first visible char after
+  was eaten). Aligned as one finding, three instances; package-local copies
+  per the no-cross-package-helper convention. Out of scope: test-only helpers
+  (commands_residual_test.go, packages/tui stripAnsiForTest) and export-html's
+  SGR parser (converter, not stripper). Tests: render_utils_test.go TestStripAnsi
+  (9-case table: SGR/erase-line regression guards + private/OSC-BEL/OSC-ST/
+  colon/C1/mixed) + TestGetTextOutputStripsOSC; interactive/ansi_strip_test.go;
+  components bash_execution_ansi_test.go. Mutation-verified: all three fail on
+  the unfixed tree.
 - **B9 LOW** — terminal-capability detection diverges (case-sensitive
   `iTerm.app`, misses ghostty/wezterm/kitty paths); image fallback text
   format; `ycode-output` vs `pi-output` temp prefix; rune-vs-UTF-16

@@ -91,3 +91,47 @@ func TestGetTextOutputNilAndEmpty(t *testing.T) {
 		t.Errorf("empty result: got %q, want empty", got)
 	}
 }
+
+// Tools re-audit B8: StripAnsi only matched plain CSI (ESC[...letter), so OSC
+// sequences (the app's own OSC 133 among them), private-mode CSI, colon SGR
+// params and C1 introducers leaked into tool output. It must match the npm
+// strip-ansi@7.2.0 / ansi-regex@6.2.2 pattern the reference uses.
+func TestStripAnsi(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain sgr", "\x1b[31mred\x1b[0m", "red"},
+		{"erase line", "a\x1b[2Kb", "ab"},
+		{"private mode", "\x1b[?25hcursor", "cursor"},
+		{"osc bel", "\x1b]0;title\x07after", "after"},
+		{"osc st hyperlink pair", "\x1b]8;;http://e\x1b\\link\x1b]8;;\x1b\\", "link"},
+		{"colon sgr params", "\x1b[38:5:196mX\x1b[0m", "X"},
+		{"c1 csi introducer", "\u009bKafter", "after"},
+		{"mixed sgr and osc", "a\x1b[31mb\x1b]0;t\x07c", "abc"},
+		{"no escape passthrough", "plain text", "plain text"},
+	}
+	for _, tc := range cases {
+		if got := StripAnsi(tc.in); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// B8 leak path: OSC 133 (emitted by the app itself) must not survive the
+// GetTextOutput text pipeline.
+func TestGetTextOutputStripsOSC(t *testing.T) {
+	noImageTerminal(t)
+
+	r := &ToolResult{Content: []any{
+		&llm.TextContent{Type: "text", Text: "\x1b]133;A\x07visible"},
+	}}
+	got := GetTextOutput(r, false)
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "133;A") {
+		t.Errorf("OSC leaked through GetTextOutput: %q", got)
+	}
+	if !strings.Contains(got, "visible") {
+		t.Errorf("text content lost: %q", got)
+	}
+}
