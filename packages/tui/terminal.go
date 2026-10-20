@@ -261,12 +261,18 @@ type ProcessTerminal struct {
 	progressTicker *time.Ticker
 	writeLog       *bytes.Buffer
 	resizeCh       chan os.Signal
+	resizeStop     chan struct{}
 
 	stopMu   sync.Mutex
 	stopped  bool
 	stopOnce sync.Once
 	readerWg sync.WaitGroup
 }
+
+// resizePollInterval is how often non-Unix (Windows) terminals re-check the
+// console size for the resize poll (terminal_resize_other.go). Var, not const,
+// so tests can shorten it.
+var resizePollInterval = 250 * time.Millisecond
 
 // NewProcessTerminal returns a ProcessTerminal over os.Stdin/os.Stdout.
 func NewProcessTerminal() *ProcessTerminal {

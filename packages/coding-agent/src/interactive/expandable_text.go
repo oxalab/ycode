@@ -28,14 +28,23 @@ func NewExpandableText(collapsed, expanded func() string, isExpanded bool, paddi
 	return &ExpandableText{Text: t, collapsed: collapsed, expanded: expanded, expanded_: isExpanded}
 }
 
-// SetExpanded swaps the text content (reference ExpandableText.setExpanded).
-func (e *ExpandableText) SetExpanded(expanded bool) {
-	e.expanded_ = expanded
-	if expanded {
+// Render re-evaluates the active closure on every call before delegating to
+// the embedded Text. The closures read live terminal dimensions (header
+// centering), so the string baked at construction went stale after a terminal
+// resize until the next ctrl+o toggle.
+func (e *ExpandableText) Render(width int) []string {
+	if e.expanded_ {
 		e.Text.SetText(e.expanded())
 	} else {
 		e.Text.SetText(e.collapsed())
 	}
+	return e.Text.Render(width)
+}
+
+// SetExpanded swaps the text content (reference ExpandableText.setExpanded);
+// Render materializes it.
+func (e *ExpandableText) SetExpanded(expanded bool) {
+	e.expanded_ = expanded
 }
 
 // IsExpanded reports the current expansion state.

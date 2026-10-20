@@ -884,6 +884,49 @@ question was resolved in story 2 — the interactive path uses
 
 ---
 
+### D. interactive/TUI resize responsiveness (2026-10-19 exploration, user-reported)
+
+Full exploration vs pi-tui: the render/wrap architecture is a faithful port
+(16ms requestRender throttle; `widthChanged/heightChanged → fullRender(true)`
+clear-screen+scrollback+re-wrap; width passed per `Render(width)` call;
+width-keyed caches). Two real bugs:
+
+- **R1 HIGH packages/tui/terminal_resize_other.go — ✅ FIXED (2026-10-20
+  story 18)** — non-Unix had NO resize notification (empty `setupResize`
+  stub + false "engine polls Columns/Rows" comment; no poll existed), so on
+  Windows a terminal resize only repainted when an unrelated event (keypress,
+  agent output, spinner) fired a frame. Reference gets Node's
+  `process.stdout` 'resize' push event on all platforms. Fixed: poll
+  goroutine (250ms, `resizePollInterval` var) comparing live
+  `Columns()/Rows()` and firing the existing `resizeHandler` seam (→
+  `RequestRender` → existing width/height fullRender logic); stop channel
+  closed by the existing `Stop()` teardown path. `ReadConsoleInput`
+  WINDOW_BUFFER_SIZE_EVENT rejected: would consume input records racing the
+  key reader on the same console handle. Node-on-Windows fires only on column
+  changes — width+height poll is a superset. Unix SIGWINCH path untouched.
+  Test `terminal_resize_other_test.go` (!unix): fires on COLUMNS change via
+  the documented env fallback, zero baseline fires, stops after teardown;
+  mutation-verified against the empty stub.
+- **R2 MED interactive/expandable_text.go — ✅ FIXED (2026-10-20 story 18)** —
+  header `ExpandableText` evaluated its width-reading closures once at
+  construction (and on ctrl+o); closures read live `Terminal.Columns()` for
+  header centering, so after a resize the header kept old-width centering
+  while every other component re-wrapped (audited: all other active-path
+  components re-layout per frame; caches width-keyed). Fixed: `Render(width)`
+  override re-evaluates the active closure each render (SetText → Text's
+  (text,width) cache still suppresses redundant re-wraps), `SetExpanded`
+  reduced to the flag. Test `expandable_text_test.go` (re-center on width
+  change + toggle); mutation-verified against the baked-text version.
+- Noted, NOT fixed (2026-10-19): markdown HR caps at `min(width, 80)`
+  (markdown.go — adapts narrower, never fills wider; reference parity
+  unverified); no `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the OUTPUT handle
+  anywhere (fine under Windows Terminal/ConPTY where VT is default-on; would
+  mangle on legacy conhost); stale comment cmd/ycode/runtime_pi.go claiming
+  bubbletea is the default TUI (the runtime.go gate says pi-tui is); scrollback
+  wipe on every resize is reference-identical behavior, not a bug.
+
+---
+
 ## ⚠️ Unverified / needs re-audit
 
 - Audit also mentioned without detail: markdown theme cache missing;
