@@ -795,11 +795,44 @@ missing feature/surface, LOW = cosmetic/wording.
   colon/C1/mixed) + TestGetTextOutputStripsOSC; interactive/ansi_strip_test.go;
   components bash_execution_ansi_test.go. Mutation-verified: all three fail on
   the unfixed tree.
-- **B9 LOW** — terminal-capability detection diverges (case-sensitive
-  `iTerm.app`, misses ghostty/wezterm/kitty paths); image fallback text
-  format; `ycode-output` vs `pi-output` temp prefix; rune-vs-UTF-16
-  truncation cut points; offset-error casing; `TruncatedBy: ""` vs `null`;
-  output_accumulator split-UTF-8 (footnoted).
+- **B9 LOW — ✅ FIXED (2026-10-20, story 19)** — the grab-bag, item by item:
+  (1) `tools.GetCapabilities` was case-sensitive on `"iTerm.app"`, read a
+  nonexistent `TERMKIT` var, and missed ghostty/wezterm/ITERM_SESSION_ID and
+  the tmux/screen guard — rewritten to reference `detectCapabilities`
+  semantics (lowercased comparisons; image-positive = KITTY_WINDOW_ID /
+  TERM_PROGRAM kitty|ghostty|wezterm|iterm.app / TERM contains ghostty /
+  GHOSTTY_RESOURCES_DIR / WEZTERM_PANE / ITERM_SESSION_ID; TMUX or
+  tmux*/screen* TERM forces false) for the images verdict the render pipeline
+  needs — pi-tui's full protocol detector stays in packages/tui/termimage.go;
+  stale FOOTNOTE updated. (2) `ImageFallback` mime now bracketed:
+  `[Image: [image/png]]` / `[Image: [image/png] WxH]` (reference
+  imageFallback). (3) bash tool accumulator prefix `"ycode-base"` →
+  `"ycode-bash"` (reference bash.ts passes `pi-bash`; executor already
+  ycode-bash-). (4) `OutputAccumulator.Append` decoded each pipe chunk with
+  `string(data)` — 4096-byte pipe reads split multi-byte runes into U+FFFD
+  (the footnote claiming "complete writes" was false); now a streaming decoder
+  (pendingTail + completeUTF8PrefixLen) holds incomplete trailing sequences
+  and `Finish()` flushes the dangling tail (TextDecoder{stream:true} parity);
+  temp file always got raw bytes (unchanged). Same bug class remains in
+  bash_executor.go:60 `string(data)` (session-level path) — noted, out of
+  scope. (5) `TruncationResult` gained camelCase json tags (was untagged →
+  PascalCase in details JSON) and `TruncatedBy` is now `*string` — nil =
+  `"truncatedBy":null` when not truncated (TS union with null); call sites
+  (read.go footer, bash.go footer, accumulator Snapshot) nil-safe; old
+  session JSON still decodes (encoding/json case-insensitive field match).
+  (6) offset-beyond-EOF error now reads `Offset N is beyond end of file…`
+  (reference casing). (7) `TruncateLine` rune-vs-UTF-16 cut points: ACCEPTED
+  DIVERGENCE — Go cuts at rune boundaries (correct); TS counts UTF-16 code
+  units and can split surrogate pairs on emoji; pinned by test + footnote.
+  Tests: render_utils_test.go (TestGetCapabilities 13-case table incl.
+  tmux-override + lowercase iterm; fallback-format updates), truncate_test.go
+  (+2: camelCase/null marshal, emoji rune-boundary pin), read_test.go (+1
+  offset casing), bash_exec_test.go (+1 end-to-end spill prefix),
+  output_accumulator_test.go (NEW, first accumulator coverage: split-rune
+  reassembly, dangling-tail flush, ASCII multi-append, spill raw-bytes
+  invariant, prefix defaults). Mutation-verified per item (stash rounds +
+  surgical one-line reverts; B9.5's signal is the pointer-type compile
+  failure).
 
 ### C. bash / find / grep / ls / queue / schema
 
