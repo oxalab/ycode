@@ -13,17 +13,17 @@ const (
 )
 
 type TruncationResult struct {
-	Content               string
-	Truncated             bool
-	TruncatedBy           string // "lines", "bytes" or ""
-	TotalLines            int
-	TotalBytes            int
-	OutputLines           int
-	OutputBytes           int
-	LastLinePartial       bool
-	FirstLineExceedsLimit bool
-	MaxLines              int
-	MaxBytes              int
+	Content               string  `json:"content"`
+	Truncated             bool    `json:"truncated"`
+	TruncatedBy           *string `json:"truncatedBy"` // "lines", "bytes" or nil when not truncated (TS: null)
+	TotalLines            int     `json:"totalLines"`
+	TotalBytes            int     `json:"totalBytes"`
+	OutputLines           int     `json:"outputLines"`
+	OutputBytes           int     `json:"outputBytes"`
+	LastLinePartial       bool    `json:"lastLinePartial"`
+	FirstLineExceedsLimit bool    `json:"firstLineExceedsLimit"`
+	MaxLines              int     `json:"maxLines"`
+	MaxBytes              int     `json:"maxBytes"`
 }
 
 type TruncationOptions struct {
@@ -72,7 +72,7 @@ func TruncateHead(content string, opts TruncationOptions) TruncationResult {
 		return TruncationResult{
 			Content: content,
 			Truncated: false,
-			TruncatedBy: "",
+			TruncatedBy: nil,
 			TotalLines: totalLines,
 			TotalBytes: totalBytes,
 			OutputLines: totalLines,
@@ -84,10 +84,11 @@ func TruncateHead(content string, opts TruncationOptions) TruncationResult {
 	// Check if first line alone exceeds byte limit
 	firstLineBytes := len([]byte(lines[0]))
 	if firstLineBytes > maxBytes {
+		truncatedBy := "bytes"
 		return TruncationResult{
 			Content:               "",
 			Truncated:             true,
-			TruncatedBy:           "bytes",
+			TruncatedBy:           &truncatedBy,
 			TotalLines:            totalLines,
 			TotalBytes:            totalBytes,
 			OutputLines:           0,
@@ -128,7 +129,7 @@ func TruncateHead(content string, opts TruncationOptions) TruncationResult {
 	return TruncationResult{
 		Content: outputContent,
 		Truncated: true,
-		TruncatedBy: truncatedBy,
+		TruncatedBy: &truncatedBy,
 		TotalLines: totalLines,
 		TotalBytes: totalBytes,
 		OutputLines: len(outputLines),
@@ -154,7 +155,7 @@ func TruncateTail(content string, opts TruncationOptions) TruncationResult {
 		return TruncationResult{
 			Content: content,
 			Truncated: false,
-			TruncatedBy: "",
+			TruncatedBy: nil,
 			TotalLines: totalLines,
 			TotalBytes: totalBytes,
 			OutputLines: totalLines,
@@ -202,7 +203,7 @@ func TruncateTail(content string, opts TruncationOptions) TruncationResult {
 	return TruncationResult{
 		Content: outputContent,
 		Truncated: true,
-		TruncatedBy: truncatedBy,
+		TruncatedBy: &truncatedBy,
 		TotalLines: totalLines,
 		TotalBytes: totalBytes,
 		OutputLines: len(outputLines),
@@ -259,10 +260,13 @@ func joinLines(lines []string) string {
 
 /*
 Footnote:
- - No functional flags — this is a straight port. len([]byte(s)) is equivalent to 
- Buffer.byteLength(s, "utf-8"), and utf8.RuneCountInString is used for character-level 
- truncation in TruncateLine (more correct than the TS version which uses string.slice 
- on code units, but line.length already counts by code units in JS). One minor note: 
- TruncateLine in TS uses line.length (JS code units) while Go uses 
- utf8.RuneCountInString (actual characters) — this is actually more correct in Go.
+ - TruncationResult is json-tagged camelCase like the reference interface, and
+ TruncatedBy is a *string so a non-truncated result marshals "truncatedBy":null
+ (TS union `"lines" | "bytes" | null`), not "".
+ - TruncateLine counts Unicode code points (utf8.RuneCountInString) where TS
+ counts UTF-16 code units (line.length + slice): identical for BMP text; for
+ astral characters (emoji) Go counts 1 and always cuts at a rune boundary while
+ TS counts 2 and can split a surrogate pair. ACCEPTED DIVERGENCE — Go's cut
+ points are strictly more correct; matching TS bug-for-bug would emit invalid
+ lone surrogates.
 */

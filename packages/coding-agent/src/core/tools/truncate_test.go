@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -22,8 +23,8 @@ func TestTruncateHeadRespectsMaxLines(t *testing.T) {
 	if !trunc.Truncated {
 		t.Fatal("expected Truncated=true for 5000 lines")
 	}
-	if trunc.TruncatedBy != "lines" {
-		t.Errorf("TruncatedBy = %q, want %q", trunc.TruncatedBy, "lines")
+	if trunc.TruncatedBy == nil || *trunc.TruncatedBy != "lines" {
+		t.Errorf("TruncatedBy = %v, want %q", trunc.TruncatedBy, "lines")
 	}
 	if trunc.OutputLines != DefaultMaxLines {
 		t.Errorf("OutputLines = %d, want %d", trunc.OutputLines, DefaultMaxLines)
@@ -45,8 +46,8 @@ func TestTruncateHeadByteLimitStillWorks(t *testing.T) {
 	// nothing kept, flagged FirstLineExceedsLimit (same as TS).
 	big := strings.Repeat("x", 100*1024)
 	trunc := TruncateHead(big, TruncationOptions{})
-	if !trunc.Truncated || trunc.TruncatedBy != "bytes" {
-		t.Fatalf("expected bytes truncation, got Truncated=%v TruncatedBy=%q", trunc.Truncated, trunc.TruncatedBy)
+	if !trunc.Truncated || trunc.TruncatedBy == nil || *trunc.TruncatedBy != "bytes" {
+		t.Fatalf("expected bytes truncation, got Truncated=%v TruncatedBy=%v", trunc.Truncated, trunc.TruncatedBy)
 	}
 	if !trunc.FirstLineExceedsLimit {
 		t.Error("FirstLineExceedsLimit should be set when the first line alone exceeds maxBytes")
@@ -64,8 +65,8 @@ func TestTruncateHeadByteLimitMidFile(t *testing.T) {
 		b.WriteString(fmt.Sprintf("row-%04d %s\n", i, strings.Repeat("y", 40))) // ~51B/line → ~154KB total
 	}
 	trunc := TruncateHead(b.String(), TruncationOptions{})
-	if !trunc.Truncated || trunc.TruncatedBy != "bytes" {
-		t.Fatalf("expected bytes truncation, got Truncated=%v TruncatedBy=%q", trunc.Truncated, trunc.TruncatedBy)
+	if !trunc.Truncated || trunc.TruncatedBy == nil || *trunc.TruncatedBy != "bytes" {
+		t.Fatalf("expected bytes truncation, got Truncated=%v TruncatedBy=%v", trunc.Truncated, trunc.TruncatedBy)
 	}
 	if trunc.OutputLines >= 3000 || trunc.OutputBytes > DefaultMaxBytes {
 		t.Errorf("byte limit not respected: %d lines, %d bytes", trunc.OutputLines, trunc.OutputBytes)
@@ -81,7 +82,49 @@ func TestTruncateHeadUnderLimitsUnchanged(t *testing.T) {
 	if trunc.Content != content || trunc.OutputLines != 3 {
 		t.Errorf("under-limits content changed: %q (lines %d)", trunc.Content, trunc.OutputLines)
 	}
-	if trunc.TruncatedBy != "" {
-		t.Errorf("TruncatedBy should be empty when not truncated, got %q", trunc.TruncatedBy)
+	if trunc.TruncatedBy != nil {
+		t.Errorf("TruncatedBy should be nil when not truncated, got %q", *trunc.TruncatedBy)
+	}
+}
+
+// Tools re-audit B9: TruncatedBy serialized as "" (and the whole struct as
+// PascalCase) where the reference emits null / camelCase. TruncatedBy is now
+// a *string, so a non-truncated result must marshal "truncatedBy":null.
+func TestTruncationResultMarshalsCamelCaseWithNull(t *testing.T) {
+	trunc := TruncateHead("a\nb\nc", TruncationOptions{})
+	data, err := json.Marshal(trunc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, `"truncatedBy":null`) {
+		t.Errorf(`expected "truncatedBy":null in %s`, got)
+	}
+	if strings.Contains(got, "TruncatedBy") || strings.Contains(got, "TotalLines") {
+		t.Errorf("PascalCase keys leaked into marshal: %s", got)
+	}
+	if !strings.Contains(got, `"totalLines":3`) {
+		t.Errorf("expected camelCase totalLines in %s", got)
+	}
+}
+
+// Tools re-audit B9, accepted divergence: TruncateLine counts Unicode code
+// points and always cuts at a rune boundary, where the TS reference counts
+// UTF-16 code units and can split a surrogate pair. Pinned here so the
+// rune-boundary behavior is a deliberate, tested choice.
+func TestTruncateLineCutsAtRuneBoundary(t *testing.T) {
+	line := strings.Repeat("\U0001F600", 10) // 😀 U+1F600, 4 bytes / 1 rune each
+
+	got, truncated := TruncateLine(line, 5)
+	if !truncated {
+		t.Fatal("expected truncation for 10-rune line at 5")
+	}
+	want := strings.Repeat("\U0001F600", 5) + "... [truncated]"
+	if got != want {
+		t.Errorf("got %q, want %q (clean rune cut)", got, want)
+	}
+
+	if _, truncated := TruncateLine("short", GrepMaxLineLength); truncated {
+		t.Error("short line must not be flagged truncated")
 	}
 }

@@ -12,8 +12,12 @@ import (
 func noImageTerminal(t *testing.T) {
 	t.Helper()
 	t.Setenv("TERM_PROGRAM", "plain-term")
+	t.Setenv("TERM", "dumb")
+	t.Setenv("TMUX", "")
 	t.Setenv("KITTY_WINDOW_ID", "")
-	t.Setenv("TERMKIT", "")
+	t.Setenv("GHOSTTY_RESOURCES_DIR", "")
+	t.Setenv("WEZTERM_PANE", "")
+	t.Setenv("ITERM_SESSION_ID", "")
 }
 
 // Tools re-audit B1: GetTextOutput type-switched on Go-local
@@ -50,7 +54,7 @@ func TestGetTextOutputImageFallback(t *testing.T) {
 	if !strings.Contains(got, "before") {
 		t.Errorf("text part missing: %q", got)
 	}
-	if !strings.Contains(got, "[Image: image/png]") {
+	if !strings.Contains(got, "[Image: [image/png]]") {
 		t.Errorf("image fallback missing: %q", got)
 	}
 
@@ -58,8 +62,49 @@ func TestGetTextOutputImageFallback(t *testing.T) {
 	r = &ToolResult{Content: []any{
 		&llm.ImageContent{Type: "image", Data: "", MimeType: "image/jpeg"},
 	}}
-	if got := GetTextOutput(r, false); got != "[Image: image/jpeg]" {
+	if got := GetTextOutput(r, false); got != "[Image: [image/jpeg]]" {
 		t.Errorf("image-only: got %q, want fallback text", got)
+	}
+}
+
+// Tools re-audit B9: detection was case-sensitive on "iTerm.app" and missed
+// the ghostty/wezterm/ITERM_SESSION_ID paths and the tmux/screen guard.
+func TestGetCapabilities(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"none", map[string]string{}, false},
+		{"iterm exact case", map[string]string{"TERM_PROGRAM": "iTerm.app"}, true},
+		{"iterm lowercase", map[string]string{"TERM_PROGRAM": "iterm.app"}, true},
+		{"iterm session id", map[string]string{"ITERM_SESSION_ID": "w0t0p0"}, true},
+		{"kitty program uppercase", map[string]string{"TERM_PROGRAM": "KITTY"}, true},
+		{"kitty window id", map[string]string{"KITTY_WINDOW_ID": "1"}, true},
+		{"ghostty program", map[string]string{"TERM_PROGRAM": "ghostty"}, true},
+		{"ghostty via term", map[string]string{"TERM": "xterm-ghostty"}, true},
+		{"ghostty resources", map[string]string{"GHOSTTY_RESOURCES_DIR": "/x"}, true},
+		{"wezterm pane", map[string]string{"WEZTERM_PANE": "0"}, true},
+		{"wezterm program", map[string]string{"TERM_PROGRAM": "wezterm"}, true},
+		{"tmux overrides kitty", map[string]string{"TMUX": "/tmp/tmux-0/default,0", "TERM_PROGRAM": "kitty"}, false},
+		{"screen term", map[string]string{"TERM": "screen-256color"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TERM_PROGRAM", "")
+			t.Setenv("TERM", "")
+			t.Setenv("TMUX", "")
+			t.Setenv("KITTY_WINDOW_ID", "")
+			t.Setenv("GHOSTTY_RESOURCES_DIR", "")
+			t.Setenv("WEZTERM_PANE", "")
+			t.Setenv("ITERM_SESSION_ID", "")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := GetCapabilities().Images; got != tc.want {
+				t.Errorf("Images = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

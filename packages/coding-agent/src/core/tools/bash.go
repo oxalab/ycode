@@ -399,7 +399,7 @@ func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.Too
 				resolveCommand = commandPrefix + "\n" + input.Command
 			}
 			spawnCtx := resolveSpawnContext(resolveCommand, cwd, spawnHook)
-			accum := NewOutputAccumulator(OutputAccumulatorOptions{TempFilePrefix:"ycode-base"})
+			accum := NewOutputAccumulator(OutputAccumulatorOptions{TempFilePrefix:"ycode-bash"})
 
 			execOpts := BashExecOptions{
 				OnData: func(data []byte) { accum.Append(data) },
@@ -419,7 +419,7 @@ func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.Too
 					lastLineSize := FormatSize(accum.GetLastLineBytes())
 					statusText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
 						FormatSize(snapshot.Truncation.OutputBytes), endLine, lastLineSize, snapshot.FullOutputPath)
-				} else if snapshot.Truncation.TruncatedBy == "lines" {
+				} else if snapshot.Truncation.TruncatedBy != nil && *snapshot.Truncation.TruncatedBy == "lines" {
 					statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
 						startLine, endLine, snapshot.Truncation.TotalLines, snapshot.FullOutputPath)
 				} else {
