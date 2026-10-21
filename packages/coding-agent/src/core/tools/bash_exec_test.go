@@ -2,10 +2,13 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	llm "ycode/packages/llm/src"
 )
 
 // newExecOps builds localBashOps with the resolved default shell. Skips when
@@ -120,18 +123,52 @@ func TestExecAbortWording(t *testing.T) {
 }
 
 // C2: spilled temp files must get unique random IDs, not all-zeros.
+// B9: the bash tool's prefix is "ycode-bash" (reference bash.ts: "pi-bash") —
+// the old call site used a "ycode-base" prefix paralleled by nothing.
 func TestDefaultTempFilePathUnique(t *testing.T) {
-	a := defaultTempFilePath("ycode-base")
-	b := defaultTempFilePath("ycode-base")
+	a := defaultTempFilePath("ycode-bash")
+	b := defaultTempFilePath("ycode-bash")
 	if a == b {
 		t.Fatalf("temp file paths must be unique, both %q", a)
 	}
-	if !strings.HasPrefix(filepath.Base(a), "ycode-base-") {
+	if !strings.HasPrefix(filepath.Base(a), "ycode-bash-") {
 		t.Errorf("prefix not honored: %q", a)
 	}
 	suffix := filepath.Base(a)
-	suffix = strings.TrimSuffix(strings.TrimPrefix(suffix, "ycode-base-"), ".log")
+	suffix = strings.TrimSuffix(strings.TrimPrefix(suffix, "ycode-bash-"), ".log")
 	if len(suffix) != 16 {
 		t.Errorf("expected 8-byte hex id, got %q", suffix)
+	}
+}
+
+// B9: the bash tool's accumulator must spill with the "ycode-bash" prefix
+// (reference bash.ts passes "pi-bash") — the call site used to pass
+// "ycode-base", which paralleled nothing in the reference. End-to-end through
+// the tool Execute so the actual call-site constant is locked.
+func TestExecSpillUsesYcodeBashPrefix(t *testing.T) {
+	ops := newExecOps(t)
+	_ = ops // exec goes through the tool's own default ops; shell presence checked above
+
+	def := CreateBashToolDefinition(".", &BashToolOptions{})
+	res, err := def.Execute(context.Background(), json.RawMessage(
+		`{"command":"awk 'BEGIN{for(i=0;i<600;i++)print \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}'"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	toolRes, ok := res.(*ToolExecuteResult)
+	if !ok || len(toolRes.Content) == 0 {
+		t.Fatalf("unexpected result shape: %T %+v", res, res)
+	}
+	var text string
+	for _, block := range toolRes.Content {
+		if tc, ok := block.(*llm.TextContent); ok {
+			text += tc.Text
+		}
+	}
+	if !strings.Contains(text, "ycode-bash-") {
+		t.Errorf("spilled output path missing ycode-bash- prefix: %q", text)
+	}
+	if strings.Contains(text, "ycode-base-") {
+		t.Errorf("stale ycode-base- prefix still in use: %q", text)
 	}
 }

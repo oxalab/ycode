@@ -187,7 +187,7 @@ func CreateReadToolDefinition(cwd string, opts *ReadToolOptions) *extensions.Too
 			}
 			startLineDisplay := startLine + 1
 			if startLine >= len(allLines) {
-				return nil, fmt.Errorf("offset %d is beyond end of file (%d lines total)", *input.Offset, len(allLines))
+				return nil, fmt.Errorf("Offset %d is beyond end of file (%d lines total)", *input.Offset, len(allLines))
 			}
 			var selectedContent string
 			var userLimitedLines *int
@@ -212,7 +212,7 @@ func CreateReadToolDefinition(cwd string, opts *ReadToolOptions) *extensions.Too
 				endLineDisplay := startLineDisplay + truncation.OutputLines - 1
 				nextOffset := endLineDisplay + 1
 				outputText = truncation.Content
-				if truncation.TruncatedBy == "lines" {
+				if truncation.TruncatedBy != nil && *truncation.TruncatedBy == "lines" {
 					outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Use offset=%d to continue.]",
 						startLineDisplay, endLineDisplay, totalFileLines, nextOffset)
 				} else {

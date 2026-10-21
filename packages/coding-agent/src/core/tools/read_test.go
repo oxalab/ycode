@@ -91,6 +91,26 @@ func TestReadExecuteDirectoryPathErrors(t *testing.T) {
 	}
 }
 
+// Tools re-audit B9: the offset-beyond-EOF error led with lowercase "offset"
+// where the reference reads "Offset N is beyond end of file (N lines total)".
+func TestReadExecuteOffsetBeyondEOFCasing(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "small.txt")
+	if err := os.WriteFile(file, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	def := CreateReadToolDefinition(dir, nil)
+	_, err := def.Execute(context.Background(), json.RawMessage(`{"path":"small.txt","offset":99}`))
+	if err == nil {
+		t.Fatal("offset beyond EOF should error")
+	}
+	want := "Offset 99 is beyond end of file (3 lines total)" // "one\ntwo\n" splits to 3 (trailing empty), same as TS split
+	if err.Error() != want {
+		t.Errorf("got %q, want %q", err.Error(), want)
+	}
+}
+
 // --- B4/B5: image notes (reference read.ts:90-95, 248-277) ---
 
 // tinyPNG is a valid 1x1 transparent PNG.

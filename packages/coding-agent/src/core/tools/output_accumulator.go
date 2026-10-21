@@ -41,6 +41,7 @@ type OutputAccumulator struct {
 
 	mu 			sync.Mutex
 	rawChunks 	[][]byte
+	pendingTail []byte
 	tailText 	string
 	tailBytes 	int
 	tailStartsAtLineBound bool
@@ -87,7 +88,7 @@ func (a *OutputAccumulator) Append(data []byte) {
 	}
 
 	a.totalRawBytes += len(data)
-	text := string(data)
+	text := a.decodeStreamed(data)
 	a.appendDecodedText(text)
 
 	if a.tempFile != nil || a.shouldUseTempFile() {
@@ -100,6 +101,66 @@ func (a *OutputAccumulator) Append(data []byte) {
 	}
 }
 
+// decodeStreamed converts a chunk to text the way the reference's
+// TextDecoder({stream:true}) does: an incomplete multi-byte sequence at the
+// end is held back (pendingTail) and prepended to the next chunk instead of
+// decoding to U+FFFD. Pipe reads are fixed 4096-byte buffers and can split a
+// rune across chunks; the old per-chunk string(data) corrupted every such rune.
+func (a *OutputAccumulator) decodeStreamed(data []byte) string {
+	buf := append(a.pendingTail, data...)
+	n := completeUTF8PrefixLen(buf)
+	a.pendingTail = append(a.pendingTail[:0], buf[n:]...)
+	if len(a.pendingTail) == 0 {
+		a.pendingTail = nil
+	}
+	return string(buf[:n])
+}
+
+// completeUTF8PrefixLen returns the length of the prefix of buf that ends at a
+// rune boundary, holding back only a genuinely incomplete trailing sequence.
+// A dangling initiator or short continuation run is held; a continuation run
+// with no valid initiator is invalid and flushed as-is (string() renders it as
+// U+FFFD, the closest Go equivalent of the TextDecoder's replacement char).
+func completeUTF8PrefixLen(buf []byte) int {
+	n := len(buf)
+	if n == 0 {
+		return 0
+	}
+	last := buf[n-1]
+	if last&0xc0 != 0x80 {
+		// ASCII ends a rune; a multi-byte initiator alone is incomplete.
+		switch {
+		case last&0xe0 == 0xc0, last&0xf0 == 0xe0, last&0xf8 == 0xf0:
+			return n - 1
+		default:
+			return n
+		}
+	}
+	i := n
+	for i > 0 && n-i < 3 && buf[i-1]&0xc0 == 0x80 {
+		i--
+	}
+	if i == 0 {
+		return n // continuation run with no initiator — invalid, flush
+	}
+	c := buf[i-1]
+	var want int
+	switch {
+	case c&0xe0 == 0xc0:
+		want = 2
+	case c&0xf0 == 0xe0:
+		want = 3
+	case c&0xf8 == 0xf0:
+		want = 4
+	default:
+		return n
+	}
+	if n-(i-1) < want {
+		return i - 1 // incomplete trailing rune: hold it back
+	}
+	return n
+}
+
 func (a *OutputAccumulator) Finish() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -108,6 +169,10 @@ func (a *OutputAccumulator) Finish() {
 		return
 	}
 	a.finished = true
+	if len(a.pendingTail) > 0 {
+		a.appendDecodedText(string(a.pendingTail))
+		a.pendingTail = nil
+	}
 	if a.shouldUseTempFile() {
 		a.ensureTempFile()
 	}
@@ -127,14 +192,16 @@ func (a *OutputAccumulator) Snapshot(opts ...bool) OutputSnapshot {
 		MaxBytes: &a.maxBytes,
 	})
 	truncated := a.totalLines > a.maxLines || a.totalDecodedBytes > a.maxBytes
-	truncatedBy := ""
+	var truncatedBy *string
 	if truncated {
-		if tailTruncation.TruncatedBy != "" {
+		if tailTruncation.TruncatedBy != nil {
 			truncatedBy = tailTruncation.TruncatedBy
-		} else if a.totalDecodedBytes > a.maxBytes {
-			truncatedBy = "bytes"
 		} else {
-			truncatedBy = "lines"
+			tb := "lines"
+			if a.totalDecodedBytes > a.maxBytes {
+				tb = "bytes"
+			}
+			truncatedBy = &tb
 		}
 	}
 
@@ -248,15 +315,15 @@ func (a *OutputAccumulator) ensureTempFile() {
 
 /*
 FOOTNOTE:
- 1. TS uses streaming `TextDecoder` for UTF-8 — Go strings are already UTF-8, so `string(data)`
- is the equivalent of `decoder.decode(data, { stream: true })`. This works because the caller 
- (bash executor) feeds complete writes, not arbitrary byte boundaries. If data ever splits 
- mid-UTF8 across `Append` calls, the TS version handles it with `{ stream: true }` but our Go version 
- would decode a partial character. This is a real edge case but matches how the tool is used 
- (process output chunks are typically complete writes).
+ 1. TS decodes streamed bytes with TextDecoder({stream:true}); the Go equivalent
+ is decodeStreamed — an incomplete multi-byte sequence at a chunk boundary is
+ held in pendingTail and prepended to the next chunk, and Finish() flushes any
+ dangling tail like the reference's end-of-stream decode(). Pipe reads are
+ fixed 4096-byte writes that CAN split a rune; the old per-chunk string(data)
+ decoded each split as U+FFFD.
 
- 2. `Snapshot` method uses variadic `bool` — TS takes an options object `{ persistIfTruncated?: boolean }`. 
- Go doesn't have optional struct fields elegantly for method calls, so `opts ...bool` is used. 
+ 2. `Snapshot` method uses variadic `bool` — TS takes an options object `{ persistIfTruncated?: boolean }`.
+ Go doesn't have optional struct fields elegantly for method calls, so `opts ...bool` is used.
  Only the first bool is read.
 
  3. TS `append` throws on finished — Go uses `panic` for the same semantics (runtime error, not recoverable).

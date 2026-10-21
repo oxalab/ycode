@@ -99,11 +99,23 @@ type TerminalCapabilities struct {
 	Images 	bool
 }
 
-// GetCapabilities: Detecs terminal image support by checking env vars.
+// GetCapabilities: Detects terminal image support by checking env vars —
+// the reference's detectCapabilities (terminal-image.ts), reduced to the
+// images verdict the render pipeline needs (its full protocol-string detector
+// lives in packages/tui/termimage.go). Comparisons are lowercased like the
+// reference; the old case-sensitive "iTerm.app" match missed lowercase values
+// and the ghostty/wezterm/ITERM_SESSION_ID paths entirely.
 func GetCapabilities() TerminalCapabilities {
-	termProgram := os.Getenv("TERM_PROGRAM")
-	supportsImages := termProgram == "iTerm.app" || termProgram == "kitty" ||
-		os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("TERMKIT") != ""
+	termProgram := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	term := strings.ToLower(os.Getenv("TERM"))
+	// tmux/screen swallow image protocols — force the fallback paths.
+	if os.Getenv("TMUX") != "" || strings.HasPrefix(term, "tmux") || strings.HasPrefix(term, "screen") {
+		return TerminalCapabilities{Images: false}
+	}
+	supportsImages := os.Getenv("KITTY_WINDOW_ID") != "" || termProgram == "kitty" ||
+		termProgram == "ghostty" || strings.Contains(term, "ghostty") || os.Getenv("GHOSTTY_RESOURCES_DIR") != "" ||
+		os.Getenv("WEZTERM_PANE") != "" || termProgram == "wezterm" ||
+		os.Getenv("ITERM_SESSION_ID") != "" || termProgram == "iterm.app"
 	return TerminalCapabilities{Images: supportsImages}
 }
 
@@ -129,11 +141,12 @@ func GetImageDimensions(data string, mimeType string) *ImageDimensions {
 }
 
 // ImageFallback: Returns a text representation of an image when it cannot be displayed
+// (reference imageFallback — the mime type is bracketed).
 func ImageFallback(mimeType string, dims *ImageDimensions) string {
 	if dims != nil && dims.Width > 0 && dims.Height > 0 {
-		return fmt.Sprintf("[Image: %s %dx%d]", mimeType, dims.Width, dims.Height)
+		return fmt.Sprintf("[Image: [%s] %dx%d]", mimeType, dims.Width, dims.Height)
 	}
-	return fmt.Sprintf("[Image: %s]", mimeType)
+	return fmt.Sprintf("[Image: [%s]]", mimeType)
 }
 
 // ToolResult: Represents the common shape of a tool execution result.
@@ -266,19 +279,17 @@ func InvalidArgText() string {
 
 /*
 FOOTNOTE:
- - 1. GetCapabilities uses env var heuristics — 
- The TS pi-tui likely has more sophisticated terminal detection 
- (e.g., Kitty graphics protocol query, Sixel support check). 
- Our version checks common env vars (TERM_PROGRAM, KITTY_WINDOW_ID, TERMKIT). 
- This covers iTerm2, Kitty, and Termkit but may miss other terminals. 
- Can be enhanced when pi-tui is ported.
+ - 1. GetCapabilities mirrors the reference's env-var detection (lowercased
+ comparisons, tmux/screen guard, kitty/ghostty/wezterm/iterm branches) for the
+ images verdict only — no protocol-level probing (Kitty graphics query, Sixel),
+ which the reference also skips.
 
- - 2. GetImageDimensions only supports PNG/JPEG/GIF — 
- Go's image package supports these via stdlib imports. The TS pi-tui may 
- support more formats (WebP, etc.). Additional formats would need 
+ - 2. GetImageDimensions only supports PNG/JPEG/GIF —
+ Go's image package supports these via stdlib imports. The TS pi-tui may
+ support more formats (WebP, etc.). Additional formats would need
  golang.org/x/image/webp or similar.
- 
- - 3.PlainTheme is a placeholder — When the TUI theming system is ported, 
- the real theme implementation will replace this. InvalidArgText already accepts 
+
+ - 3.PlainTheme is a placeholder — When the TUI theming system is ported,
+ the real theme implementation will replace this. InvalidArgText already accepts
  the Theme interface so it's ready for the swap
 */
