@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ycode/packages/coding-agent/src/config"
 	"ycode/packages/coding-agent/src/core/extensions"
 	llm "ycode/packages/llm/src"
 )
@@ -196,5 +197,70 @@ func TestGrepLimitNoticeTypo(t *testing.T) {
 	}
 	if !strings.Contains(out, "matches limit reached") {
 		t.Errorf("limit notice missing: %q", out)
+	}
+}
+
+// ============================================================================
+// C8: ensureTool wiring — hard-fail wordings and (gated) real download
+// ============================================================================
+
+// ensureUnavailableEnv points the managed bin dir at an empty temp dir, empties
+// PATH and enables offline mode, so EnsureTool can neither find nor download
+// fd/rg. Restored by t.Setenv cleanup.
+func ensureUnavailableEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(config.EnvAgentDir, t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("YCODE_OFFLINE", "1")
+}
+
+// C8: find hard-fails when fd is unavailable (reference find.ts wording). The
+// old code silently fell back to the gitignore-blind WalkDir — the tool
+// description promises .gitignore respect, which only fd provides.
+func TestFindHardFailsWithoutFd(t *testing.T) {
+	ensureUnavailableEnv(t)
+
+	def := CreateFindToolDefinition(t.TempDir(), nil)
+	_, err := def.Execute(context.Background(), json.RawMessage(`{"pattern":"*.txt"}`))
+	if err == nil {
+		t.Fatal("expected an error when fd is unavailable (no silent WalkDir fallback)")
+	}
+	if err.Error() != "fd is not available and could not be downloaded" {
+		t.Errorf("got %q, want reference wording", err.Error())
+	}
+}
+
+// C8: grep failure wording is reference-exact (was "not available on PATH").
+func TestGrepUnavailableWording(t *testing.T) {
+	ensureUnavailableEnv(t)
+
+	def := CreateGrepToolDefinition(t.TempDir(), nil)
+	_, err := def.Execute(context.Background(), json.RawMessage(`{"pattern":"x"}`))
+	if err == nil {
+		t.Fatal("expected an error when rg is unavailable")
+	}
+	if err.Error() != "ripgrep (rg) is not available and could not be downloaded" {
+		t.Errorf("got %q, want reference wording", err.Error())
+	}
+}
+
+// C8 end-to-end: real GitHub download of fd (skipped unless
+// YCODE_TEST_DOWNLOADS=1 — same spirit as requireRipgrep's gate).
+func TestEnsureToolDownloadsFd(t *testing.T) {
+	if os.Getenv("YCODE_TEST_DOWNLOADS") != "1" {
+		t.Skip("set YCODE_TEST_DOWNLOADS=1 to run the real fd download")
+	}
+	t.Setenv(config.EnvAgentDir, t.TempDir())
+
+	path := EnsureTool("fd", true)
+	if path == "" {
+		t.Fatal("download failed")
+	}
+	out, err := exec.Command(path, "--version").Output()
+	if err != nil {
+		t.Fatalf("downloaded fd does not run: %v", err)
+	}
+	if !strings.Contains(string(out), "fd") {
+		t.Errorf("unexpected --version output: %q", out)
 	}
 }

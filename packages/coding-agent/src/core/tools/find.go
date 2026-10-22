@@ -3,9 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -27,123 +26,13 @@ type FindToolDetails struct {
 	ResultLimitReached int               `json:"resultLimitReached,omitempty"`
 }
 
-// FindOperations: Defines pluggable operations for the find tool.
+// FindOperations: Defines pluggable operations for the find tool (reference
+// find.ts options.operations hook, used for remote backends). The default
+// local path does NOT use a fallback glob — it runs fd via EnsureTool and
+// hard-fails when fd is unavailable, like the reference.
 type FindOperations interface {
 	Exists(absolutePath string) bool
 	Glob(pattern string, cwd string, ignore []string, limit int) []string
-}
-
-type defaultFindOps struct{}
-
-func (d defaultFindOps) Exists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
-}
-
-func (d defaultFindOps) Glob(pattern, searchPath string, ignore []string, limit int) []string {
-	var results []string
-	filepath.WalkDir(searchPath, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if entry.IsDir() {
-			// Skip ignored Directories
-			if shouldSkipDir(entry.Name(), ignore) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(searchPath, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if globMatch(pattern, rel) {
-			results = append(results, rel)
-		}
-		if len(results) >= limit {
-			return fmt.Errorf("limit reached")
-		}
-		return nil
-	})
-	return results
-}
-
-func shouldSkipDir(name string, ignore []string) bool {
-	for _, pattern := range ignore {
-		// Extract Directory name for patterns like "**/node_modules/**"
-		parts := strings.Split(pattern, "/")
-		for _, part := range parts {
-			if part == "**" || part == "*" {
-				continue
-			}
-			matched, _ := filepath.Match(part, name)
-			if matched {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-/*
-globMatch: Matches a glob pattern against a relative path.
- - Supports *, ? and ** for recursive matching.
-*/
-func globMatch(pattern, relPath string) bool {
-	pattern = filepath.ToSlash(pattern)
-	relPath = filepath.ToSlash(relPath)
-
-	// No slashes and no ** = match basename only
-	if !strings.Contains(pattern, "/") && !strings.Contains(pattern, "**") {
-		matched, _ := filepath.Match(pattern, filepath.Base(relPath))
-		return matched
-	}
-
-	// Full path matching with ** support
-	return doublestarMatch(pattern, relPath)
-}
-
-func doublestarMatch(pattern, path string) bool {
-	starIdx := strings.Index(pattern, "**")
-	if starIdx == -1 {
-		matched, _ := filepath.Match(pattern, path)
-		return matched
-	}
-
-	prefix := pattern[:starIdx]
-	suffix := pattern[starIdx+2:]
-	suffix = strings.TrimPrefix(suffix, "/")
-
-	// Match prefix
-	if prefix != "" {
-		prefix = strings.TrimSuffix(prefix, "/")
-		if !strings.HasPrefix(path, prefix+"/") && path != prefix {
-			return false
-		}
-		if strings.HasPrefix(path, prefix+"/") {
-			path = path[len(prefix)+1:]
-		} else {
-			path = ""
-		}
-	}
-
-	// Try matching suffix at every path depth
-	if suffix == "" {
-		return true
-	}
-	
-	for {
-		if doublestarMatch(suffix, path) {
-			return true
-		}
-		idx := strings.Index(path, "/")
-		if idx == -1 {
-			break
-		}
-		path = path[idx+1:]
-	}
-	return false
 }
 
 type FindToolOptions struct {
@@ -205,8 +94,13 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 				}
 				results = ops.Glob(input.Pattern, searchPath, ignore, effectiveLimit)
 			} else {
-				// Try fd command first, fall back to WalkDir
-				results = runFdOrFallback(input.Pattern, searchPath, ignore, effectiveLimit, ctx)
+				// Default path: fd via EnsureTool (downloads if missing).
+				// No fallback — reference find.ts hard-fails without fd.
+				fdResults, err := runFd(input.Pattern, searchPath, effectiveLimit, ctx)
+				if err != nil {
+					return nil, err
+				}
+				results = fdResults
 			}
 
 			select{
@@ -335,14 +229,17 @@ func relativizeFindResults(results []string, searchPath string) []string {
 	return relativized
 }
 
-func runFdOrFallback(pattern, searchPath string, ignore []string, limit int, ctx context.Context) []string {
-	// Check if fd is available
-	fdPath, err := exec.LookPath("fd")
-	if err != nil || fdPath == "" {
-		return defaultFindOps{}.Glob(pattern, searchPath, ignore, limit)
+// runFd resolves fd via EnsureTool (downloading it if missing — reference
+// ensureTool) and runs it with the reference argument set. There is no
+// WalkDir fallback: the tool description promises .gitignore respect, which
+// only fd provides, so an unavailable fd is a hard error (reference find.ts).
+func runFd(pattern, searchPath string, limit int, ctx context.Context) ([]string, error) {
+	fdPath := EnsureTool("fd", true)
+	if fdPath == "" {
+		return nil, fmt.Errorf("fd is not available and could not be downloaded")
 	}
 
-	// Build fd arguments (mirrors TS implementations)
+	// Build fd arguments (mirrors TS find.ts)
 	args := []string{
 		"--glob", "--color=never", "--hidden",
 		"--no-require-git", "--max-results", fmt.Sprintf("%d", limit),
@@ -357,15 +254,22 @@ func runFdOrFallback(pattern, searchPath string, ignore []string, limit int, ctx
 	cmd := exec.CommandContext(ctx, fdPath, args...)
 	output, err := cmd.Output()
 	if err != nil {
-		// Falll back to WalkDir on fd failure
-		return defaultFindOps{}.Glob(pattern, searchPath, ignore, limit)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			msg := strings.TrimSpace(string(exitErr.Stderr))
+			if msg == "" {
+				msg = fmt.Sprintf("fd exited with code %d", exitErr.ExitCode())
+			}
+			return nil, fmt.Errorf("%s", msg)
+		}
+		return nil, fmt.Errorf("Failed to run fd: %v", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) == 1 && lines[0] == "" {
-		return nil
+		return nil, nil
 	}
-	return lines
+	return lines, nil
 }
 
 func CreateFindTool(cwd string, opts *FindToolOptions) *sdk.AgentTool[any] {
@@ -376,21 +280,14 @@ func CreateFindTool(cwd string, opts *FindToolOptions) *sdk.AgentTool[any] {
 
 /*
 FOOTNOTE:
- 1. Default glob implementation doesn't respect .gitignore — TS uses fd 
- --no-require-git which applies hierarchical .gitignore semantics. Our WalkDir 
- fallback skips node_modules and .git but does NOT parse .gitignore files. If fd 
- is on PATH, it's used preferentially (same as TS). Without fd, .gitignore is not 
- respected.
+ 1. .gitignore respect comes from fd (--no-require-git applies hierarchical
+ .gitignore semantics). The old gitignore-blind WalkDir fallback was removed
+ with story 20 — fd is resolved via EnsureTool (tools_manager.go, downloads
+ from GitHub releases when missing) and an unavailable fd is a hard error,
+ exactly like the reference find.ts. Bug-for-bug parity decision: no
+ checksums, no version pinning (HTTPS is the only integrity).
 
- 2. ensureTool("fd") not ported — TS auto-downloads fd if missing. Our version uses 
- exec.LookPath("fd") and falls back to WalkDir if not found. The auto-download 
- functionality from tools-manager.ts would need porting separately.
-
- 3. ** glob matching is simplified — The doublestarMatch function handles the 
- first ** in a pattern. Patterns with multiple ** segments (e.g., .test.ts) won't 
- match correctly. The fd path handles these correctly.
-
- 4. TS truncateHead uses maxLines: Number.MAX_SAFE_INTEGER (byte-only truncation) 
- — Same issue as ls.go. Our version applies a 2000-line default limit where TS 
+ 2. TS truncateHead uses maxLines: Number.MAX_SAFE_INTEGER (byte-only truncation)
+ — Same issue as ls.go. Our version applies a 2000-line default limit where TS
  doesn't.
 */

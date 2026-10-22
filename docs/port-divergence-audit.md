@@ -884,9 +884,37 @@ missing feature/surface, LOW = cosmetic/wording.
   "invalid agruments" typo. Tests: `TestGrepLongLineNoDeadlock`,
   `TestGrepBadRegexIsError`, `TestGrepNoMatchesWording`,
   `TestGrepLimitNoticeTypo` (in `find_grep_test.go`; real-rg, skip-gated).
-- **C8 MED** — no fd/rg auto-download (TS `ensureTool` fetches; Go silently
-  falls back to non-gitignore-aware WalkDir while the description promises
-  .gitignore respect); ripgrep download error wording.
+- **C8 MED — ✅ FIXED (2026-10-20, story 20)** — the reference's
+  `ensureTool` (utils/tools-manager.ts) is ported as
+  `core/tools/tools_manager.go`: `GetToolPath` (managed bin dir
+  `~/.ycode/agent/bin` first — flat, `.exe` on Windows — then PATH probes,
+  fd also tries `fdfind`), `EnsureTool` (latest GitHub release via the API —
+  fd `sharkdp/fd` tag `v*`, rg `BurntSushi/ripgrep` bare tags; exact
+  asset matrix incl. rg-linux-x86_64=musl; tar.gz/zip extraction via Go
+  stdlib where the reference shells system tar / npm extract-zip; layout
+  probe asset-dir → root → recursive DFS; per-call temp extract dirs;
+  chmod 0755 non-Windows; `YCODE_OFFLINE` + Android/Termux gates applied
+  regardless of `silent`, only notices silenced). **User-locked parity
+  decisions:** (a) bug-for-bug integrity — NO checksums, NO version pinning
+  (HTTPS is the only guarantee, like the reference); (b) the gitignore-blind
+  WalkDir fallback is DELETED — find hard-fails with the reference wording
+  `fd is not available and could not be downloaded` (the "Respects
+  .gitignore" description is now true via fd; the old fallback also silently
+  swallowed fd run failures — now `stderr` / `fd exited with code N` /
+  `Failed to run fd` surfaces, reference-style). grep wording is
+  reference-exact (`ripgrep (rg) is not available and could not be
+  downloaded`). Interactive startup pre-fetches fd+rg concurrently,
+  non-silent, before the TUI starts (reference Promise.all in init) and
+  passes the resolved fd path into the autocomplete provider (previously
+  `""` — a bin-dir fd was invisible to autocomplete's bare LookPath).
+  Drive-by: `core.isOfflineModeEnabled` `value == "l"` → `lower == "1"`
+  (mangled check, `YCODE_OFFLINE=1` never worked there). Tests:
+  tools_manager_test.go (asset matrix 14 cases, v-tag strip, tar.gz/zip
+  extraction + layout probe/DFS vs in-test fixtures, GetToolPath order via
+  `YCODE_CODING_AGENT_DIR`, offline gate); find_grep_test.go (find
+  hard-fail + grep wording — both mutation-verified against the old wiring;
+  real-download e2e gated behind `YCODE_TEST_DOWNLOADS=1`, run once:
+  PASS, fd downloaded + runs in 1.6s).
 - **C9 MED bash.go:349-408** — no 100ms-throttled streaming partial output
   (Go footnote acknowledges); **C10 MED** nil-pointer risk: `*opts.Timeout`
   deref when caller ctx has deadline; **C11 MED** signal-kill mapped to
