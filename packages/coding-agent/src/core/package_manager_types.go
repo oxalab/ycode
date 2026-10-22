@@ -17,7 +17,7 @@ func isOfflineModeEnabled() bool {
 		return false
 	}
 	lower := strings.ToLower(value)
-	return value == "l" || lower == "true" || lower == "yes"
+	return lower == "1" || lower == "true" || lower == "yes"
 }
 
 type MissingSourceAction string

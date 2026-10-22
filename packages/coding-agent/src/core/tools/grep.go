@@ -140,10 +140,11 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 			if err != nil {
 				return nil, fmt.Errorf("path not found: %s", searchPath)
 			}
-			// Check if rg is available
-			rgPath, lookupErr := exec.LookPath("rg")
-			if lookupErr != nil {
-				return nil, fmt.Errorf("ripgrep (rg) is not available on PATH")
+			// Resolve rg via EnsureTool (downloads if missing — reference
+			// ensureTool); failure wording is reference-exact.
+			rgPath := EnsureTool("rg", true)
+			if rgPath == "" {
+				return nil, fmt.Errorf("ripgrep (rg) is not available and could not be downloaded")
 			}
 
 			// Build rg arguments
@@ -375,21 +376,22 @@ func CreateGrepTool(cwd string, opts *GrepToolOptions) *sdk.AgentTool[any] {
 
 /*
 FOOTNOTE:
- 1. Requires rg (ripgrep) on PATH — TS uses ensureTool("rg") to auto-download if missing. 
- Go version requires rg to already be installed. The ensureTool / tools-manager would need 
- porting separately for auto-download.
+ 1. rg is resolved via EnsureTool (tools_manager.go) — downloads ripgrep from
+ GitHub releases when neither the managed bin dir nor PATH has it (reference
+ ensureTool("rg"), story 20). Failure wording is reference-exact. Bug-for-bug
+ parity decision: no checksums, no version pinning.
 
- 2. cmd.Stderr type issue — cmd.Stderr expects io.Writer, but I assigned new(strings.Builder). 
- You'll need to change to var stderr strings.Builder; cmd.Stderr = &stderr. I used 
- cmd.Stderr = new(strings.Builder) — this should actually work since *strings.Builder implements 
- io.Writer. Let me double check... actually strings.Builder has a Write(b []byte) method, so 
+ 2. cmd.Stderr type issue — cmd.Stderr expects io.Writer, but I assigned new(strings.Builder).
+ You'll need to change to var stderr strings.Builder; cmd.Stderr = &stderr. I used
+ cmd.Stderr = new(strings.Builder) — this should actually work since *strings.Builder implements
+ io.Writer. Let me double check... actually strings.Builder has a Write(b []byte) method, so
  new(strings.Builder) returns *strings.Builder which implements io.Writer. This should be fine.
 
- 3. TS truncateHead uses maxLines: Number.MAX_SAFE_INTEGER (byte-only truncation) — Same issue as 
+ 3. TS truncateHead uses maxLines: Number.MAX_SAFE_INTEGER (byte-only truncation) — Same issue as
  ls/find. Our version applies a 2000-line default limit.
 
- 4. rg JSON parsing uses a nested struct — The rg --json output has data.path.text and 
- data.lines.text as nested objects. I used a flat struct first (rgEvent) but then used rawData 
- with nested structs. You can remove the unused rgEvent and rgMatch types (lines 72-82). 
+ 4. rg JSON parsing uses a nested struct — The rg --json output has data.path.text and
+ data.lines.text as nested objects. I used a flat struct first (rgEvent) but then used rawData
+ with nested structs. You can remove the unused rgEvent and rgMatch types (lines 72-82).
  They're dead code.
 */

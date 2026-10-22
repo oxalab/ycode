@@ -34,6 +34,10 @@ type Options struct {
 	InitialMessages []string
 	ModelFallback   string
 	Verbose         bool
+	// FDPath is the resolved fd binary (startup ensureTool pre-fetch). Empty
+	// = autocomplete falls back to its own PATH probe (reference passes
+	// this.fdPath into CombinedAutocompleteProvider).
+	FDPath string
 }
 
 // Orchestrator owns the pi-tui engine + static container tree.
@@ -71,6 +75,7 @@ type Orchestrator struct {
 	headerExpandable *ExpandableText // built by buildHeader; toggled by app.tools.expand
 	headerExpanded   bool
 	verbose          bool
+	fdPath           string
 
 	// CLI initial prompts (finding #33) — sent once the engine is running.
 	initialMessage  string
@@ -123,6 +128,7 @@ func NewOrchestrator(opts Options) *Orchestrator {
 		kb:       kb,
 		editor:   editor,
 		verbose:  opts.Verbose,
+		fdPath:   opts.FDPath,
 		initialMessage:  opts.InitialMessage,
 		initialImages:   opts.InitialImages,
 		initialMessages: opts.InitialMessages,
@@ -168,7 +174,7 @@ func NewOrchestrator(opts Options) *Orchestrator {
 	// Now that extensions/templates/skills are loaded, build the autocomplete
 	// provider with the full command list. Builtins + prompt templates +
 	// extension commands + skills, matching reference interactive-mode.ts:513.
-	editor.SetAutocompleteProvider(buildAutocompleteProvider(opts.Runtime.Cwd(), o.session))
+	editor.SetAutocompleteProvider(buildAutocompleteProvider(opts.Runtime.Cwd(), o.session, o.fdPath))
 
 	return o
 }
@@ -382,7 +388,7 @@ func (o *Orchestrator) updateEditorBorder(text string) {
 // are loaded dynamically after this call, the autocomplete won't reflect them
 // until the orchestrator rebuilds the provider (e.g., via a future refresh
 // hook).
-func buildAutocompleteProvider(cwd string, session *core.AgentSession) tui.AutocompleteProvider {
+func buildAutocompleteProvider(cwd string, session *core.AgentSession, fdPath string) tui.AutocompleteProvider {
 	// Bound the slice by the sum of all source counts so we never reallocate.
 	var builtinN, templateN, extN, skillN int
 	if session != nil {
@@ -405,7 +411,7 @@ func buildAutocompleteProvider(cwd string, session *core.AgentSession) tui.Autoc
 	}
 
 	if session == nil {
-		return tui.NewCombinedAutocompleteProvider(sources, cwd, "")
+		return tui.NewCombinedAutocompleteProvider(sources, cwd, fdPath)
 	}
 
 	// 2. Prompt templates (slash-invocable; carry ArgumentHint).
@@ -453,7 +459,7 @@ func buildAutocompleteProvider(cwd string, session *core.AgentSession) tui.Autoc
 		})
 	}
 
-	return tui.NewCombinedAutocompleteProvider(sources, cwd, "")
+	return tui.NewCombinedAutocompleteProvider(sources, cwd, fdPath)
 }
 
 // ctrlC implements app.clear (reference interactive-mode.ts:3202-3211): the
