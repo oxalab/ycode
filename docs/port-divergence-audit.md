@@ -915,10 +915,51 @@ missing feature/surface, LOW = cosmetic/wording.
   hard-fail + grep wording — both mutation-verified against the old wiring;
   real-download e2e gated behind `YCODE_TEST_DOWNLOADS=1`, run once:
   PASS, fd downloaded + runs in 1.6s).
-- **C9 MED bash.go:349-408** — no 100ms-throttled streaming partial output
-  (Go footnote acknowledges); **C10 MED** nil-pointer risk: `*opts.Timeout`
-  deref when caller ctx has deadline; **C11 MED** signal-kill mapped to
-  exit -1 → error, TS treats null exit as success.
+- **C9 MED — ✅ FIXED (2026-10-23, story 21)** — streaming partial output is
+  ported end to end. New additive `ToolDefinition.ExecuteUpdate`
+  (extensions/types.go — the Go-shaped analogue of TS execute's 4th param,
+  following the existing ExecuteContext precedent); both ToolDefinition→
+  AgentTool bridges forward it (`tools/tool_definition_wrapper.go` — which
+  used to receive the SDK's onUpdate and DISCARD it — via a shared
+  `toAgentToolResult` conversion; and `agent_session_extensions.go`
+  buildAgentToolFromDefinition, which now prefers the streaming form).
+  `agent-sdk/agent_loop.go` emits update events LIVE during execution (the
+  old code queued closures and fired them only after Execute returned;
+  TS's onUpdate fires synchronously mid-execute). bash.go implements the
+  reference throttle verbatim (bash.ts:287-343): immediate empty kickoff
+  partial, trailing-edge 100ms timer coalescing (`outputUpdateThrottle` —
+  mutex-guarded because Go's OnData arrives from two stream-pump goroutines
+  where TS is single-threaded), partials carry the raw snapshot WITHOUT the
+  truncation footers (those stay final-result-only), final flush in the
+  finish path; the previously-dead `bashUpdateThrottleMs` constant is now
+  live. The TUI needed no change (interactive/events.go handleToolUpdate
+  already streamed EventToolExecutionUpdate into the bash component). Tests:
+  `TestBashStreamsThrottledPartials` (5000 chunks → <25 partials, the
+  reference's own bound; kickoff empty; final flush complete),
+  `TestBashThrottleSpreadsEmissions`, `TestWrapToolDefinitionForwardsPartials`
+  — mutation-verified (bash.go stash → build failure; wrapper partial-drop
+  mutation → FAIL).
+- **C10 MED — ✅ FIXED (2026-10-23, story 21; guard landed with the C1-C3
+  rewrite)** — the `*opts.Timeout` deref is guarded (`opts.Timeout != nil &&
+  *opts.Timeout > 0`) and `timeoutSentinel` is nil-guarded (plain "timeout"
+  for an inherited caller deadline). Pinning it surfaced a latent wording
+  bug on that previously-unreachable path: the plain sentinel fell through
+  the TrimPrefix branch producing "Command timed out after timeout seconds"
+  — the two sentinel forms now map separately (inherited deadline →
+  "Command timed out", no seconds). Test:
+  `TestExecParentDeadlineWithoutTimeoutOption` (mutation-verified: removing
+  the guard panics with exactly the nil deref the finding predicted).
+- **C11 MED — ✅ FIXED (2026-10-23, story 21)** — `BashExecResult.ExitCode`
+  is now `*int` (TS `number | null`): `exitCodeFromRaw` maps the signal-kill
+  raw -1 to nil, the tool treats nil as SUCCESS (bash.ts:392 — no spurious
+  "Command exited with code -1" error), and the session path passes nil
+  through (`bash_executor.go`; `BashResult` was already `*int` and
+  messages.go already null-safe). Windows is unchanged and correct:
+  taskkill /F produces a real exit 1, matching TS on win32. Tests:
+  `TestBashNilExitCodeIsSuccess`, `TestBashNonZeroExitStillErrors`,
+  `TestExecSignalKillYieldsNilExitCode` (unix-gated, `kill -TERM $$`),
+  `TestExecuteBashNilExitCodePropagates` — mutation-verified via the bash.go
+  stash build failure.
 - **C12 MED ls.go:84-92** — missing `PromptSnippet: "List directory contents"`
   (system prompt loses the ls snippet).
 - **C13 MED schema.go:70** — Go injects `additionalProperties: false` into
@@ -938,7 +979,9 @@ Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 ✅ done 2026-10-03 (tests in `edit_diff_test.go`), (2) ~~B1/B2~~ ✅ done
 2026-10-04 (tests in `render_utils_test.go`, `truncate_test.go`), (3) ~~C1-C3~~
 ✅ done 2026-10-04 (tests in `bash_exec_test.go`), (4) ~~C5-C7~~ ✅ done
-2026-10-05 (tests in `find_grep_test.go`), then C-group mediums/lows by area;
+2026-10-05 (tests in `find_grep_test.go`), (5) ~~C9-C11~~ ✅ done 2026-10-23
+(tests in `bash_exec_test.go` + wrapper/executor/signal tests), then C-group
+mediums/lows by area;
 remaining unverified: markdown theme cache, provider parity. (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
