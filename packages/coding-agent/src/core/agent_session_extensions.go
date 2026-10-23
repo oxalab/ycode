@@ -590,6 +590,32 @@ func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry, ctxFac
 		Parameters:  params,
 		PrepareArguments: entry.Definition.PrepareArguments,
 		Execute: func(toolCallID string, params any, signal context.Context, onUpdate sdk.AgentToolUpdateCallback[any]) (sdk.AgentToolResult[any], error) {
+			// Prefer the streaming form (TS execute's onUpdate param) and forward
+			// partials live with the same unwrapping as the final result.
+			if entry.Definition.ExecuteUpdate != nil {
+				args, _ := json.Marshal(params)
+				result, err := entry.Definition.ExecuteUpdate(signal, args, func(partial any) {
+					if onUpdate != nil {
+						if content := definitionContent(partial); content != nil {
+							onUpdate(sdk.AgentToolResult[any]{Content: content})
+						}
+					}
+				})
+				if err != nil {
+					return sdk.AgentToolResult[any]{
+						Content: []llm.ContentBlock{
+							llm.TextContent{Type: "text", Text: fmt.Sprintf("Tool %s error: %s", name, err.Error())},
+						},
+					}, err
+				}
+				content := definitionContent(result)
+				if content == nil {
+					content = []llm.ContentBlock{
+						llm.TextContent{Type: "text", Text: fmt.Sprintf("%v", result)},
+					}
+				}
+				return sdk.AgentToolResult[any]{Content: content}, nil
+			}
 			// If the definition has its own Execute function, use it
 			if entry.Definition.Execute != nil {
 				args, _ := json.Marshal(params)
@@ -607,16 +633,7 @@ func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry, ctxFac
 						},
 					}, err
 				}
-				content, _ := result.([]llm.ContentBlock)
-				if content == nil {
-					// Tools (bash/read/grep/etc.) return *ToolExecuteResult which wraps
-					// the Content blocks — unwrap it instead of %v-dumping the struct.
-					if ter, ok := result.(*tools.ToolExecuteResult); ok {
-						content = ter.Content
-					} else if ter, ok := result.(tools.ToolExecuteResult); ok {
-						content = ter.Content
-					}
-				}
+				content := definitionContent(result)
 				if content == nil {
 					content = []llm.ContentBlock{
 						llm.TextContent{Type: "text", Text: fmt.Sprintf("%v", result)},
@@ -633,4 +650,20 @@ func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry, ctxFac
 			}, nil
 		},
 	}
+}
+
+// definitionContent unwraps a ToolDefinition result into its content blocks.
+// Tools (bash/read/grep/etc.) return *ToolExecuteResult which wraps the
+// Content blocks — unwrap it instead of %v-dumping the struct.
+func definitionContent(result any) []llm.ContentBlock {
+	if content, ok := result.([]llm.ContentBlock); ok {
+		return content
+	}
+	if ter, ok := result.(*tools.ToolExecuteResult); ok {
+		return ter.Content
+	}
+	if ter, ok := result.(tools.ToolExecuteResult); ok {
+		return ter.Content
+	}
+	return nil
 }

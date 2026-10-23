@@ -600,21 +600,18 @@ func executePreparedToolCall(
 	signal context.Context,
 	emit func(AgentEvent) error,
 ) executedToolCallOutcome {
-	var updateEvents []func()
-
 	result, err := prep.Tool.Execute(
 		prep.ToolCall.ID,
 		prep.Args,
 		signal,
 		func(partial AgentToolResult[any]) {
-			updateEvents = append(updateEvents, func() {
-				emit(NewToolExecutionUpdateEvent(prep.ToolCall.ID, prep.ToolCall.Name, prep.Args, partial))
-			})
+			// Live emission matches the reference, where onUpdate fires during
+			// execution (not after the tool settles). The parallel path already
+			// emits ToolExecutionEnd from tool goroutines, so this adds no new
+			// concurrency class.
+			_ = emit(NewToolExecutionUpdateEvent(prep.ToolCall.ID, prep.ToolCall.Name, prep.Args, partial))
 		},
 	)
-	for _, fn := range updateEvents {
-		fn()
-	}
 	if err != nil {
 		return executedToolCallOutcome{
 			Result: AgentToolResult[any]{
