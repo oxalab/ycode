@@ -18,7 +18,9 @@ import (
 	"ycode/packages/llm/src"
 )
 
-const bashUpdateThrottleMs = 100
+// bashUpdateThrottleMs throttles streaming partial-output updates (TS
+// BASH_UPDATE_THROTTLE_MS, bash.ts:154).
+const bashUpdateThrottleMs = 100 * time.Millisecond
 
 type BashToolInput struct {
 	Command string   `json:"command"`
@@ -39,7 +41,10 @@ type BashExecOptions struct {
 
 // BashExecResult: Contains the result of command execution.
 type BashExecResult struct {
-	ExitCode int
+	// ExitCode is nil when the process was terminated by a signal (Go reports
+	// -1 in that case; the TS reference represents it as null — bash.ts:392
+	// treats null as success, not an error).
+	ExitCode *int
 }
 
 type BashOperations interface {
@@ -202,6 +207,16 @@ func timeoutSentinel(opts BashExecOptions) error {
 	return fmt.Errorf("timeout:%g", *opts.Timeout)
 }
 
+// exitCodeFromRaw maps the raw process exit code to the TS `number | null`
+// shape: Go reports -1 when the process was terminated by a signal, which the
+// reference represents as null (bash.ts:392 — null is not an error).
+func exitCodeFromRaw(raw int) *int {
+	if raw < 0 {
+		return nil
+	}
+	return &raw
+}
+
 func (l *localBashOps) Exec(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
 	if _, err := os.Stat(cwd); err != nil {
 		return nil, fmt.Errorf("working directory does not exist: %s\nCannot execute bash commands", cwd)
@@ -305,7 +320,7 @@ func (l *localBashOps) Exec(ctx context.Context, command string, cwd string, opt
 				return nil, waitErr
 			}
 		}
-		return &BashExecResult{ExitCode: exitCode}, nil
+		return &BashExecResult{ExitCode: exitCodeFromRaw(exitCode)}, nil
 	}
 
 	select {
@@ -365,6 +380,72 @@ func appendStatus(text string, status string) string {
 	return status
 }
 
+// outputUpdateThrottle ports the reference's throttled update schedule
+// (bash.ts:287-343 updateDirty/lastUpdateAt/updateTimer): at most one partial
+// emission per bashUpdateThrottleMs, with a trailing-edge timer coalescing
+// interim chunks into the next emit. The mutex is a Go necessity — OnData
+// arrives from two stream-pump goroutines and the timer fires on its own,
+// where the reference is single-threaded.
+type outputUpdateThrottle struct {
+	mu           sync.Mutex
+	timer        *time.Timer
+	dirty        bool
+	lastUpdateAt time.Time
+	emit         func()
+}
+
+func newOutputUpdateThrottle(emit func()) *outputUpdateThrottle {
+	return &outputUpdateThrottle{emit: emit}
+}
+
+// schedule marks an update pending and emits immediately when the throttle
+// window has elapsed, otherwise arms the trailing timer for the remainder.
+func (t *outputUpdateThrottle) schedule() {
+	t.mu.Lock()
+	t.dirty = true
+	delay := bashUpdateThrottleMs - time.Since(t.lastUpdateAt)
+	if delay > 0 {
+		if t.timer == nil {
+			t.timer = time.AfterFunc(delay, t.emitIfDirty)
+		}
+		t.mu.Unlock()
+		return
+	}
+	t.stopTimerLocked()
+	t.mu.Unlock()
+	t.emitIfDirty()
+}
+
+// flush stops the timer and emits a final pending update (TS clearUpdateTimer
+// + emitOutputUpdate in finishOutput).
+func (t *outputUpdateThrottle) flush() {
+	t.mu.Lock()
+	t.stopTimerLocked()
+	t.mu.Unlock()
+	t.emitIfDirty()
+}
+
+// emitIfDirty invokes emit once if an update is pending, stamping it delivered.
+// A timer fire racing a stop finds dirty=false and no-ops.
+func (t *outputUpdateThrottle) emitIfDirty() {
+	t.mu.Lock()
+	if !t.dirty {
+		t.mu.Unlock()
+		return
+	}
+	t.dirty = false
+	t.lastUpdateAt = time.Now()
+	t.mu.Unlock()
+	t.emit()
+}
+
+func (t *outputUpdateThrottle) stopTimerLocked() {
+	if t.timer != nil {
+		t.timer.Stop()
+		t.timer = nil
+	}
+}
+
 // --- Create Tool ---
 
 func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.ToolDefinition {
@@ -380,6 +461,105 @@ func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.Too
 	if opts != nil {
 		spawnHook = opts.SpawnHook
 	}
+	run := func(ctx context.Context, args json.RawMessage, onUpdate func(partial any)) (any, error) {
+		var input BashToolInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return nil, fmt.Errorf("Invalid arguments: %w", err)
+		}
+		resolveCommand := input.Command
+		if commandPrefix != "" {
+			resolveCommand = commandPrefix + "\n" + input.Command
+		}
+		spawnCtx := resolveSpawnContext(resolveCommand, cwd, spawnHook)
+		accum := NewOutputAccumulator(OutputAccumulatorOptions{TempFilePrefix:"ycode-bash"})
+
+		// Streaming partials (TS onUpdate + scheduleOutputUpdate, bash.ts:286-343):
+		// a throttled snapshot at most every bashUpdateThrottleMs. Partials never
+		// carry the truncation footers — those are formatOutput's, added to the
+		// final result below.
+		emitUpdate := func() {
+			if onUpdate == nil {
+				return
+			}
+			snapshot := accum.Snapshot(true)
+			details := &BashToolDetails{FullOutputPath: snapshot.FullOutputPath}
+			if snapshot.Truncation.Truncated {
+				trunc := snapshot.Truncation
+				details.Truncation = &trunc
+			}
+			onUpdate(&ToolExecuteResult{
+				Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: snapshot.Content}},
+				Details: details,
+			})
+		}
+		throttle := newOutputUpdateThrottle(emitUpdate)
+
+		execOpts := BashExecOptions{
+			OnData: func(data []byte) {
+				accum.Append(data)
+				throttle.schedule()
+			},
+			Timeout: input.Timeout,
+			Env: 	spawnCtx.Env,
+		}
+		if onUpdate != nil {
+			// The reference emits an empty partial immediately (bash.ts:327-329).
+			onUpdate(&ToolExecuteResult{})
+		}
+		result, execErr := ops.Exec(ctx, spawnCtx.Command, spawnCtx.Cwd, execOpts)
+		accum.Finish()
+		throttle.flush() // TS finishOutput: clearUpdateTimer + final emitOutputUpdate
+		accum.CloseTempFile()
+
+		snapshot := accum.Snapshot(true)
+		statusText := snapshot.Content
+		if snapshot.Truncation.Truncated {
+			startLine := snapshot.Truncation.TotalLines - snapshot.Truncation.OutputLines + 1
+			endLine := snapshot.Truncation.TotalLines
+			if snapshot.Truncation.LastLinePartial {
+				lastLineSize := FormatSize(accum.GetLastLineBytes())
+				statusText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
+					FormatSize(snapshot.Truncation.OutputBytes), endLine, lastLineSize, snapshot.FullOutputPath)
+			} else if snapshot.Truncation.TruncatedBy != nil && *snapshot.Truncation.TruncatedBy == "lines" {
+				statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
+					startLine, endLine, snapshot.Truncation.TotalLines, snapshot.FullOutputPath)
+			} else {
+				statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
+					startLine, endLine, snapshot.Truncation.TotalLines, FormatSize(DefaultMaxBytes), snapshot.FullOutputPath)
+			}
+		}
+		// Error paths use the raw content without the "(no output)"
+		// placeholder (TS formatOutput(snapshot, "")); the placeholder is
+		// only for the success result.
+		outputText := statusText
+		if outputText == "" {
+			outputText = "(no output)"
+		}
+		if execErr != nil {
+			if execErr.Error() == "aborted" {
+				return nil, fmt.Errorf("%s", appendStatus(statusText, "Command aborted"))
+			}
+		if execErr.Error() == "timeout" {
+			// Inherited caller deadline (no timeout option): no seconds to report.
+			return nil, fmt.Errorf("%s", appendStatus(statusText, "Command timed out"))
+		}
+		if strings.HasPrefix(execErr.Error(), "timeout:") {
+			secs := strings.TrimPrefix(execErr.Error(), "timeout:")
+			msg := fmt.Sprintf("Command timed out after %s seconds", secs)
+			return nil, fmt.Errorf("%s", appendStatus(statusText, msg))
+		}
+			return nil, execErr
+		}
+		// A nil ExitCode means the process died to a signal — the reference
+		// treats null as success (bash.ts:392).
+		if result.ExitCode != nil && *result.ExitCode != 0 {
+			return nil, fmt.Errorf("%s", appendStatus(outputText, fmt.Sprintf("Command exited with code %d", *result.ExitCode)))
+		}
+		return &ToolExecuteResult{
+			Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: outputText}},
+		}, nil
+	}
+
 	return &extensions.ToolDefinition{
 		Name: 			"bash",
 		Label: 			"bash",
@@ -389,71 +569,11 @@ func CreateBashToolDefinition(cwd string, opts *BashToolOptions) *extensions.Too
 			"command": {typ: propString, description: "Bash command to execute"},
 			"timeout": {typ: propNumber, description: "Timeout in seconds (optional, no default timeout)"},
 		}, []string{"command"}),
+		ExecuteUpdate: func(ctx context.Context, args json.RawMessage, onUpdate func(partial any)) (any, error) {
+			return run(ctx, args, onUpdate)
+		},
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
-			var input BashToolInput
-			if err := json.Unmarshal(args, &input); err != nil {
-				return nil, fmt.Errorf("Invalid arguments: %w", err)
-			}
-			resolveCommand := input.Command
-			if commandPrefix != "" {
-				resolveCommand = commandPrefix + "\n" + input.Command
-			}
-			spawnCtx := resolveSpawnContext(resolveCommand, cwd, spawnHook)
-			accum := NewOutputAccumulator(OutputAccumulatorOptions{TempFilePrefix:"ycode-bash"})
-
-			execOpts := BashExecOptions{
-				OnData: func(data []byte) { accum.Append(data) },
-				Timeout: input.Timeout,
-				Env: 	spawnCtx.Env,
-			}
-			result, execErr := ops.Exec(ctx, spawnCtx.Command, spawnCtx.Cwd, execOpts)
-			accum.Finish()
-			accum.CloseTempFile()
-
-			snapshot := accum.Snapshot(true)
-			statusText := snapshot.Content
-			if snapshot.Truncation.Truncated {
-				startLine := snapshot.Truncation.TotalLines - snapshot.Truncation.OutputLines + 1
-				endLine := snapshot.Truncation.TotalLines
-				if snapshot.Truncation.LastLinePartial {
-					lastLineSize := FormatSize(accum.GetLastLineBytes())
-					statusText += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
-						FormatSize(snapshot.Truncation.OutputBytes), endLine, lastLineSize, snapshot.FullOutputPath)
-				} else if snapshot.Truncation.TruncatedBy != nil && *snapshot.Truncation.TruncatedBy == "lines" {
-					statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
-						startLine, endLine, snapshot.Truncation.TotalLines, snapshot.FullOutputPath)
-				} else {
-					statusText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
-						startLine, endLine, snapshot.Truncation.TotalLines, FormatSize(DefaultMaxBytes), snapshot.FullOutputPath)
-				}
-			}
-			// Error paths use the raw content without the "(no output)"
-			// placeholder (TS formatOutput(snapshot, "")); the placeholder is
-			// only for the success result.
-			outputText := statusText
-			if outputText == "" {
-				outputText = "(no output)"
-			}
-			if execErr != nil {
-				if execErr.Error() == "aborted" {
-					return nil, fmt.Errorf("%s", appendStatus(statusText, "Command aborted"))
-				}
-				if execErr.Error() == "timeout" || strings.HasPrefix(execErr.Error(), "timeout:") {
-					secs := strings.TrimPrefix(execErr.Error(), "timeout:")
-					msg := "Command timed out"
-					if secs != "" {
-						msg = fmt.Sprintf("Command timed out after %s seconds", secs)
-					}
-					return nil, fmt.Errorf("%s", appendStatus(statusText, msg))
-				}
-				return nil, execErr
-			}
-			if result.ExitCode != 0 {
-				return nil, fmt.Errorf("%s", appendStatus(outputText, fmt.Sprintf("Command exited with code %d", result.ExitCode)))
-			}
-			return &ToolExecuteResult{
-				Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: outputText}},
-			}, nil
+			return run(ctx, args, nil)
 		},
 		RenderCall: func(args any) any {
 			argsMap, _ := args.(map[string]any)
@@ -491,11 +611,13 @@ func CreateBashTool(cwd string, opts *BashToolOptions) *sdk.AgentTool[any] {
 
 /*
 FOOTNOTE:
- 1. No streaming output updates — TS uses throttled onUpdate callbacks to stream 
- partial results. Go's ToolDefinition.Execute doesn't have the onUpdate callback 
- (it was simplified in types.go). Output is returned only after command completes. 
- Streaming requires either enhancing ToolDefinition.Execute signature or using 
- AgentTool directly.
+ 1. Streaming output updates are ported via ToolDefinition.ExecuteUpdate (the
+ TS execute onUpdate param): an immediate empty partial, then throttled
+ snapshot emissions (bashUpdateThrottleMs, trailing-edge timer coalescing),
+ then a final flush in the finish path. Partials carry the raw snapshot only —
+ truncation footers are added to the final result. The agent-loop layer must
+ emit the update events live (agent-sdk agent_loop.go); the TUI renders them
+ via EventToolExecutionUpdate (interactive/events.go handleToolUpdate).
 
  2. sync.WaitGroup needs "sync" import — The streamOutput goroutines use a WaitGroup. 
  Make sure "sync" is in imports.

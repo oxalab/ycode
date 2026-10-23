@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,5 +172,172 @@ func TestExecSpillUsesYcodeBashPrefix(t *testing.T) {
 	}
 	if strings.Contains(text, "ycode-base-") {
 		t.Errorf("stale ycode-base- prefix still in use: %q", text)
+	}
+}
+
+// --- Story 21: C9 streaming throttle, C10 deadline guard, C11 null exit ---
+
+// fakeBashOps stubs BashOperations for tool-level tests (the opts.Operations
+// seam in CreateBashToolDefinition).
+type fakeBashOps struct {
+	onExec func(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error)
+}
+
+func (f *fakeBashOps) Exec(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
+	return f.onExec(ctx, command, cwd, opts)
+}
+
+func intPtr(i int) *int { return &i }
+
+// partialText extracts the text of a *ToolExecuteResult partial; ok=false for
+// the initial empty partial (no content blocks).
+func partialText(partial any) (string, bool) {
+	ter, ok := partial.(*ToolExecuteResult)
+	if !ok || len(ter.Content) == 0 {
+		return "", false
+	}
+	tc, ok := ter.Content[0].(*llm.TextContent)
+	if !ok {
+		return "", false
+	}
+	return tc.Text, true
+}
+
+// C9: rapid chunks must coalesce through the 100ms trailing-edge throttle —
+// 5000 chunks produce far fewer than 5000 partials (the reference's own test
+// bound is < 25), the initial partial is empty, and the final flush carries
+// the complete output. Driven through ExecuteUpdate; only that form streams.
+func TestBashStreamsThrottledPartials(t *testing.T) {
+	const chunks = 5000
+	ops := &fakeBashOps{onExec: func(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
+		for i := 0; i < chunks; i++ {
+			opts.OnData([]byte("x"))
+		}
+		return &BashExecResult{ExitCode: intPtr(0)}, nil
+	}}
+	def := CreateBashToolDefinition(".", &BashToolOptions{Operations: ops})
+
+	var mu sync.Mutex
+	var partials []*ToolExecuteResult
+	_, err := def.ExecuteUpdate(context.Background(), json.RawMessage(`{"command":"gen"}`), func(partial any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ter, ok := partial.(*ToolExecuteResult); ok {
+			partials = append(partials, ter)
+		}
+	})
+	if err != nil {
+		t.Fatalf("ExecuteUpdate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(partials) < 2 {
+		t.Fatalf("expected initial partial + at least one emission, got %d", len(partials))
+	}
+	if len(partials[0].Content) != 0 {
+		t.Errorf("first partial must be the empty kickoff, got %d content blocks", len(partials[0].Content))
+	}
+	if len(partials) >= 25 {
+		t.Errorf("throttle ineffective: %d partials for %d chunks", len(partials), chunks)
+	}
+	last, ok := partialText(partials[len(partials)-1])
+	if !ok {
+		t.Fatalf("last partial has no text")
+	}
+	if last != strings.Repeat("x", chunks) {
+		t.Errorf("final flush incomplete: got %d chars, want %d", len(last), chunks)
+	}
+}
+
+// C9: chunks spaced beyond the throttle window each emit promptly instead of
+// waiting for the trailing timer.
+func TestBashThrottleSpreadsEmissions(t *testing.T) {
+	ops := &fakeBashOps{onExec: func(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
+		for b := 0; b < 3; b++ {
+			opts.OnData([]byte(fmt.Sprintf("batch%d\n", b)))
+			time.Sleep(130 * time.Millisecond) // > bashUpdateThrottleMs
+		}
+		return &BashExecResult{ExitCode: intPtr(0)}, nil
+	}}
+	def := CreateBashToolDefinition(".", &BashToolOptions{Operations: ops})
+
+	var mu sync.Mutex
+	var texts []string
+	_, err := def.ExecuteUpdate(context.Background(), json.RawMessage(`{"command":"gen"}`), func(partial any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if text, ok := partialText(partial); ok {
+			texts = append(texts, text)
+		}
+	})
+	if err != nil {
+		t.Fatalf("ExecuteUpdate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(texts) < 3 || len(texts) > 6 {
+		t.Errorf("expected one emission per spaced batch (3, flush may add one), got %d", len(texts))
+	}
+	if len(texts) > 0 && !strings.Contains(texts[len(texts)-1], "batch2") {
+		t.Errorf("last emission missing final batch: %q", texts[len(texts)-1])
+	}
+}
+
+// C11 (tool level): a signal-killed process surfaces as ExitCode nil, which
+// the reference treats as success (bash.ts:392) — no "Command exited" suffix.
+func TestBashNilExitCodeIsSuccess(t *testing.T) {
+	ops := &fakeBashOps{onExec: func(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
+		opts.OnData([]byte("partial output before the kill"))
+		return &BashExecResult{ExitCode: nil}, nil
+	}}
+	def := CreateBashToolDefinition(".", &BashToolOptions{Operations: ops})
+	res, err := def.Execute(context.Background(), json.RawMessage(`{"command":"killed"}`))
+	if err != nil {
+		t.Fatalf("nil exit code must be success, got error: %v", err)
+	}
+	ter := res.(*ToolExecuteResult)
+	if len(ter.Content) == 0 {
+		t.Fatal("expected output content")
+	}
+	if tc := ter.Content[0].(*llm.TextContent); strings.Contains(tc.Text, "Command exited") {
+		t.Errorf("success result carries an exit-code status: %q", tc.Text)
+	}
+}
+
+// C11 control: a real non-zero exit must still produce the status-suffixed
+// error, at the same layer as before.
+func TestBashNonZeroExitStillErrors(t *testing.T) {
+	ops := &fakeBashOps{onExec: func(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
+		return &BashExecResult{ExitCode: intPtr(3)}, nil
+	}}
+	def := CreateBashToolDefinition(".", &BashToolOptions{Operations: ops})
+	_, err := def.Execute(context.Background(), json.RawMessage(`{"command":"fail"}`))
+	if err == nil {
+		t.Fatal("expected exit-code error")
+	}
+	if !strings.Contains(err.Error(), "Command exited with code 3") {
+		t.Errorf("error missing formatted exit status: %q", err.Error())
+	}
+}
+
+// C10: a caller deadline with NO timeout option must not panic (the old
+// unguarded *opts.Timeout deref) and must report the inherited deadline as a
+// plain "Command timed out" — no "after N seconds" (timeoutSentinel nil branch).
+func TestExecParentDeadlineWithoutTimeoutOption(t *testing.T) {
+	newExecOps(t) // gate on bash availability
+	def := CreateBashToolDefinition(".", &BashToolOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := def.Execute(ctx, json.RawMessage(`{"command":"sleep 10"}`))
+	if err == nil {
+		t.Fatal("expected timeout error from inherited deadline")
+	}
+	if !strings.Contains(err.Error(), "Command timed out") {
+		t.Errorf("error missing timeout message: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "timed out after") {
+		t.Errorf("inherited deadline must not report seconds: %q", err.Error())
 	}
 }

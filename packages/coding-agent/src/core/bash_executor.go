@@ -117,10 +117,11 @@ func ExecuteBashWithOperations(
 		tempFile.Close()
 	}
 
-	exitCode := result.ExitCode
+	// ExitCode passes through as *int: nil means the process died to a signal
+	// (TS null → undefined; see tools.exitCodeFromRaw).
 	return &BashResult{
 		Output:        conditionalTruncate(fullOutput, truncResult),
-		ExitCode:      &exitCode,
+		ExitCode:      result.ExitCode,
 		Cancelled:     false,
 		Truncated:     truncResult.Truncated,
 		FullOutputPath: tempFilePath,

@@ -278,6 +278,11 @@ type ToolDefinition struct {
 	// ctx as the 5th execute param). When both are set and a context factory
 	// was provided at wrap time, the wrapper prefers this one.
 	ExecuteContext 	func(ctx context.Context, args json.RawMessage, extCtx ExtensionContext) (any, error)
+	// ExecuteUpdate is the streaming form of Execute (TS execute's 4th param,
+	// the AgentToolUpdateCallback). onUpdate receives partial results during
+	// execution; each partial has the same shape as the final return value.
+	// Wrappers prefer it over Execute/ExecuteContext when set.
+	ExecuteUpdate 	func(ctx context.Context, args json.RawMessage, onUpdate func(partial any)) (any, error)
 	RenderCall  	func(args any) any
 	RenderResult	func(args any, result any, options any) any
 	// PrepareArguments is an optional compatibility shim applied to raw tool
