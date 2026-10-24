@@ -85,6 +85,7 @@ func CreateLsToolDefinition(cwd string, opts *LsToolOptions) *extensions.ToolDef
 		Name: "ls",
 		Label: "ls",
 		Description: fmt.Sprintf("List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to %d entries or %dKB (whichever is hit first).", defaultLsLimit, DefaultMaxBytes/1024),
+		PromptSnippet: "List directory contents",
 		Parameters: objectSchema(map[string]prop{
 			"path":  {typ: propString, description: "Directory to list (default: current directory)"},
 			"limit": {typ: propInteger, description: "Maximum number of entries to return (default: 500)"},
