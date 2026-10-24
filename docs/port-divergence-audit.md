@@ -960,8 +960,16 @@ missing feature/surface, LOW = cosmetic/wording.
   `TestExecSignalKillYieldsNilExitCode` (unix-gated, `kill -TERM $$`),
   `TestExecuteBashNilExitCodePropagates` — mutation-verified via the bash.go
   stash build failure.
-- **C12 MED ls.go:84-92** — missing `PromptSnippet: "List directory contents"`
-  (system prompt loses the ls snippet).
+- **C12 MED — ✅ FIXED (2026-10-24, story 22)** — `CreateLsToolDefinition`
+  (ls.go) now carries `PromptSnippet: "List directory contents"`
+  (reference ls.ts:108 verbatim; it was the lone built-in without one, so
+  read-only contexts — where ls IS exposed via CreateReadOnlyToolDefinitions,
+  `index.go:98` — lost the line in the system-prompt tool list built by
+  `agent_session_prompt.go`). Pinned by `TestBuiltinToolsCarryReferencePromptSnippets`
+  (ls_test.go): asserts ALL seven built-ins' PromptSnippets against the exact
+  reference strings through the coding+read-only exposure sets, so a future
+  dropped snippet or set omission fails by name — mutation-verified (line
+  revert → test names ls).
 - **C13 MED schema.go:70** — Go injects `additionalProperties: false` into
   every tool schema; TS TypeBox emits none (wire-visible to providers).
 - **C14 MED tool_definition_wrapper.go** — drops `prepareArguments` and
@@ -980,8 +988,8 @@ Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 2026-10-04 (tests in `render_utils_test.go`, `truncate_test.go`), (3) ~~C1-C3~~
 ✅ done 2026-10-04 (tests in `bash_exec_test.go`), (4) ~~C5-C7~~ ✅ done
 2026-10-05 (tests in `find_grep_test.go`), (5) ~~C9-C11~~ ✅ done 2026-10-23
-(tests in `bash_exec_test.go` + wrapper/executor/signal tests), then C-group
-mediums/lows by area;
+(tests in `bash_exec_test.go` + wrapper/executor/signal tests), (6) ~~C12~~ ✅
+done 2026-10-24 (test in `ls_test.go`), then C13-C15 by area;
 remaining unverified: markdown theme cache, provider parity. (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
