@@ -40,7 +40,22 @@ type prop struct {
 // required are listed under "required". Property order follows props insertion
 // order (Go maps are unordered, but providers don't rely on order — the TS
 // TypeBox schemas are likewise consumed as objects).
+//
+// No "additionalProperties" is emitted: the reference's bare Type.Object
+// calls (bash/read/write/ls/grep/find) emit none. Tools whose reference
+// schema passes the option explicitly (edit, edit.ts:50) use objectSchemaStrict.
 func objectSchema(props map[string]prop, required []string) json.RawMessage {
+	return marshalSchema(buildObjectSchema(props, required, false))
+}
+
+// objectSchemaStrict is objectSchema plus a top-level
+// "additionalProperties": false — the shape of the reference's edit schema,
+// which passes the option to Type.Object explicitly (edit.ts:50).
+func objectSchemaStrict(props map[string]prop, required []string) json.RawMessage {
+	return marshalSchema(buildObjectSchema(props, required, true))
+}
+
+func buildObjectSchema(props map[string]prop, required []string, additionalProperties bool) map[string]any {
 	properties := make(map[string]any, len(props))
 	for name, p := range props {
 		m := map[string]any{
@@ -65,14 +80,21 @@ func objectSchema(props map[string]prop, required []string) json.RawMessage {
 	if len(required) > 0 {
 		schema["required"] = required
 	}
-	// AdditionalProperties: false mirrors TypeBox's { additionalProperties: false }
-	// in the reference schemas (keeps models from inventing extra args).
-	schema["additionalProperties"] = false
+	if additionalProperties {
+		schema["additionalProperties"] = false
+	}
+	return schema
+}
+
+func marshalSchema(schema map[string]any) json.RawMessage {
 	b, _ := json.Marshal(schema)
 	return b
 }
 
-// arrayItems builds an "items" schema for an array property of objects.
+// arrayItems builds an "items" schema for an array property of objects. The
+// nested "additionalProperties": false matches the reference's edit schema,
+// which passes the option explicitly for the edits[] items (edit.ts:39) —
+// arrayItems is used only by edit today.
 func arrayItems(props map[string]prop, required []string) map[string]any {
 	properties := make(map[string]any, len(props))
 	for name, p := range props {

@@ -970,8 +970,23 @@ missing feature/surface, LOW = cosmetic/wording.
   reference strings through the coding+read-only exposure sets, so a future
   dropped snippet or set omission fails by name — mutation-verified (line
   revert → test names ls).
-- **C13 MED schema.go:70** — Go injects `additionalProperties: false` into
-  every tool schema; TS TypeBox emits none (wire-visible to providers).
+- **C13 MED — ✅ FIXED (2026-10-24, story 23; finding half-corrected)** —
+  the reference does NOT emit `additionalProperties` for 6 of 7 tools (bare
+  `Type.Object(...)` in bash/read/write/ls/grep/find) but DOES pass
+  `{ additionalProperties: false }` explicitly for **edit** (edit.ts:39
+  nested edits[] items, edit.ts:50 top level) — Go's blanket injection
+  (`schema.go:70` + nested :91) matched edit coincidentally and diverged for
+  the other six. Fix: `objectSchema` no longer emits the key (default now
+  matches TypeBox default); new `objectSchemaStrict` keeps it and is used
+  only by edit; `arrayItems` keeps its nested false (edit-only caller,
+  comment annotated). Nothing in Go reads the key — wire-visible only via
+  the raw-pass-through providers (openai-completions, openai-responses,
+  bedrock, mistral, google); anthropic rebuilds input_schema from
+  properties/required on BOTH sides (anthropic.go:695-720), unchanged.
+  Pinned by `TestAdditionalPropertiesMatchesReference` (absent for the six,
+  present top-level+nested for edit) — mutation-verified (edit reverted to
+  plain objectSchema → test names edit.ts:50). The old schema.go comment
+  claimed the injection "mirrors TypeBox" — it was accurate only for edit.
 - **C14 MED tool_definition_wrapper.go** — drops `prepareArguments` and
   ignores `ctxFactory` (extension tools get no context).
 - **C15 LOW** — wording/casing drift (bash cwd/abort/"(no output)", find
@@ -989,7 +1004,8 @@ Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 ✅ done 2026-10-04 (tests in `bash_exec_test.go`), (4) ~~C5-C7~~ ✅ done
 2026-10-05 (tests in `find_grep_test.go`), (5) ~~C9-C11~~ ✅ done 2026-10-23
 (tests in `bash_exec_test.go` + wrapper/executor/signal tests), (6) ~~C12~~ ✅
-done 2026-10-24 (test in `ls_test.go`), then C13-C15 by area;
+done 2026-10-24 (test in `ls_test.go`), (7) ~~C13~~ ✅ done 2026-10-24 (test
+in `schema_test.go`), then C14-C15;
 remaining unverified: markdown theme cache, provider parity. (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)

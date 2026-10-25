@@ -209,6 +209,37 @@ func TestDescriptionsMatchReference(t *testing.T) {
 	}
 }
 
+// TestAdditionalPropertiesMatchesReference pins C13: the reference's bare
+// Type.Object calls (bash/read/write/ls/grep/find) emit NO
+// additionalProperties; only edit passes the option explicitly (edit.ts:39
+// nested items, edit.ts:50 top level). Go used to inject it into every
+// schema — wire-visible to openai/bedrock/mistral/google (anthropic strips it
+// on both sides).
+func TestAdditionalPropertiesMatchesReference(t *testing.T) {
+	strictTools := map[ToolName]bool{ToolNameEdit: true}
+	defs := allBuiltinDefinitions(t)
+	for name, def := range defs {
+		schema := parseSchema(t, def.Parameters)
+		_, present := schema["additionalProperties"]
+		if strictTools[name] && !present {
+			t.Errorf("tool %q: top-level additionalProperties missing — reference edit schema has it (edit.ts:50)", name)
+		}
+		if !strictTools[name] && present {
+			t.Errorf("tool %q: top-level additionalProperties present — reference bare Type.Object emits none", name)
+		}
+	}
+
+	// edit's nested edits[] items carry the option too (edit.ts:39).
+	def := defs[ToolNameEdit]
+	schema := parseSchema(t, def.Parameters)
+	props, _ := schema["properties"].(map[string]any)
+	editsProp := requireProp(t, props, "edits", "array")
+	items, _ := editsProp["items"].(map[string]any)
+	if v, ok := items["additionalProperties"].(bool); !ok || v {
+		t.Errorf("edit: edits[].items.additionalProperties = %v, want false (edit.ts:39)", items["additionalProperties"])
+	}
+}
+
 func contains(s []any, v string) bool {
 	for _, x := range s {
 		if xs, ok := x.(string); ok && xs == v {
