@@ -166,7 +166,7 @@ func CreateEditToolDefinition(cwd string, opts *EditToolOptions) *extensions.Too
 			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
 			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
 		},
-		Parameters: objectSchema(map[string]prop{
+		Parameters: objectSchemaStrict(map[string]prop{
 			"path": {typ: propString, description: "Path to the file to edit (relative or absolute)"},
 			"edits": {
 				typ:         propArray,
