@@ -22,7 +22,11 @@ func toAgentToolResult(result any) sdk.AgentToolResult[any] {
 }
 
 // WrapToolDefinition wraps a tool definition into an AgentTool for the core runtime.
-func WrapToolDefinition(def *extensions.ToolDefinition, ctxFactory func() any) *sdk.AgentTool[any] {
+// ctxFactory supplies the ExtensionContext at execute time (TS
+// tool-definition-wrapper.ts passes ctxFactory?.() as the 5th execute arg);
+// preference order matches the session bridge: ExecuteUpdate > ExecuteContext
+// (factory present) > Execute.
+func WrapToolDefinition(def *extensions.ToolDefinition, ctxFactory func() extensions.ExtensionContext) *sdk.AgentTool[any] {
 	var params map[string]any
 	if def.Parameters != nil {
 		json.Unmarshal(def.Parameters, &params)
@@ -47,6 +51,20 @@ func WrapToolDefinition(def *extensions.ToolDefinition, ctxFactory func() any) *
         		}
         		return toAgentToolResult(result), nil
     		}
+    		if def.ExecuteContext != nil && ctxFactory != nil {
+        		result, err := def.ExecuteContext(signal, args, ctxFactory())
+        		if err != nil {
+            		return sdk.AgentToolResult[any]{}, err
+        		}
+        		return toAgentToolResult(result), nil
+    		}
+    		if def.ExecuteContext != nil && ctxFactory != nil {
+        		result, err := def.ExecuteContext(signal, args, ctxFactory())
+        		if err != nil {
+            		return sdk.AgentToolResult[any]{}, err
+        		}
+        		return toAgentToolResult(result), nil
+    		}
     		result, err := def.Execute(signal, args)
     		if err != nil {
         		return sdk.AgentToolResult[any]{}, err
@@ -58,7 +76,7 @@ func WrapToolDefinition(def *extensions.ToolDefinition, ctxFactory func() any) *
 
 
 // WrapToolDefinitions: Wraps multiple ToolDefinitions into AgentTools for the core runtime.
-func WrapToolDefinitions(defs []*extensions.ToolDefinition, ctxFactory func() any) []*sdk.AgentTool[any] {
+func WrapToolDefinitions(defs []*extensions.ToolDefinition, ctxFactory func() extensions.ExtensionContext) []*sdk.AgentTool[any] {
 	result := make([]*sdk.AgentTool[any], len(defs))
 	for i, def := range defs {
 		result[i] = WrapToolDefinition(def, ctxFactory)
@@ -115,12 +133,12 @@ func CreateToolDefinitionFromAgentTool(tool *sdk.AgentTool[any]) *extensions.Too
 
 /*
 FOOTNOTE:
- 1. ctxFactory parameter is unused — In TS, the wrapper passes ctxFactory?.() as 
- the ExtensionContext to definition.execute(...). Our Go ToolDefinition.Execute only 
- takes (context.Context, json.RawMessage) — it was simplified during the types.go 
- phase and lost the ExtensionContext parameter. This means extension tools wrapped 
- via this function won't receive the extension context (actions, idle state, etc.). 
- This is a functional gap rooted in the types.go design, not this wrapper.
+ 1. ctxFactory — RESOLVED (story 24): the wrapper now passes ctxFactory?.()
+ to ExecuteContext when both are set, matching TS tool-definition-wrapper.ts
+ (definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.())).
+ ExecuteContext-only definitions no longer run context-free through this
+ wrapper. (The production session path uses buildAgentToolFromDefinition,
+ which has preferred ExecuteContext since story 15.)
 
  2. CreateToolDefinitionFromAgentTool loses toolCallID — the reverse wrapper
  passes empty "" for it. onUpdate is no longer lost: the reverse wrapper sets

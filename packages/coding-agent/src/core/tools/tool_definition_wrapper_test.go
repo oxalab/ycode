@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -63,5 +64,95 @@ func TestWrapToolDefinitionExecuteFallback(t *testing.T) {
 	}
 	if tc, ok := res.Content[0].(*llm.TextContent); !ok || tc.Text != "plain" {
 		t.Errorf("result = %+v, want text plain", res.Content)
+	}
+}
+
+// C14: the core wrapper must honor ctxFactory — an ExecuteContext definition
+// receives the factory's context instead of silently running context-free
+// (pre-fix the ctxFactory param was dead and ExecuteContext was never called
+// through this wrapper). Preference order matches the session bridge:
+// ExecuteUpdate > ExecuteContext (factory present) > Execute.
+func TestWrapToolDefinitionPrefersExecuteContext(t *testing.T) {
+	ranExecute := false
+	def := &extensions.ToolDefinition{
+		Name: "fake",
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			ranExecute = true
+			return &ToolExecuteResult{Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: "plain"}}}, nil
+		},
+		ExecuteContext: func(ctx context.Context, args json.RawMessage, extCtx extensions.ExtensionContext) (any, error) {
+			if extCtx.Model.ID != "test-model" {
+				return nil, fmt.Errorf("ExecuteContext got model %q, want test-model", extCtx.Model.ID)
+			}
+			return &ToolExecuteResult{Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: "contextual"}}}, nil
+		},
+	}
+	wrapped := WrapToolDefinition(def, func() extensions.ExtensionContext {
+		return extensions.ExtensionContext{Model: llm.Model[llm.Api]{ID: "test-model"}}
+	})
+	res, err := wrapped.Execute("id", map[string]any{}, context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if ranExecute {
+		t.Error("plain Execute ran even though ExecuteContext + factory were available")
+	}
+	if tc, ok := res.Content[0].(*llm.TextContent); !ok || tc.Text != "contextual" {
+		t.Errorf("result = %+v, want ExecuteContext's text", res.Content)
+	}
+}
+
+// C14: nil factory falls back to plain Execute (context-free), same as before.
+func TestWrapToolDefinitionNilFactoryFallsBackToExecute(t *testing.T) {
+	ranContext := false
+	def := &extensions.ToolDefinition{
+		Name: "fake",
+		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
+			return &ToolExecuteResult{Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: "plain"}}}, nil
+		},
+		ExecuteContext: func(ctx context.Context, args json.RawMessage, extCtx extensions.ExtensionContext) (any, error) {
+			ranContext = true
+			return &ToolExecuteResult{Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: "contextual"}}}, nil
+		},
+	}
+	wrapped := WrapToolDefinition(def, nil)
+	res, err := wrapped.Execute("id", map[string]any{}, context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if ranContext {
+		t.Error("ExecuteContext ran despite nil factory")
+	}
+	if tc, ok := res.Content[0].(*llm.TextContent); !ok || tc.Text != "plain" {
+		t.Errorf("result = %+v, want Execute's text", res.Content)
+	}
+}
+
+// Order pin: ExecuteUpdate takes precedence over ExecuteContext, mirroring
+// buildAgentToolFromDefinition (story 21 ordering, now locked in both bridges).
+func TestWrapToolDefinitionExecuteUpdateBeatsContext(t *testing.T) {
+	ranContext := false
+	def := &extensions.ToolDefinition{
+		Name: "fake",
+		ExecuteUpdate: func(ctx context.Context, args json.RawMessage, onUpdate func(partial any)) (any, error) {
+			return &ToolExecuteResult{Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: "update"}}}, nil
+		},
+		ExecuteContext: func(ctx context.Context, args json.RawMessage, extCtx extensions.ExtensionContext) (any, error) {
+			ranContext = true
+			return &ToolExecuteResult{Content: []llm.ContentBlock{&llm.TextContent{Type: "text", Text: "contextual"}}}, nil
+		},
+	}
+	wrapped := WrapToolDefinition(def, func() extensions.ExtensionContext {
+		return extensions.ExtensionContext{}
+	})
+	res, err := wrapped.Execute("id", map[string]any{}, context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if ranContext {
+		t.Error("ExecuteContext ran despite ExecuteUpdate being set")
+	}
+	if tc, ok := res.Content[0].(*llm.TextContent); !ok || tc.Text != "update" {
+		t.Errorf("result = %+v, want ExecuteUpdate's text", res.Content)
 	}
 }
