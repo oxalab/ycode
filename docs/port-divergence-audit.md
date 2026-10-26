@@ -987,8 +987,38 @@ missing feature/surface, LOW = cosmetic/wording.
   present top-level+nested for edit) — mutation-verified (edit reverted to
   plain objectSchema → test names edit.ts:50). The old schema.go comment
   claimed the injection "mirrors TypeBox" — it was accurate only for edit.
-- **C14 MED tool_definition_wrapper.go** — drops `prepareArguments` and
-  ignores `ctxFactory` (extension tools get no context).
+- **C14 MED — ✅ RESOLVED (2026-10-24, story 24; finding half-stale)** —
+  (a) "drops `prepareArguments`" was STALE since story 5 (A8): both bridges
+  copy `PrepareArguments` (tool_definition_wrapper.go, 
+  agent_session_extensions.go), agent_loop consumes it, tests pin it.
+  (b) "ignores `ctxFactory`" was REAL in the core wrapper only: it never
+  called `def.ExecuteContext` and the param was dead (`func() any`). Fixed:
+  `WrapToolDefinition`/`WrapToolDefinitions` now take
+  `func() extensions.ExtensionContext` and prefer ExecuteUpdate >
+  ExecuteContext (factory present) > Execute — the exact order
+  `buildAgentToolFromDefinition` already used, so both bridges are identical
+  (TS wrapper semantics: `definition.execute(toolCallId, params, signal,
+  onUpdate, ctxFactory?.())`). All Create*Tool call sites pass nil →
+  behavior unchanged there. Tests: `TestWrapToolDefinitionPrefersExecuteContext`,
+  `TestWrapToolDefinitionNilFactoryFallsBackToExecute`,
+  `TestWrapToolDefinitionExecuteUpdateBeatsContext` — both mutations
+  verified (branch inverted → Execute ran; order swapped → ExecuteContext ran
+  despite update). Runtime note: production flows through the session bridge
+  (which honored ExecuteContext since story 15), so this fix is
+  parity-surface correctness, not a behavior change.
+- **C16 MED — LOGGED 2026-10-24 (story 24), DEFERRED by choice** — JS
+  extension tools receive only `{cwd}` as ctx (`js_api.go:385` →
+  `CallToolExecute(exHandle, params, map{"cwd":...})`); the TS reference
+  passes the full runner context (`runner.createContext()`: getModel,
+  isIdle, getSignal, abort, hasPendingMessages, shutdown,
+  getContextUsage, compact, getSystemPrompt + actions/ui — runner.ts:268-299)
+  as the 5th execute arg. Porting it is an extensions-runtime feature family
+  (same class as the subagent example extension), not a wrapper fix; the Go
+  `ExtensionContext` struct currently carries only `Model` (types.go comment:
+  "the Go port starts with the model only"). Related dead code:
+  `extensions/wrapper.go WrapRegisteredTool` is a broken stub
+  (`def.Execute(nil, nil)`) with zero callers. Revisit if/when JS extension
+  tool parity matters in practice.
 - **C15 LOW** — wording/casing drift (bash cwd/abort/"(no output)", find
   limit notices, grep "limti"/abort/period, ls error casing); find/ls apply
   the 2000-line default where TS is byte-only; `integer` vs `number` schema
@@ -1005,7 +1035,8 @@ Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 2026-10-05 (tests in `find_grep_test.go`), (5) ~~C9-C11~~ ✅ done 2026-10-23
 (tests in `bash_exec_test.go` + wrapper/executor/signal tests), (6) ~~C12~~ ✅
 done 2026-10-24 (test in `ls_test.go`), (7) ~~C13~~ ✅ done 2026-10-24 (test
-in `schema_test.go`), then C14-C15;
+in `schema_test.go`), (8) ~~C14~~ ✅ resolved 2026-10-24 (half stale; tests
+in `tool_definition_wrapper_test.go`; C16 logged deferred), then C15;
 remaining unverified: markdown theme cache, provider parity. (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
