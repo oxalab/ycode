@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -43,6 +44,15 @@ func (o TruncationOptions) maxBytes() int {
 		return *o.MaxBytes
 	}
 	return DefaultMaxBytes
+}
+
+// byteOnlyTruncation returns the reference's truncation options for find/ls/
+// grep result output: bytes only, no line cap (TS passes
+// `maxLines: Number.MAX_SAFE_INTEGER` — the result/match limit has already
+// capped the row count, so the 2000-line default would wrongly truncate).
+func byteOnlyTruncation() TruncationOptions {
+	maxLines := math.MaxInt32
+	return TruncationOptions{MaxLines: &maxLines}
 }
 
 // FormatSize: Formats bytes as a human-readable size.

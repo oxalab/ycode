@@ -109,8 +109,8 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 			"glob":       {typ: propString, description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"},
 			"ignoreCase": {typ: propBoolean, description: "Case-insensitive search (default: false)"},
 			"literal":    {typ: propBoolean, description: "Treat pattern as literal string instead of regex (default: false)"},
-			"context":    {typ: propInteger, description: "Number of lines to show before and after each match (default: 0)"},
-			"limit":      {typ: propInteger, description: "Maximum number of matches to return (default: 100)"},
+			"context":    {typ: propNumber, description: "Number of lines to show before and after each match (default: 0)"},
+			"limit":      {typ: propNumber, description: "Maximum number of matches to return (default: 100)"},
 		}, []string{"pattern"}),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			select{
@@ -308,7 +308,10 @@ func CreateGrepToolDefinition(cwd string, opts *GrepToolOptions) *extensions.Too
 				}
 			}
 			rawOutput := strings.Join(outputLines, "\n")
-			truncation := TruncateHead(rawOutput, TruncationOptions{})
+			// Byte-only truncation (TS maxLines: Number.MAX_SAFE_INTEGER —
+			// grep.ts:334: "There is no line limit here because the match limit
+			// already capped rows").
+			truncation := TruncateHead(rawOutput, byteOnlyTruncation())
 			resultOutput := truncation.Content
 
 			details := &GrepToolDetails{}

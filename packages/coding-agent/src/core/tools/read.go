@@ -245,8 +245,8 @@ func CreateReadToolDefinition(cwd string, opts *ReadToolOptions) *extensions.Too
 		PromptGuidelines: []string{"Use read to examine files instead of cat or sed."},
 		Parameters: objectSchema(map[string]prop{
 			"path":   {typ: propString, description: "Path to the file to read (relative or absolute)"},
-			"offset": {typ: propInteger, description: "Line number to start reading from (1-indexed)"},
-			"limit":  {typ: propInteger, description: "Maximum number of lines to read"},
+			"offset": {typ: propNumber, description: "Line number to start reading from (1-indexed)"},
+			"limit":  {typ: propNumber, description: "Maximum number of lines to read"},
 		}, []string{"path"}),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			return execRead(nil, ctx, args)

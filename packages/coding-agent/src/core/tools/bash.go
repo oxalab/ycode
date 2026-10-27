@@ -219,7 +219,7 @@ func exitCodeFromRaw(raw int) *int {
 
 func (l *localBashOps) Exec(ctx context.Context, command string, cwd string, opts BashExecOptions) (*BashExecResult, error) {
 	if _, err := os.Stat(cwd); err != nil {
-		return nil, fmt.Errorf("working directory does not exist: %s\nCannot execute bash commands", cwd)
+		return nil, fmt.Errorf("Working directory does not exist: %s\nCannot execute bash commands.", cwd)
 	}
 	shell, args, err := getShellConfig(l.shellPath)
 	if err != nil {

@@ -341,3 +341,20 @@ func TestExecParentDeadlineWithoutTimeoutOption(t *testing.T) {
 		t.Errorf("inherited deadline must not report seconds: %q", err.Error())
 	}
 }
+
+// C15: the cwd error must carry the reference's exact casing and trailing
+// period (bash.ts:71: "Working directory does not exist: ...\nCannot execute
+// bash commands.").
+func TestExecCwdErrorWording(t *testing.T) {
+	ops := newExecOps(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := ops.Exec(ctx, "echo hi", filepath.Join(t.TempDir(), "missing"), BashExecOptions{})
+	if err == nil {
+		t.Fatal("expected cwd error")
+	}
+	if !strings.Contains(err.Error(), "Working directory does not exist: ") ||
+		!strings.Contains(err.Error(), "Cannot execute bash commands.") {
+		t.Errorf("cwd error = %q, want reference wording", err.Error())
+	}
+}

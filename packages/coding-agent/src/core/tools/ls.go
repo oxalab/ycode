@@ -88,7 +88,7 @@ func CreateLsToolDefinition(cwd string, opts *LsToolOptions) *extensions.ToolDef
 		PromptSnippet: "List directory contents",
 		Parameters: objectSchema(map[string]prop{
 			"path":  {typ: propString, description: "Directory to list (default: current directory)"},
-			"limit": {typ: propInteger, description: "Maximum number of entries to return (default: 500)"},
+			"limit": {typ: propNumber, description: "Maximum number of entries to return (default: 500)"},
 		}, nil),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			select {
@@ -109,18 +109,20 @@ func CreateLsToolDefinition(cwd string, opts *LsToolOptions) *extensions.ToolDef
 				effectiveLimit = *input.Limit
 			}
 			if !ops.Exists(dirPath) {
-				return nil, fmt.Errorf("path not found: %s", dirPath)
+				return nil, fmt.Errorf("Path not found: %s", dirPath)
 			}
 			stat, err := ops.Stat(dirPath)
 			if err != nil {
-				return nil, fmt.Errorf("cannot stat path: %s", dirPath)
+				// Go-defensive branch with no TS counterpart (TS's access/stat
+				// failures all surface as "Path not found").
+				return nil, fmt.Errorf("Cannot stat path: %s", dirPath)
 			}
 			if !stat.IsDir() {
-				return nil, fmt.Errorf("not a directory: %s", dirPath)
+				return nil, fmt.Errorf("Not a directory: %s", dirPath)
 			}
 			entries, err := ops.Readdir(dirPath)
 			if err != nil {
-				return nil, fmt.Errorf("cannot read directory: %s", err)
+				return nil, fmt.Errorf("Cannot read directory: %s", err)
 			}
 			sort.Slice(entries, func(i, j int) bool {
 				return strings.ToLower(entries[i]) < strings.ToLower(entries[j])
@@ -151,7 +153,8 @@ func CreateLsToolDefinition(cwd string, opts *LsToolOptions) *extensions.ToolDef
 			}
 
 			rawOutput := strings.Join(results, "\n")
-			truncation := TruncateHead(rawOutput, TruncationOptions{})
+			// Byte-only truncation (TS maxLines: Number.MAX_SAFE_INTEGER, ls.ts:186).
+			truncation := TruncateHead(rawOutput, byteOnlyTruncation())
 
 			var notices []string 
 			details := &LsToolDetails{}
