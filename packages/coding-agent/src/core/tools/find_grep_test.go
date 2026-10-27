@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,5 +263,68 @@ func TestEnsureToolDownloadsFd(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "fd") {
 		t.Errorf("unexpected --version output: %q", out)
+	}
+}
+
+// --- C15: find custom-ops notice form, abort wording, byte-only truncation ---
+
+type fakeFindOps struct {
+	entries []string
+}
+
+func (f *fakeFindOps) Exists(string) bool { return true }
+func (f *fakeFindOps) Glob(string, string, []string, int) []string {
+	if len(f.entries) > 0 {
+		return f.entries
+	}
+	return nil
+}
+
+func newFindDef(ops *fakeFindOps) *extensions.ToolDefinition {
+	return CreateFindToolDefinition(".", &FindToolOptions{Operations: ops})
+}
+
+// C15: the custom-operations path emits the SHORT limit notice (find.ts:197);
+// the long "Use limit=N for more" hint belongs to the default fd path only.
+func TestFindCustomOpsLimitNoticeShortForm(t *testing.T) {
+	ops := &fakeFindOps{entries: []string{"a", "b", "c"}}
+	res, err := newFindDef(ops).Execute(context.Background(), json.RawMessage(`{"pattern":"*","limit":3}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := res.(*ToolExecuteResult).Content[0].(*llm.TextContent).Text
+	if !strings.Contains(text, "[3 results limit reached]") {
+		t.Errorf("custom-ops output missing short-form notice: %q", text)
+	}
+	if strings.Contains(text, "Use limit=6") {
+		t.Errorf("custom-ops output must not carry the fd-path hint: %q", text)
+	}
+}
+
+// C15: find truncates bytes only (TS maxLines: Number.MAX_SAFE_INTEGER,
+// find.ts:192) — 3000 tiny lines must not hit the 2000-line default.
+func TestFindCustomOpsByteOnlyTruncation(t *testing.T) {
+	entries := make([]string, 3000)
+	for i := range entries {
+		entries[i] = fmt.Sprintf("f%04d", i)
+	}
+	res, err := newFindDef(&fakeFindOps{entries: entries}).Execute(context.Background(), json.RawMessage(`{"pattern":"*"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := res.(*ToolExecuteResult).Content[0].(*llm.TextContent).Text
+	if strings.Count(text, "\n")+1 < 3000 {
+		t.Errorf("line cap still applied: only %d lines for 3000 tiny results", strings.Count(text, "\n")+1)
+	}
+}
+
+// C15: find's abort surfaces as the reference's "Operation aborted"
+// (find.ts:320), not the raw context error.
+func TestFindAbortWording(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := newFindDef(&fakeFindOps{}).Execute(ctx, json.RawMessage(`{"pattern":"*"}`))
+	if err == nil || err.Error() != "Operation aborted" {
+		t.Errorf("abort error = %v, want Operation aborted", err)
 	}
 }

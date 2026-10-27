@@ -57,12 +57,12 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 		Parameters: objectSchema(map[string]prop{
 			"pattern": {typ: propString, description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'"},
 			"path":    {typ: propString, description: "Directory to search in (default: current directory)"},
-			"limit":   {typ: propInteger, description: "Maximum number of results (default: 1000)"},
+			"limit":   {typ: propNumber, description: "Maximum number of results (default: 1000)"},
 		}, []string{"pattern"}),
 		Execute: func(ctx context.Context, args json.RawMessage) (any, error) {
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("Operation aborted")
 			default:
 			}
 			var input FindToolInput
@@ -80,16 +80,18 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 			}
 			// Use custom operations or default
 			var results []string
+			usedCustomOps := false
 			ignore := []string{"**/node_modules/**", "**/.git/**"}
 
 			if customOps != nil && *customOps != nil {
+				usedCustomOps = true
 				ops := *customOps
 				if !ops.Exists(searchPath) {
 					return nil, fmt.Errorf("path not found: %s", searchPath)
 				}
 				select {
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					return nil, fmt.Errorf("Operation aborted")
 				default:
 				}
 				results = ops.Glob(input.Pattern, searchPath, ignore, effectiveLimit)
@@ -105,7 +107,7 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 
 			select{
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("Operation aborted")
 			default:
 			}
 			
@@ -120,13 +122,20 @@ func CreateFindToolDefinition(cwd string, opts *FindToolOptions) *extensions.Too
 			
 			resultLimitReached := len(relativized) >= effectiveLimit
 			rawOutput := strings.Join(relativized, "\n")
-			truncation :=  TruncateHead(rawOutput, TruncationOptions{})
+			// Byte-only truncation (TS maxLines: Number.MAX_SAFE_INTEGER) — the
+			// result limit already capped rows.
+			truncation := TruncateHead(rawOutput, byteOnlyTruncation())
 			resultOutput := truncation.Content
 
 			details := &FindToolDetails{}
 			var notices []string
 			if resultLimitReached {
-				notices = append(notices, fmt.Sprintf("%d results limit reached. Use limit=%d for more, or refine pattern", effectiveLimit, effectiveLimit*2))
+				if usedCustomOps {
+					// TS custom-operations path emits the short form (find.ts:197).
+					notices = append(notices, fmt.Sprintf("%d results limit reached", effectiveLimit))
+				} else {
+					notices = append(notices, fmt.Sprintf("%d results limit reached. Use limit=%d for more, or refine pattern", effectiveLimit, effectiveLimit*2))
+				}
 				details.ResultLimitReached = effectiveLimit
 			}
 			if truncation.Truncated {

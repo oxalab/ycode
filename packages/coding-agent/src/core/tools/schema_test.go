@@ -105,13 +105,14 @@ func TestBashSchema(t *testing.T) {
 }
 
 // TestReadSchema checks the read schema (and confirms the offset tag fix).
+// C15: numeric props are "number" — the reference uses Type.Integer nowhere.
 func TestReadSchema(t *testing.T) {
 	def := CreateReadToolDefinition("", nil)
 	schema := parseSchema(t, def.Parameters)
 	props, _ := schema["properties"].(map[string]any)
 	requireProp(t, props, "path", "string")
-	requireProp(t, props, "offset", "integer")
-	requireProp(t, props, "limit", "integer")
+	requireProp(t, props, "offset", "number")
+	requireProp(t, props, "limit", "number")
 }
 
 // TestEditSchema verifies the nested edits[] array schema.
@@ -137,7 +138,7 @@ func TestGrepSchema(t *testing.T) {
 	schema := parseSchema(t, def.Parameters)
 	props, _ := schema["properties"].(map[string]any)
 	requireProp(t, props, "pattern", "string")
-	requireProp(t, props, "context", "integer") // was buggy "content"
+	requireProp(t, props, "context", "number") // was buggy "content"; C15: integer→number
 	requireProp(t, props, "ignoreCase", "boolean")
 	requireProp(t, props, "literal", "boolean")
 }
