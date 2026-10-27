@@ -1019,11 +1019,42 @@ missing feature/surface, LOW = cosmetic/wording.
   `extensions/wrapper.go WrapRegisteredTool` is a broken stub
   (`def.Execute(nil, nil)`) with zero callers. Revisit if/when JS extension
   tool parity matters in practice.
-- **C15 LOW** — wording/casing drift (bash cwd/abort/"(no output)", find
-  limit notices, grep "limti"/abort/period, ls error casing); find/ls apply
-  the 2000-line default where TS is byte-only; `integer` vs `number` schema
-  types; file-mutation-queue lock map never cleaned + relative-path key
-  normalization latent.
+- **C15 LOW — ✅ FIXED (2026-10-24, story 25; grab-bag verified item-by-item,
+  3 sub-items were already STALE)** — STALE (parity, no code): bash abort
+  wording ("Command aborted", TestExecAbortWording), "(no output)" placeholder
+  (exact match incl. error-path exemption via formatOutput(snapshot, "")),
+  grep wording trio ("No matches found" no-period / limti / "Operation
+  aborted" — story 4). LIVE, fixed: (1) bash cwd error casing + period →
+  reference-exact `Working directory does not exist: ...\nCannot execute bash
+  commands.` (bash.ts:71). (2) find custom-ops limit notice → SHORT form
+  (`N results limit reached`, find.ts:197) while the fd path keeps the long
+  hint form (find.ts:325) — Go previously emitted the long form everywhere;
+  folded in: find aborts now surface `Operation aborted` (find.ts:320) at all
+  three ctx-check sites instead of raw ctx.Err(). (3) ls error casing →
+  `Path not found` / `Not a directory` / `Cannot read directory` (ls.ts:133/
+  :140/:149); Go's extra `Cannot stat path` branch kept (no TS counterpart,
+  documented Go-defensive). (4) find/ls/grep truncation is now BYTE-ONLY —
+  new `byteOnlyTruncation()` helper (MaxLines=MaxInt32, the TS
+  `maxLines: Number.MAX_SAFE_INTEGER`) replaces the zero-options call that
+  wrongly applied the 2000-line default at find.go/ls.go/grep.go (grep.ts:334:
+  "There is no line limit here because the match limit already capped rows").
+  (5) `integer`→`number` schema types on 6 props (find.limit, grep.context,
+  grep.limit, ls.limit, read.offset, read.limit) — TS has zero Type.Integer
+  in tools; wire-visible like C13. (6) file_mutation_queue.go: entries now
+  REFCOUNTED and deleted when the last user releases (TS deletes post-release
+  :34-38; plain delete would break mutual exclusion mid-handoff — a third
+  arrival could build a second mutex while a waiter is still blocked on the
+  first), and the key is absolutized via filepath.Abs before EvalSymlinks
+  (TS resolve(filePath)); call sites always passed absolute paths, so this
+  hardens the helper. Tests: TestExecCwdErrorWording,
+  TestFindCustomOpsLimitNoticeShortForm, TestFindCustomOpsByteOnlyTruncation,
+  TestFindAbortWording, TestLsErrorCasing, TestLsTruncatesBytesOnly,
+  file_mutation_queue_test.go (cleanup / key-absolutize / 8×25-goroutine
+  mutual exclusion + no leak, `-count=3` stress) — mutation-verified: cwd
+  wording revert, byteOnlyTruncation revert (both truncation tests fail at
+  2002 lines), read offset integer revert (TestReadSchema), queue-cleanup
+  removal (survived/leaked). Schema-test updates: TestReadSchema +
+  TestGrepSchema now pin "number".
 - **OSC 133 note resolved:** no shell-integration markers exist in the bash
   tool on either side — the earlier "OSC 133 partial" note is about message
   rendering in pi (assistant/user-message.ts), nothing to port here.
@@ -1036,7 +1067,11 @@ Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 (tests in `bash_exec_test.go` + wrapper/executor/signal tests), (6) ~~C12~~ ✅
 done 2026-10-24 (test in `ls_test.go`), (7) ~~C13~~ ✅ done 2026-10-24 (test
 in `schema_test.go`), (8) ~~C14~~ ✅ resolved 2026-10-24 (half stale; tests
-in `tool_definition_wrapper_test.go`; C16 logged deferred), then C15;
+in `tool_definition_wrapper_test.go`; C16 logged deferred), (9) ~~C15~~ ✅
+done 2026-10-24 (tests in bash_exec/find_grep/ls/schema/file_mutation_queue
+tests) — **C-group complete; remaining: theme-cache + provider-parity
+verification stories; deferred: C16 (JS runner context, feature family),
+catalog typos, add-second-model TUI gap;**
 remaining unverified: markdown theme cache, provider parity. (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
