@@ -1123,8 +1123,33 @@ width-keyed caches). Two real bugs:
 
 ## ⚠️ Unverified / needs re-audit
 
-- Audit also mentioned without detail: markdown theme cache missing;
-  provider parity unverified. (OSC 133 resolved — see tools re-audit above.)
+- **markdown theme cache — ✅ VERIFIED + FIXED (2026-10-24, story 26)** —
+  the verification found the LINE cache itself is parity (single-slot,
+  keyed (text,width), Go markdown.go:65-96 = reference markdown.ts:87-118;
+  no growth either side; resize re-wraps). The real divergence was theme
+  SWITCHING: TS renders through a live theme Proxy + `ui.invalidate()` walk
+  (interactive-mode.ts:3834-3841) so `/theme` recolors the whole transcript
+  mid-session; Go closures captured the `*Theme` pointer and refreshTheme
+  only touched footer+editor border — the chat kept old colors forever (even
+  invalidating couldn't help: SetTheme pointer-swaps the global). Fixed:
+  adapter closures now resolve the live global via new nil-safe
+  `theme.Current()` (fallback to captured when uninitialized — tests),
+  `refreshTheme` invalidates the chat tree (`o.chat.Invalidate()`; all three
+  selector paths — select/preview/cancel — route through it), and
+  `highlight.go` memoizes coalesced lexers per language (the analogue of the
+  reference's `cachedHighlightThemeFor` memo, theme.ts:952-981; Go's
+  per-token coloring is a map lookup, so the lexer chain is the only
+  repeated build). Tests: `theme_adapter_test.go` —
+  TestThemeSwitchRecolorsMarkdown (switch+invalidate → ANSI differs;
+  mutation-verified: fgStyle reverted to captured pointer → "output
+  identical"), TestThemeSwitchStaleCacheWithoutInvalidate (proves cache
+  staleness observable), TestHighlightLexerMemoReused. Residual (P8
+  deferral, unchanged): tool/bash box chrome still captures th at
+  construction. Environment note: TestExecAbortWording "failures" during
+  this story were a corrupted shell PATH hiding taskkill from the test
+  binary (KillProcessTree shells out to it) — passes with system32 on PATH;
+  not a code issue.
+- provider parity unverified — the last open verification story.
 - Known documented deferrals (do NOT re-audit as divergences): qjs threading
   (tracked in `.versions/upcoming/0.1.1.md`), `tools.ResizeImage` stub, image
   dimension notes, branch/skill/custom message renderers.
