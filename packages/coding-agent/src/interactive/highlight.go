@@ -8,26 +8,56 @@ package interactive
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"ycode/packages/coding-agent/src/core/tui/theme"
 )
 
+// Coalesced-lexer memo keyed by language — the Go analogue of the reference's
+// highlight memo (theme/theme.ts:952-981 cachedHighlightThemeFor): the token
+// colorizer itself is a per-token map lookup (th.Fg), so the lexer/coalesce
+// chain is the only repeated build worth caching. Entries persist for the
+// process lifetime, bounded by the set of languages seen.
+var (
+	lexerMemoMu     sync.Mutex
+	coalescedLexers = make(map[string]chroma.Lexer)
+)
+
+func coalescedLexer(key string, resolve func() chroma.Lexer) chroma.Lexer {
+	lexerMemoMu.Lock()
+	defer lexerMemoMu.Unlock()
+	if l, ok := coalescedLexers[key]; ok {
+		return l
+	}
+	l := resolve()
+	if l != nil {
+		coalescedLexers[key] = l
+	}
+	return l
+}
+
 // highlightCode tokenizes `code` with the chroma lexer for `lang` (or Analyse to
 // guess), then colors each token via the theme's syntax* slots. Returns nil if no
 // lexer / tokenisation fails (the caller falls back to plain code-block styling).
 func highlightCode(code, lang string, th *theme.Theme) []string {
-	lexer := lexers.Get(lang)
+	lexer := coalescedLexer("lang:"+lang, func() chroma.Lexer {
+		if l := lexers.Get(lang); l != nil {
+			return chroma.Coalesce(l)
+		}
+		return nil
+	})
 	if lexer == nil {
+		// Fall back to analysis, not memoized (input-dependent guess).
 		if analysed := lexers.Analyse(code); analysed != nil {
-			lexer = analysed
+			lexer = chroma.Coalesce(analysed)
 		}
 	}
 	if lexer == nil {
 		return nil
 	}
-	return tokenizeLines(chroma.Coalesce(lexer), code, th)
+	return tokenizeLines(lexer, code, th)
 }
 
 // highlightWritePreview highlights file content for the write-tool preview,
@@ -35,11 +65,16 @@ func highlightCode(code, lang string, th *theme.Theme) []string {
 // Returns nil when no lexer matches the path — the caller falls back to plain
 // lines.
 func highlightWritePreview(content, path string, th *theme.Theme) []string {
-	lexer := lexers.Match(path)
+	lexer := coalescedLexer("path:"+path, func() chroma.Lexer {
+		if l := lexers.Match(path); l != nil {
+			return chroma.Coalesce(l)
+		}
+		return nil
+	})
 	if lexer == nil {
 		return nil
 	}
-	return tokenizeLines(chroma.Coalesce(lexer), content, th)
+	return tokenizeLines(lexer, content, th)
 }
 
 // tokenizeLines renders code through the lexer into one ANSI-colored line per

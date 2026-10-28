@@ -34,14 +34,19 @@ func (o *Orchestrator) closeSelector() {
 }
 
 // refreshTheme re-reads the global theme and refreshes the components whose
-// colors are read each render (footer, editor border). Called under the render
-// lock from selector callbacks — direct mutation only (no Mutate/RequestRender).
-// Fully rebuilding cached component themes (editor SelectList, chat Markdown) is
-// a P8 hardening refinement.
+// colors are read each render (footer, editor border) and clears the chat's
+// cached render output so transcript components (markdown cards) re-resolve
+// through the live adapter closures (TS onThemeChange → ui.invalidate()).
+// Called under the render lock from selector callbacks — direct mutation only
+// (no Mutate/RequestRender). Tool/bash box chrome still captures th at
+// construction (P8 hardening refinement, as before).
 func (o *Orchestrator) refreshTheme() {
 	o.th = theme.GetTheme()
 	if o.footer != nil {
 		o.footer.th = o.th
+	}
+	if o.chat != nil {
+		o.chat.Invalidate()
 	}
 	o.updateEditorBorder(o.editor.GetText())
 }
