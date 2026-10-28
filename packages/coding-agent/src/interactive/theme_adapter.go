@@ -14,9 +14,22 @@ import (
 	"ycode/packages/coding-agent/src/core/tui/theme"
 )
 
+// liveTheme resolves the theme a closure should render with at CALL time: the
+// current global when initialized, else the captured fallback (tests). This is
+// the Go translation of the reference's live theme Proxy (theme/theme.ts —
+// closures call theme.fg through the proxy, so setTheme recolors existing
+// components); without it, SetTheme's pointer swap strands every component
+// built before the switch on the old instance.
+func liveTheme(fallback *theme.Theme) *theme.Theme {
+	if cur := theme.Current(); cur != nil {
+		return cur
+	}
+	return fallback
+}
+
 // fgStyle wraps a semantic theme foreground slot as a pi-tui StyleFunc.
 func fgStyle(th *theme.Theme, slot theme.ThemeColor) tui.StyleFunc {
-	return func(s string) string { return th.Fg(slot, s) }
+	return func(s string) string { return liveTheme(th).Fg(slot, s) }
 }
 
 // strikeStyle / underlineStyle: the semantic theme has no dedicated slots for
@@ -65,6 +78,8 @@ func buildSettingsListTheme(th *theme.Theme) components.SettingsListTheme {
 
 // buildMarkdownTheme maps the md* theme slots onto pi-tui's MarkdownTheme, and
 // wires chroma syntax highlighting (HighlightCode → syntax* slots) for code blocks.
+// All closures resolve the live theme at call time (see liveTheme) so a /theme
+// switch recolors existing transcript components.
 func buildMarkdownTheme(th *theme.Theme) components.MarkdownTheme {
 	return components.MarkdownTheme{
 		Heading:         fgStyle(th, "mdHeading"),
@@ -77,10 +92,10 @@ func buildMarkdownTheme(th *theme.Theme) components.MarkdownTheme {
 		QuoteBorder:     fgStyle(th, "mdQuoteBorder"),
 		HR:              fgStyle(th, "mdHr"),
 		ListBullet:      fgStyle(th, "mdListBullet"),
-		Bold:            func(s string) string { return th.Bold(s) },
-		Italic:          func(s string) string { return th.Italic(s) },
+		Bold:            func(s string) string { return liveTheme(th).Bold(s) },
+		Italic:          func(s string) string { return liveTheme(th).Italic(s) },
 		Strikethrough:   strikeStyle,
 		Underline:       underlineStyle,
-		HighlightCode:   func(code, lang string) []string { return highlightCode(code, lang, th) },
+		HighlightCode:   func(code, lang string) []string { return highlightCode(code, lang, liveTheme(th)) },
 	}
 }

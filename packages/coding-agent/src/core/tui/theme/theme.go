@@ -229,6 +229,15 @@ func GetTheme() *Theme {
 	return globalTheme
 }
 
+// Current returns the current global theme, or nil when the global has not
+// been initialized — the nil-safe variant for adapters that carry a fallback
+// (GetTheme panics instead).
+func Current() *Theme {
+	globalThemeMu.RLock()
+	defer globalThemeMu.RUnlock()
+	return globalTheme
+}
+
 // InitTheme initializes the global theme by name. Falls back to "dark" on error.
 func InitTheme(themeName string) {
 	if themeName == "" {
