@@ -741,7 +741,7 @@ func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEven
 					}
 
 					toolCallBlock.PartialArgs += argsDelta
-					toolCallBlock.Arguments = parseStreamingJson(toolCallBlock.Arguments, toolCallBlock.PartialArgs)
+					toolCallBlock.Arguments = parseStreamingJson(toolCallBlock.PartialArgs)
 
 					// Add new block if needed
 					if _, ok := toolBlocksByKey[key]; !ok {

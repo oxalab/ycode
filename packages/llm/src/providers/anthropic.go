@@ -198,7 +198,8 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 							case "input_json_delta":
 								if partialJson, ok := delta["partial_json"].(string); ok {
 									if toolCall, ok := output.Content[idx].(*src.ToolCall); ok {
-										toolCall.Arguments = parseStreamingJson(toolCall.Arguments, partialJson)
+										toolCall.PartialArgs += partialJson
+										toolCall.Arguments = parseStreamingJson(toolCall.PartialArgs)
 										ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: ptr(idx), Delta: partialJson, Partial: output}
 									}
 								}

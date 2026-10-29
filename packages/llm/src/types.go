@@ -214,6 +214,9 @@ type ToolCall struct {
 	Name 		string 			`json:"name"`
 	Arguments 	map[string]any 	`json:"arguments"`
 	ThoughtSignature 	string 	`json:"thoughSignature,omitempty"` // Google Specific: Opaque signature for reusing thought context
+	// Streaming scratch: accumulated raw argument string while the call is
+	// still in flight. Never serialized (the reference deletes it at finalize).
+	PartialArgs string `json:"-"`
 }
 
 func (ToolCall) IsContentBlock() {}
@@ -257,6 +260,9 @@ type AssistantMessage struct {
 	Provider 	Provider 		`json:"provider"`
 	Model 		string 			`json:"model"`
 	ResponseID 	string 			`json:"responseId,omitempty"`
+	// Model actually served the request, when the stream reports one and it
+	// differs from the requested id.
+	ResponseModel string 		`json:"responseModel,omitempty"`
 	Usage 		Usage 			`json:"usage"`
 	StopReason 	StopReason 		`json:"stopReason"`
 	ErrorMessage string 		`json:"errorMessage,string"`
