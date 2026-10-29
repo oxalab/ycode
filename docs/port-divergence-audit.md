@@ -1069,10 +1069,12 @@ done 2026-10-24 (test in `ls_test.go`), (7) ~~C13~~ ✅ done 2026-10-24 (test
 in `schema_test.go`), (8) ~~C14~~ ✅ resolved 2026-10-24 (half stale; tests
 in `tool_definition_wrapper_test.go`; C16 logged deferred), (9) ~~C15~~ ✅
 done 2026-10-24 (tests in bash_exec/find_grep/ls/schema/file_mutation_queue
-tests) — **C-group complete; remaining: theme-cache + provider-parity
-verification stories; deferred: C16 (JS runner context, feature family),
-catalog typos, add-second-model TUI gap;**
-remaining unverified: markdown theme cache, provider parity. (B1's masked-path
+tests) — **C-group complete**, (10) ~~theme-cache verification~~ ✅ done
+2026-10-29 (recolor fix + line-cache parity verdict), (11) ~~provider-parity
+verification~~ ✅ done 2026-10-29 (story 27: first fix wave landed; follow-up
+queue = P9-P16 provider backlog above; deferred: C16 (JS runner context,
+feature family), catalog typos, add-second-model TUI gap). **All audit items
+verified — no remaining unverified entries.** (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
 
@@ -1149,7 +1151,94 @@ width-keyed caches). Two real bugs:
   this story were a corrupted shell PATH hiding taskkill from the test
   binary (KillProcessTree shells out to it) — passes with system32 on PATH;
   not a code issue.
-- provider parity unverified — the last open verification story.
+- **provider parity — VERIFIED 2026-10-29 (story 27), first fix wave landed.**
+  All 9 API families compared TS↔Go (17 file pairs, ~18k lines: 5 read-only
+  comparison agents + inline core-pair read; load-bearing claims hand-verified
+  in the source). Your daily path (openai-completions) is sound at its core;
+  severe findings concentrate in unregistered providers. Fixed now (tests in
+  `openai_completions_parity_test.go` + `json_parse_partial_test.go`):
+  - *Cross-cutting*: `parseStreamingJson` could not parse partial JSON at all
+    (marshal-concat + strict unmarshal) — tool-call args stayed `{}` live
+    during streaming, and anthropic never accumulated `input_json_delta`
+    (final args broken there). Ported the reference's partial-json fallback
+    (prefix-closed scanner, `utils/json-parse.go`); the provider seam
+    delegates and guarantees non-nil. Mutation-verified (stub → both
+    progressive tests fail). Stress run (-count=3) caught a real TrimSpace
+    bug in the scanner (trailing space mid-string eaten) — fixed.
+  - *openai-completions (C17)*: `prompt_cache_hit_tokens` + `choice.usage`
+    usage fallbacks; image-only tool-result placeholder; `lastRole` tracking
+    (bridge regression under requiresAssistantAfterToolResult); compat matrix
+    completed (moonshot/together/cloudflare-ai-gateway + `together` thinking
+    format); anthropic-over-openrouter cache-control is provider-keyed, not
+    URL-keyed; missing API key fails fast instead of sending `Bearer `;
+    `responseModel` captured from chunk.model; `PI_CACHE_RETENTION=long`
+    honored.
+  **Backlog (P-group), by family — none reachable from custom models.json
+  openai-completions setups except where noted:**
+  - *P9 openai-responses (registered)*: SSE parsed with raw `json.Decoder`
+    over the `alt=sse` body → every stream fails (openai-responses.go:287);
+    no HTTP status check → API errors look like empty successes;
+    `Usage.TotalTokens` = input only, cost/service-tier pricing dropped;
+    reasoning summary events unhandled (no live thinking); codex targets the
+    wrong host/auth/shape (chatgpt.com backend-api, no account-id/originator/
+    beta headers, no retry/backoff, no WS transport); azure posts the legacy
+    chat path (`api-version=2024-02-15-preview`, no `/responses`) and parses
+    chat-completions chunks; mid-stream errors mislabeled `aborted`; `msg_`
+    fallback ids built with `string(rune(idx))` (control char at idx≥10).
+  - *P10 anthropic (registered)*: no status check → non-2xx = empty success;
+    `CalculateCost` never called (cost always 0); redacted-thinking loses its
+    flag → replay as thinking text 400s next turn; adaptive `effort` nested
+    inside `thinking` instead of top-level `output_config`; `sensitive`/
+    unknown stop reasons → stop; tool schemas serialize `properties`/
+    `required` as null; interleaved-thinking beta off unless explicitly set +
+    fine-grained gate dead (`contextTools` type assert); simple wrapper drops
+    effort/budget/maxTokens adjust; no signal/timeout/retry.
+  - *P11 google family (unregistered)*: request nests all config under
+    `"config"` (SDK-only wrapper, not a REST field); SSE fed to
+    `json.Decoder`; `/models` path missing when BaseURL set (404); no status
+    check; `skip_thought_signature_validator` injected into Gemini-3 replays
+    (the vendored TS test forbids it); vertex base URL has a literal space +
+    wrong host/path/version; reads `GOOGLE_API_KEY` instead of
+    `GEMINI_API_KEY`; `toolConfig` sent without tools; cost never computed.
+  - *P12 amazon-bedrock (unregistered)*: parser reads JSON over eventstream
+    framing; request shape wrong (system as string, no `{json:}` schema
+    wrapper, `toolUse` without toolUseId, toolResult string with hardcoded
+    status); modelId dots→slashes corrupts ARNs/inference profiles; no
+    thinking/cachePoint/additionalModelRequestFields; usage reads
+    invoke-model-era keys; SigV4 omits the `host` header → every signature
+    invalid; stop-reason mapping wrong.
+  - *P13 mistral (unregistered)*: SSE via `json.Decoder`; camelCase keys
+    against the snake_case wire (usage + tool calls silently lost); request
+    payload camelCase ignored by the API; URL lacks `/chat/completions`;
+    tool args don't accumulate; `toolcall_end` order randomized (Go map
+    iteration); no abort support/status error formatting.
+  - *P14 registry/wiring*: only 3 of 9 APIs registered — mistral, google,
+    vertex, bedrock, azure, codex implemented but unreachable
+    (register_builtins.go:91); api mismatch panics (api-registry.go:45,54 —
+    TS throws catchable); catalog `Api` ids diverge (`"anthropic"`,
+    `"google-shared"`, `"bedrock-converese-stream"`, `"mistral-chat"`);
+    registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
+    OnPayload/OnResponse; oauth registry never populated + 2 providers don't
+    satisfy the interface (custom providers unregistrable); the env-key
+    resolver providers actually call (`helpers.go getEnvApiKey`) is a
+    divergent rewrite — `GOOGLE_API_KEY` vs reference `GEMINI_API_KEY`, no
+    `ANTHROPIC_OAUTH_TOKEN` precedence, `%s_API_KEY` default for unknown
+    providers — while the faithful port (`env_api_keys.go`) is only used by
+    auth_storage; `IsCloudflareProvider` misses `cloudflare-ai-gateway` and
+    matches the singular `"cloudflare-worker-ai"` spelling;
+    `ResolveCloudflareBaseUrl` panics instead of erroring.
+  - *P15 structural*: `Model` has no `ThinkingLevelMap` (effort mapping and
+    the openai-style off-value / openrouter `off !== null` guard can't mirror
+    TS); no retries/timeout/signal on any provider (TS OpenAI SDK defaults:
+    2 retries, 10-min timeout); overflow detection missing the Together
+    pattern + Xiaomi silent-overflow case; `ValidateToolArguments` is a no-op
+    (TS runs TypeBox Convert+Check); faux provider never emits `*_start`
+    events and ignores options/abort/usage.
+  - *P16 gemini-cli*: Go-only extra (no TS counterpart in this reference
+    snapshot; Cloud Code Assist provider, likely from an older upstream pi) —
+    unregistered; retry always hits `endpoints[0]` ignoring the failover
+    index; dead baseURL trim. No parity verdict possible; keep-or-delete is a
+    product call, not an audit item.
 - Known documented deferrals (do NOT re-audit as divergences): qjs threading
   (tracked in `.versions/upcoming/0.1.1.md`), `tools.ResizeImage` stub, image
   dimension notes, branch/skill/custom message renderers.
