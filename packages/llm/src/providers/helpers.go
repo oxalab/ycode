@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	src "ycode/packages/llm/src"
+	"ycode/packages/llm/src/utils"
 )
 
 // =============================================================================
@@ -55,33 +56,16 @@ func getEnvApiKey(provider string) string {
 
 // parseStreamingJson parses streaming JSON by merging partial JSON with existing data
 // Handles incremental tool argument streaming from providers like Anthropic and OpenAI
-func parseStreamingJson(existing map[string]interface{}, partialJson string) map[string]interface{} {
-	if existing == nil {
-		existing = make(map[string]interface{})
+//
+// Matches the reference parseStreamingJson: strict parse with repair first,
+// then a partial-json prefix parse, so in-flight arguments grow progressively.
+// Always returns a non-nil map (empty args marshal as {} not null). Callers
+// must pass the ACCUMULATED argument string (not the latest delta).
+func parseStreamingJson(partialJson string) map[string]interface{} {
+	if m := utils.ParseStreamingJSON[map[string]interface{}](partialJson); m != nil {
+		return m
 	}
-
-	// Try to parse the accumulated JSON
-	accumulated := partialJson
-	if len(existing) > 0 {
-		// Merge existing with new partial
-		existingJson, _ := json.Marshal(existing)
-		accumulated = string(existingJson) + partialJson
-	}
-
-	// Attempt to parse
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(accumulated), &result); err == nil {
-		return result
-	}
-
-	// If parsing failed, try to handle partial object
-	if strings.HasPrefix(strings.TrimSpace(partialJson), "{") {
-		// For partial JSON, keep existing and return it
-		// The partial will be accumulated on next call
-		return existing
-	}
-
-	return existing
+	return map[string]interface{}{}
 }
 
 // parseStreamingJsonBytes parses JSON from byte data (alternative signature)

@@ -381,7 +381,8 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 			if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 				if toolCall, ok := output.Content[*currentBlockIndex].(*src.ToolCall); ok {
 					delta, _ := event["delta"].(string)
-					toolCall.Arguments = parseStreamingJson(toolCall.Arguments, delta)
+					toolCall.PartialArgs += delta
+					toolCall.Arguments = parseStreamingJson(toolCall.PartialArgs)
 					ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: currentBlockIndex, Delta: delta, Partial: output}
 				}
 			}
@@ -390,7 +391,7 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 			if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 				if toolCall, ok := output.Content[*currentBlockIndex].(*src.ToolCall); ok {
 					if arguments, ok := event["arguments"].(string); ok {
-						toolCall.Arguments = parseStreamingJson(toolCall.Arguments, arguments)
+						toolCall.Arguments = parseStreamingJson(arguments)
 					}
 				}
 			}
@@ -448,7 +449,7 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 							toolCall.ID = callId + "|" + id
 							toolCall.Name = name
 							if arguments, ok := item["arguments"].(string); ok {
-								toolCall.Arguments = parseStreamingJson(map[string]interface{}{}, arguments)
+								toolCall.Arguments = parseStreamingJson(arguments)
 							}
 							ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: currentBlockIndex, ToolCall: toolCall, Partial: output}
 						}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	src "ycode/packages/llm/src"
@@ -167,6 +168,9 @@ func doOpenAICompletionsRequest(client *http.Client, model src.Model[src.Api], c
 	if apiKey == "" {
 		apiKey = getEnvApiKey("openai")
 	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.")
+	}
 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
@@ -218,6 +222,8 @@ func buildOpenAICompletionsParams(model src.Model[src.Api], context src.ChatCont
 	cacheRetention := src.CacheRetentionShort
 	if options != nil && options.CacheRetention != nil {
 		cacheRetention = *options.CacheRetention
+	} else if os.Getenv("PI_CACHE_RETENTION") == "long" {
+		cacheRetention = src.CacheRetentionLong
 	}
 
 	messages := convertOpenAICompletionsMessages(model, context, compat)
@@ -301,6 +307,14 @@ func buildOpenAICompletionsParams(model src.Model[src.Api], context src.ChatCont
 			params["chat_template_kwargs"] = map[string]interface{}{
 				"enable_thinking":   effortActive,
 				"preserve_thinking": true,
+			}
+		case "together":
+			params["reasoning"] = map[string]interface{}{
+				"enabled": effortActive,
+			}
+			if effortActive && compat.SupportsReasoningEffort {
+				effort := mapOpenAIReasoningEffort(*options.ReasoningEffort, compat.ReasoningEffortMap)
+				params["reasoning_effort"] = effort
 			}
 		case "deepseek":
 			thinkingType := "disabled"
@@ -442,6 +456,7 @@ func convertOpenAICompletionsMessages(model src.Model[src.Api], context src.Chat
 					"role":    "user",
 					"content": utils.SanitizeSurrogates(um.Content[0].(*src.TextContent).Text),
 				})
+				lastRole = string(role)
 			} else {
 				var content []map[string]interface{}
 				for _, item := range um.Content {
@@ -465,6 +480,7 @@ func convertOpenAICompletionsMessages(model src.Model[src.Api], context src.Chat
 						"role":    "user",
 						"content": content,
 					})
+					lastRole = string(role)
 				}
 			}
 		} else if role == src.RoleAssistant {
@@ -581,6 +597,7 @@ func convertOpenAICompletionsMessages(model src.Model[src.Api], context src.Chat
 			}
 
 			params = append(params, assistantMsg)
+			lastRole = string(role)
 		} else if role == src.RoleTool {
 			// Collect consecutive tool results
 			var toolResults []map[string]interface{}
@@ -601,6 +618,11 @@ func convertOpenAICompletionsMessages(model src.Model[src.Api], context src.Chat
 					}
 				}
 				textResult := strings.Join(textParts, "\n")
+				// The reference always sends text content: an image-only (or
+				// otherwise empty) result carries a placeholder.
+				if textResult == "" {
+					textResult = "(see attached image)"
+				}
 
 				toolResultMsg := map[string]interface{}{
 					"role":         "tool",
@@ -834,10 +856,17 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 		if id, ok := chunk["id"].(string); ok && output.ResponseID == "" {
 			output.ResponseID = id
 		}
+		// Routed providers may serve a different model than requested; the
+		// reference records the served model as responseModel.
+		if rm, ok := chunk["model"].(string); ok && rm != "" && rm != model.ID && output.ResponseModel == "" {
+			output.ResponseModel = rm
+		}
 
 		// Parse usage
+		chunkHasUsage := false
 		if usage, ok := chunk["usage"].(map[string]interface{}); ok {
 			output.Usage = parseOpenAICompletionsUsage(usage, model)
+			chunkHasUsage = true
 		}
 
 		// Get choice
@@ -849,6 +878,14 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 		choice, ok := choices[0].(map[string]interface{})
 		if !ok {
 			continue
+		}
+
+		// Fallback: some providers (e.g. Moonshot) report usage on the choice
+		// instead of the chunk.
+		if !chunkHasUsage {
+			if choiceUsage, ok := choice["usage"].(map[string]interface{}); ok {
+				output.Usage = parseOpenAICompletionsUsage(choiceUsage, model)
+			}
 		}
 
 		// Parse finish reason
@@ -994,7 +1031,7 @@ func processOpenAICompletionsStream(body io.ReadCloser, ch chan<- src.AssistantM
 							// Standard OpenAI: arguments is a JSON string, streamed incrementally.
 							delta = args
 							currentBlock.PartialArgs += args
-							currentBlock.Arguments = parseStreamingJson(currentBlock.Arguments, currentBlock.PartialArgs)
+							currentBlock.Arguments = parseStreamingJson(currentBlock.PartialArgs)
 						} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
 							// Some providers (e.g. z.ai/GLM) send arguments as a direct
 							// object instead of a JSON string. Use it directly.
@@ -1065,7 +1102,7 @@ func finishCurrentOpenAICompletionsBlock(ch chan<- src.AssistantMessageEvent, ou
 		if len(output.Content) > 0 {
 			idx := len(output.Content) - 1
 			if tc, ok := output.Content[idx].(*src.ToolCall); ok {
-				tc.Arguments = parseStreamingJson(tc.Arguments, block.PartialArgs)
+				tc.Arguments = parseStreamingJson(block.PartialArgs)
 				if tc.ID == "" && block.ID != "" {
 					tc.ID = block.ID
 				}
@@ -1095,6 +1132,14 @@ func parseOpenAICompletionsUsage(usage map[string]interface{}, model src.Model[s
 	if details, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
 		cachedTokens = getFloatValue(details, "cached_tokens")
 		cacheWriteTokens = getFloatValue(details, "cache_write_tokens")
+		// DeepSeek-style providers report cache hits as prompt_cache_hit_tokens
+		// at the top level. The reference's ?? only falls back when the key is
+		// absent — a present 0 wins.
+		if _, present := details["cached_tokens"]; !present {
+			cachedTokens = getFloatValue(usage, "prompt_cache_hit_tokens")
+		}
+	} else {
+		cachedTokens = getFloatValue(usage, "prompt_cache_hit_tokens")
 	}
 
 	// Normalize cache read tokens
@@ -1145,31 +1190,51 @@ func detectOpenAICompat(model src.Model[src.Api]) *OpenAICompletionsCompat {
 	baseURL := model.BaseURL
 
 	isZai := provider == "zai" || strings.Contains(baseURL, "api.z.ai")
+	isTogether := provider == "together" || strings.Contains(baseURL, "api.together.ai") || strings.Contains(baseURL, "api.together.xyz")
+	isMoonshot := provider == "moonshotai" || provider == "moonshotai-cn" || strings.Contains(baseURL, "api.moonshot.")
 	isCloudflareWorkersAI := IsCloudflareProvider(string(provider))
+	isCloudflareAiGateway := provider == "cloudflare-ai-gateway" || strings.Contains(baseURL, "gateway.ai.cloudflare.com")
+
 	isNonStandard := provider == "cerebras" || strings.Contains(baseURL, "cerebras.ai") ||
 		provider == "xai" || strings.Contains(baseURL, "api.x.ai") ||
+		isTogether ||
 		strings.Contains(baseURL, "chutes.ai") || strings.Contains(baseURL, "deepseek.com") ||
-		isZai || provider == "opencode" || strings.Contains(baseURL, "opencode.ai") ||
-		isCloudflareWorkersAI
+		isZai || isMoonshot ||
+		provider == "opencode" || strings.Contains(baseURL, "opencode.ai") ||
+		isCloudflareWorkersAI || isCloudflareAiGateway
 
-	if isNonStandard {
-		compat.SupportsStore = false
-		compat.SupportsDeveloperRole = false
-	}
-
-	if strings.Contains(baseURL, "chutes.ai") {
-		compat.MaxTokensField = "max_tokens"
-	}
+	useMaxTokens := strings.Contains(baseURL, "chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether
 
 	isGrok := provider == "xai" || strings.Contains(baseURL, "api.x.ai")
-	if isGrok {
-		compat.SupportsReasoningEffort = false
+	isDeepSeek := provider == "deepseek" || strings.Contains(baseURL, "deepseek.com")
+
+	thinkingFormat := "openai"
+	if isDeepSeek {
+		thinkingFormat = "deepseek"
+	} else if isZai {
+		thinkingFormat = "zai"
+	} else if isTogether {
+		thinkingFormat = "together"
+	} else if provider == "openrouter" || strings.Contains(baseURL, "openrouter.ai") {
+		thinkingFormat = "openrouter"
 	}
 
-	isDeepSeek := provider == "deepseek" || strings.Contains(baseURL, "deepseek.com")
+	compat.SupportsStore = !isNonStandard
+	compat.SupportsDeveloperRole = !isNonStandard
+	compat.SupportsReasoningEffort = !isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway
+	compat.MaxTokensField = "max_completion_tokens"
+	if useMaxTokens {
+		compat.MaxTokensField = "max_tokens"
+	}
+	compat.RequiresReasoningContentOnAssistant = isDeepSeek
+	compat.ThinkingFormat = thinkingFormat
+	compat.SupportsStrictMode = !isMoonshot && !isTogether && !isCloudflareAiGateway
+	if provider == "openrouter" && strings.HasPrefix(model.ID, "anthropic/") {
+		compat.CacheControlFormat = "anthropic"
+	}
+	compat.SupportsLongCacheRetention = !(isTogether || isCloudflareWorkersAI || isCloudflareAiGateway)
+
 	if isDeepSeek {
-		compat.ThinkingFormat = "deepseek"
-		compat.RequiresReasoningContentOnAssistant = true
 		compat.ReasoningEffortMap = map[string]string{
 			"minimal": "high",
 			"low":     "high",
@@ -1177,22 +1242,6 @@ func detectOpenAICompat(model src.Model[src.Api]) *OpenAICompletionsCompat {
 			"high":    "high",
 			"xhigh":   "max",
 		}
-	}
-
-	if isZai {
-		compat.SupportsReasoningEffort = false
-		compat.ThinkingFormat = "zai"
-	}
-
-	if strings.Contains(baseURL, "openrouter.ai") {
-		compat.ThinkingFormat = "openrouter"
-		if strings.HasPrefix(model.ID, "anthropic/") {
-			compat.CacheControlFormat = "anthropic"
-		}
-	}
-
-	if provider == "openrouter" || strings.Contains(baseURL, "openrouter.ai") {
-		compat.ThinkingFormat = "openrouter"
 	}
 
 	return compat
