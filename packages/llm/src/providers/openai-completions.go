@@ -140,9 +140,13 @@ func doOpenAICompletionsRequest(client *http.Client, model src.Model[src.Api], c
 		baseURL = model.BaseURL
 	}
 
-	// Handle Cloudflare Workers AI special case
+	// Handle Cloudflare Workers AI / AI Gateway special case
 	if IsCloudflareProvider(string(model.Provider)) {
-		baseURL = ResolveCloudflareBaseUrl(model)
+		resolved, err := ResolveCloudflareBaseUrl(model)
+		if err != nil {
+			return nil, err
+		}
+		baseURL = resolved
 	}
 
 	body, err := json.Marshal(params)
