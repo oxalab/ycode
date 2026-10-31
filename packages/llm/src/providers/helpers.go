@@ -2,8 +2,6 @@ package providers
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
@@ -27,27 +25,12 @@ func okAssistant(msg src.Message) *src.AssistantMessage {
 // API key helpers
 // =============================================================================
 
-// getEnvApiKey retrieves API key from environment variable
+// getEnvApiKey retrieves API key from environment variable.
+// Delegates to the faithful env-api-keys.ts port (env_api_keys.go) — the old
+// rewrite guessed %s_API_KEY for unknown providers and missed
+// ANTHROPIC_OAUTH_TOKEN precedence and GEMINI_API_KEY.
 func getEnvApiKey(provider string) string {
-	envKey := ""
-	switch strings.ToLower(provider) {
-	case "anthropic", "claude":
-		envKey = "ANTHROPIC_API_KEY"
-	case "openai":
-		envKey = "OPENAI_API_KEY"
-	case "google", "gemini":
-		envKey = "GOOGLE_API_KEY"
-	case "mistral":
-		envKey = "MISTRAL_API_KEY"
-	case "azure":
-		envKey = "AZURE_API_KEY"
-	case "cohere":
-		envKey = "COHERE_API_KEY"
-	default:
-		// Try provider name directly
-		envKey = fmt.Sprintf("%s_API_KEY", strings.ToUpper(provider))
-	}
-	return os.Getenv(envKey)
+	return src.GetEnvApiKey(provider)
 }
 
 // =============================================================================

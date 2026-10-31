@@ -46,7 +46,7 @@ const (
 	Opencode           Provider = "opencode"
 	OpencodeGo         Provider = "opencode-go"
 	KimiCoding         Provider = "kimi-coding"
-	CloudflareWorkerAI Provider = "cloudflare-worker-ai"
+	CloudflareWorkerAI Provider = "cloudflare-workers-ai" // TS spelling; gateway handled by string match in cloudflare.go
 )
 
 type ThinkingLevel string

@@ -107,16 +107,28 @@ func GetApiKeyEnvVars(provider string) []string {
 		return []string{"MINIMAX_API_KEY"}
 	case "minimax-cn":
 		return []string{"MINIMAX_CN_API_KEY"}
+	case "moonshotai", "moonshotai-cn":
+		return []string{"MOONSHOT_API_KEY"}
 	case "huggingface":
 		return []string{"HF_TOKEN"}
 	case "fireworks":
 		return []string{"FIREWORKS_API_KEY"}
+	case "together":
+		return []string{"TOGETHER_API_KEY"}
 	case "opencode", "opencode-go":
 		return []string{"OPENCODE_API_KEY"}
 	case "kimi-coding":
 		return []string{"KIMI_API_KEY"}
-	case "cloudflare-workers-ai":
+	case "cloudflare-workers-ai", "cloudflare-ai-gateway":
 		return []string{"CLOUDFLARE_API_KEY"}
+	case "xiaomi":
+		return []string{"XIAOMI_API_KEY"}
+	case "xiaomi-token-plan-cn":
+		return []string{"XIAOMI_TOKEN_PLAN_CN_API_KEY"}
+	case "xiaomi-token-plan-ams":
+		return []string{"XIAOMI_TOKEN_PLAN_AMS_API_KEY"}
+	case "xiaomi-token-plan-sgp":
+		return []string{"XIAOMI_TOKEN_PLAN_SGP_API_KEY"}
 	default:
 		return nil
 	}

@@ -39,10 +39,28 @@ var (
 	registryMu         sync.RWMutex
 )
 
+// mismatchedApiEvent builds the in-band error event the reference's wrapStream
+// throws with (api-registry.ts:48). Go has no synchronous throw across a
+// channel boundary, so the error arrives as a normal error event.
+func mismatchedApiEvent(modelApi, expected Api) AssistantMessageEvent {
+	return AssistantMessageEvent{
+		Type:  "error",
+		Reason: StopReasonError,
+		Error: &AssistantMessage{
+			Role:         RoleAssistant,
+			StopReason:   StopReasonError,
+			ErrorMessage: fmt.Sprintf("Mismatched api: %s expected %s", modelApi, expected),
+		},
+	}
+}
+
 func wrapStream(api Api, stream ApiStreamFunction) ApiStreamFunction {
 	return func(ctx context.Context, model Model[Api], chatCtx ChatContext, options *StreamOptions) <-chan AssistantMessageEvent {
 		if model.Api != api {
-			panic(fmt.Sprintf("mismatched api: %s expected %s", model.Api, api))
+			ch := make(chan AssistantMessageEvent, 1)
+			ch <- mismatchedApiEvent(model.Api, api)
+			close(ch)
+			return ch
 		}
 		return stream(ctx, model, chatCtx, options)
 	}
@@ -51,7 +69,10 @@ func wrapStream(api Api, stream ApiStreamFunction) ApiStreamFunction {
 func wrapStreamSimple(api Api, streamSimple ApiStreamSimpleFunction) ApiStreamSimpleFunction {
 	return func(ctx context.Context, model Model[Api], chatCtx ChatContext, options *SimpleStreamOptions) <-chan AssistantMessageEvent {
 		if model.Api != api {
-			panic(fmt.Sprintf("mismatched api: %s expected %s", model.Api, api))
+			ch := make(chan AssistantMessageEvent, 1)
+			ch <- mismatchedApiEvent(model.Api, api)
+			close(ch)
+			return ch
 		}
 		return streamSimple(ctx, model, chatCtx, options)
 	}
