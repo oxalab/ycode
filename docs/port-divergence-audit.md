@@ -1214,19 +1214,25 @@ width-keyed caches). Two real bugs:
     iteration); no abort support/status error formatting.
   - *P14 registry/wiring*: only 3 of 9 APIs registered — mistral, google,
     vertex, bedrock, azure, codex implemented but unreachable
-    (register_builtins.go:91); api mismatch panics (api-registry.go:45,54 —
-    TS throws catchable); catalog `Api` ids diverge (`"anthropic"`,
-    `"google-shared"`, `"bedrock-converese-stream"`, `"mistral-chat"`);
+    (register_builtins.go:91) [DEFERRED until P11-P13 fix the families —
+    registering broken providers is strictly worse]; ~~api mismatch panics~~
+    ✅ FIXED 2026-10-31 (story 28: wrapStream/wrapStreamSimple emit an
+    in-band error event, TS wording "Mismatched api: … expected …", the
+    sdk.go no-provider pattern; mutation-verified); catalog `Api` ids
+    diverge (`"anthropic"`, `"google-shared"`,
+    `"bedrock-converese-stream"`, `"mistral-chat"`) [catalog-typos story];
     registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
-    OnPayload/OnResponse; oauth registry never populated + 2 providers don't
-    satisfy the interface (custom providers unregistrable); the env-key
-    resolver providers actually call (`helpers.go getEnvApiKey`) is a
-    divergent rewrite — `GOOGLE_API_KEY` vs reference `GEMINI_API_KEY`, no
-    `ANTHROPIC_OAUTH_TOKEN` precedence, `%s_API_KEY` default for unknown
-    providers — while the faithful port (`env_api_keys.go`) is only used by
-    auth_storage; `IsCloudflareProvider` misses `cloudflare-ai-gateway` and
-    matches the singular `"cloudflare-worker-ai"` spelling;
-    `ResolveCloudflareBaseUrl` panics instead of erroring.
+    OnPayload/OnResponse [deferred to P15 — providers don't honor those
+    fields yet]; oauth registry never populated + 2 providers don't satisfy
+    the interface (custom providers unregistrable) [open]; ~~env-key
+    resolver divergence~~ ✅ FIXED 2026-10-31 (story 28:
+    helpers.go getEnvApiKey now delegates to the faithful
+    env_api_keys.go port; GetApiKeyEnvVars gained the 8 missing entries —
+    moonshotai/-cn, together, cloudflare-ai-gateway, xiaomi trio);
+    ~~cloudflare provider matching~~ ✅ FIXED 2026-10-31 (story 28:
+    constant respelled `cloudflare-workers-ai`, `cloudflare-ai-gateway`
+    matched, `ResolveCloudflareBaseUrl` returns an error instead of
+    panicking — tests in `registry_wiring_test.go`).
   - *P15 structural*: `Model` has no `ThinkingLevelMap` (effort mapping and
     the openai-style off-value / openrouter `off !== null` guard can't mirror
     TS); no retries/timeout/signal on any provider (TS OpenAI SDK defaults:
