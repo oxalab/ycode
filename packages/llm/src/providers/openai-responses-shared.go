@@ -2,6 +2,7 @@ package providers
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	src "ycode/packages/llm/src"
@@ -204,7 +205,7 @@ func convertResponsesMessages(
 					}
 				case *src.TextContent:
 					parsedSig := parseTextSignature(b.TextSignature)
-					msgId := "msg_" + string(rune(msgIndex))
+					msgId := fmt.Sprintf("msg_%d", msgIndex)
 					if parsedSig != nil && parsedSig.ID != "" {
 						msgId = parsedSig.ID
 						if len(msgId) > 64 {

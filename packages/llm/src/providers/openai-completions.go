@@ -1154,13 +1154,20 @@ func parseOpenAICompletionsUsage(usage map[string]interface{}, model src.Model[s
 
 	input := max(0.0, promptTokens-cacheReadTokens-cacheWriteTokens)
 
+	// The reference calls calculateCost after building the usage (parseChunkUsage).
+	cost := usageCostFromModelCost(src.CalculateCost(&model, &src.Usage{
+		Input: int(input), Output: int(completionTokens),
+		CacheRead: int(cacheReadTokens), CacheWrite: int(cacheWriteTokens),
+		TotalTokens: int(input + completionTokens + cacheReadTokens + cacheWriteTokens),
+	}))
+
 	return src.Usage{
 		Input:       int(input),
 		Output:      int(completionTokens),
 		CacheRead:   int(cacheReadTokens),
 		CacheWrite:  int(cacheWriteTokens),
 		TotalTokens: int(input + completionTokens + cacheReadTokens + cacheWriteTokens),
-		Cost:        src.UsageCost{},
+		Cost:        cost,
 	}
 }
 
