@@ -33,6 +33,12 @@ func getEnvApiKey(provider string) string {
 	return src.GetEnvApiKey(provider)
 }
 
+// usageCostFromModelCost converts CalculateCost's ModelCost into the
+// UsageCost embedded in messages (identical fields, distinct types).
+func usageCostFromModelCost(mc src.ModelCost) src.UsageCost {
+	return src.UsageCost{Input: mc.Input, Output: mc.Output, CacheRead: mc.CacheRead, CacheWrite: mc.CacheWrite, Total: mc.Total}
+}
+
 // =============================================================================
 // Streaming JSON parsing
 // =============================================================================

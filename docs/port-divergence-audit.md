@@ -1175,16 +1175,30 @@ width-keyed caches). Two real bugs:
     honored.
   **Backlog (P-group), by family — none reachable from custom models.json
   openai-completions setups except where noted:**
-  - *P9 openai-responses (registered)*: SSE parsed with raw `json.Decoder`
-    over the `alt=sse` body → every stream fails (openai-responses.go:287);
-    no HTTP status check → API errors look like empty successes;
-    `Usage.TotalTokens` = input only, cost/service-tier pricing dropped;
-    reasoning summary events unhandled (no live thinking); codex targets the
-    wrong host/auth/shape (chatgpt.com backend-api, no account-id/originator/
-    beta headers, no retry/backoff, no WS transport); azure posts the legacy
-    chat path (`api-version=2024-02-15-preview`, no `/responses`) and parses
-    chat-completions chunks; mid-stream errors mislabeled `aborted`; `msg_`
-    fallback ids built with `string(rune(idx))` (control char at idx≥10).
+  - *P9 openai-responses (registered)* — **CORE PAIR FIXED 2026-11-01
+    (story 29**, tests in `openai_responses_parity_test.go`, 2 mutations
+    detected: stubbed SSE scanner, removed status check**)**: ~~SSE parsed
+    with raw `json.Decoder` → every stream fails~~ (bufio `data:` scanner);
+    ~~no HTTP status check → empty successes~~ (non-2xx → "Responses API
+    error (N): body"); ~~`Usage.TotalTokens` = input only, cost dropped~~
+    (total_tokens + `src.CalculateCost` + flex/priority service-tier
+    pricing); ~~reasoning summary events unhandled~~ (all 4 delta events +
+    part.added gating + part.done "\n\n" separator + authoritative
+    summary||content||current finalize); ~~`[]map[string]interface{}` type
+    asserts never match JSON data~~ (dead thinking/text finalization →
+    correct `[]interface{}` handling); ~~`msg_` fallback id =
+    `string(rune(idx))`~~ (`fmt.Sprintf("msg_%d")`); ~~empty phase always
+    serialized~~; refusal deltas gated on content_part.added + refusal text
+    in final content; ~~mid-stream errors mislabeled `aborted`~~;
+    `response.failed` fallback wording; missing API key fails fast;
+    cloudflare gateway branch (cf-aig-authorization + URL resolution);
+    compat flags (`sendSessionIdHeader`/`supportsLongCacheRetention`) wired;
+    args-done catch-up delta + added-event `arguments` seeding; "Error
+    Code" capitalization. Also: completions `parseOpenAICompletionsUsage`
+    now calls `src.CalculateCost` (previously zero callers repo-wide —
+    TS parseChunkUsage parity). **P9b REMAINS: openai-codex-responses
+    (wrong host/auth/retry/WS — full re-port) + azure-openai-responses
+    (legacy chat path, chat-completions chunk parser).**
   - *P10 anthropic (registered)*: no status check → non-2xx = empty success;
     `CalculateCost` never called (cost always 0); redacted-thinking loses its
     flag → replay as thinking text 400s next turn; adaptive `effort` nested

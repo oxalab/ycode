@@ -1,11 +1,13 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	src "ycode/packages/llm/src"
@@ -86,9 +88,10 @@ func StreamOpenAIResponses(model src.Model[src.Api], context src.ChatContext, op
 
 			ch <- src.AssistantMessageEvent{Type: "start", Partial: output}
 
-			// Process streaming response
+			// Process streaming response. No signal support yet (P15), so a
+			// mid-stream read error is an error, never an abort.
 			if err := processOpenAIResponsesStream(resp.Body, ch, output, model, options); err != nil {
-				handleOpenAIResponsesError(ch, output, err, true)
+				handleOpenAIResponsesError(ch, output, err, false)
 				return
 			}
 
@@ -114,6 +117,16 @@ func doOpenAIResponsesRequest(client *http.Client, model src.Model[src.Api], con
 		baseURL = model.BaseURL
 	}
 
+	// Cloudflare Workers AI / AI Gateway: resolve {VAR} placeholders.
+	isCloudflare := IsCloudflareProvider(string(model.Provider))
+	if isCloudflare {
+		resolved, err := ResolveCloudflareBaseUrl(model)
+		if err != nil {
+			return nil, err
+		}
+		baseURL = resolved
+	}
+
 	body, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
@@ -137,8 +150,17 @@ func doOpenAIResponsesRequest(client *http.Client, model src.Model[src.Api], con
 	if apiKey == "" {
 		apiKey = getEnvApiKey("openai")
 	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.")
+	}
 
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	// The AI Gateway authenticates via cf-aig-authorization; the plain
+	// Authorization header is dropped (reference createClient defaultHeaders).
+	if isCloudflare {
+		req.Header.Set("cf-aig-authorization", "Bearer "+apiKey)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	// Add model headers
 	for k, v := range model.Headers {
@@ -154,16 +176,14 @@ func doOpenAIResponsesRequest(client *http.Client, model src.Model[src.Api], con
 		}
 	}
 
-	// Add session ID headers
+	// Add session ID headers. session_id honors the compat flag; the
+	// x-client-request-id correlation header is unconditional.
 	if options != nil && options.SessionID != "" {
-		retention := src.CacheRetentionShort
-		if options.CacheRetention != nil {
-			retention = *options.CacheRetention
-		}
-		if retention != src.CacheRetentionNone {
+		sendSessionID, _ := getResponsesCompat(model)
+		if sendSessionID {
 			req.Header.Set("session_id", options.SessionID)
-			req.Header.Set("x-client-request-id", options.SessionID)
 		}
+		req.Header.Set("x-client-request-id", options.SessionID)
 	}
 
 	// Add options headers
@@ -173,7 +193,33 @@ func doOpenAIResponsesRequest(client *http.Client, model src.Model[src.Api], con
 		}
 	}
 
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	// The reference SDK throws a structured APIError on non-2xx; without this
+	// check an error body parses as junk and yields an empty "success".
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("Responses API error (%d): %s", resp.StatusCode, strings.TrimSpace(string(excerpt)))
+	}
+	return resp, nil
+}
+
+// getResponsesCompat resolves per-model compat over the reference defaults
+// (both flags default true).
+func getResponsesCompat(model src.Model[src.Api]) (sendSessionID, supportsLongRetention bool) {
+	sendSessionID, supportsLongRetention = true, true
+	if mc := model.Compat.OpenAIResponses; mc != nil {
+		if mc.SendSessionIDHeader != nil {
+			sendSessionID = *mc.SendSessionIDHeader
+		}
+		if mc.SupportsLongCacheRetention != nil {
+			supportsLongRetention = *mc.SupportsLongCacheRetention
+		}
+	}
+	return
 }
 
 func handleOpenAIResponsesError(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, err error, isAborted bool) {
@@ -266,13 +312,17 @@ func buildOpenAIResponsesParams(model src.Model[src.Api], context src.ChatContex
 	cacheRetention := src.CacheRetentionShort
 	if options != nil && options.CacheRetention != nil {
 		cacheRetention = *options.CacheRetention
+	} else if os.Getenv("PI_CACHE_RETENTION") == "long" {
+		cacheRetention = src.CacheRetentionLong
 	}
 	if cacheRetention != src.CacheRetentionNone {
 		if options != nil && options.SessionID != "" {
 			params["prompt_cache_key"] = options.SessionID
 		}
 		if cacheRetention == src.CacheRetentionLong {
-			params["prompt_cache_retention"] = "24h"
+			if _, longRetention := getResponsesCompat(model); longRetention {
+				params["prompt_cache_retention"] = "24h"
+			}
 		}
 	}
 
@@ -284,15 +334,31 @@ func buildOpenAIResponsesParams(model src.Model[src.Api], context src.ChatContex
 // =============================================================================
 
 func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api], options *OpenAIResponsesOptions) error {
-	decoder := json.NewDecoder(body)
-
-	var currentItem interface{}
+	var currentItem map[string]interface{}
 	var currentBlockIndex *int
+	// The reference gates text/refusal deltas on the last content part added
+	// (content_part.added bookkeeping) and reasoning summary deltas on a
+	// summary part having started.
+	lastContentPartType := ""
+	summaryPartStarted := false
 
-	for decoder.More() {
+	// The response is an SSE stream (`stream: true`): `event:`/`data:` lines.
+	// A raw json.Decoder can't read SSE — parse it line by line, mirroring
+	// the completions processor.
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
 		var event map[string]interface{}
-		if err := decoder.Decode(&event); err != nil {
-			return err
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue // skip a malformed line rather than aborting the stream
 		}
 
 		eventType, _ := event["type"].(string)
@@ -309,6 +375,8 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 			if item, ok := event["item"].(map[string]interface{}); ok {
 				itemType, _ := item["type"].(string)
 				currentItem = item
+				lastContentPartType = ""
+				summaryPartStarted = false
 
 				switch itemType {
 				case "reasoning":
@@ -329,12 +397,14 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 					callId, _ := item["call_id"].(string)
 					id, _ := item["id"].(string)
 					name, _ := item["name"].(string)
+					args, _ := item["arguments"].(string)
 
 					newBlock := &src.ToolCall{
-						Type:      "toolCall",
-						ID:        callId + "|" + id,
-						Name:      name,
-						Arguments: map[string]interface{}{},
+						Type:        "toolCall",
+						ID:          callId + "|" + id,
+						Name:        name,
+						Arguments:   map[string]interface{}{},
+						PartialArgs: args, // some providers send full args on the added event
 					}
 					output.Content = append(output.Content, newBlock)
 					idx := len(output.Content) - 1
@@ -343,24 +413,54 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 				}
 			}
 
+		case "response.reasoning_summary_part.added":
+			if currentItem != nil && currentItem["type"] == "reasoning" {
+				summaryPartStarted = true
+			}
+
+		case "response.reasoning_summary_text.delta":
+			if currentItem != nil && currentItem["type"] == "reasoning" && summaryPartStarted &&
+				currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
+				if tc, ok := output.Content[*currentBlockIndex].(*src.ThinkingContent); ok {
+					delta, _ := event["delta"].(string)
+					tc.Thinking += delta
+					ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: currentBlockIndex, Delta: delta, Partial: output}
+				}
+			}
+
+		case "response.reasoning_summary_part.done":
+			if currentItem != nil && currentItem["type"] == "reasoning" && summaryPartStarted &&
+				currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
+				if tc, ok := output.Content[*currentBlockIndex].(*src.ThinkingContent); ok {
+					tc.Thinking += "\n\n"
+					ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: currentBlockIndex, Delta: "\n\n", Partial: output}
+				}
+			}
+
+		case "response.reasoning_text.delta":
+			if currentItem != nil && currentItem["type"] == "reasoning" &&
+				currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
+				if tc, ok := output.Content[*currentBlockIndex].(*src.ThinkingContent); ok {
+					delta, _ := event["delta"].(string)
+					tc.Thinking += delta
+					ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: currentBlockIndex, Delta: delta, Partial: output}
+				}
+			}
+
 		case "response.content_part.added":
-			if currentItem != nil {
-				if item, ok := currentItem.(map[string]interface{}); ok {
-					if item["type"] == "message" {
-						if content, ok := item["content"].([]map[string]interface{}); !ok {
-							item["content"] = []map[string]interface{}{}
-						} else if part, ok := event["part"].(map[string]interface{}); ok {
-							partType, _ := part["type"].(string)
-							if partType == "output_text" || partType == "refusal" {
-								item["content"] = append(content, part)
-							}
-						}
+			if currentItem != nil && currentItem["type"] == "message" {
+				if part, ok := event["part"].(map[string]interface{}); ok {
+					partType, _ := part["type"].(string)
+					// Only output_text and refusal parts carry streamable text.
+					if partType == "output_text" || partType == "refusal" {
+						lastContentPartType = partType
 					}
 				}
 			}
 
 		case "response.output_text.delta":
-			if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
+			if lastContentPartType == "output_text" &&
+				currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 				if tc, ok := output.Content[*currentBlockIndex].(*src.TextContent); ok {
 					delta, _ := event["delta"].(string)
 					tc.Text += delta
@@ -369,7 +469,8 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 			}
 
 		case "response.refusal.delta":
-			if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
+			if lastContentPartType == "refusal" &&
+				currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 				if tc, ok := output.Content[*currentBlockIndex].(*src.TextContent); ok {
 					delta, _ := event["delta"].(string)
 					tc.Text += delta
@@ -391,7 +492,15 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 			if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 				if toolCall, ok := output.Content[*currentBlockIndex].(*src.ToolCall); ok {
 					if arguments, ok := event["arguments"].(string); ok {
+						previous := toolCall.PartialArgs
+						toolCall.PartialArgs = arguments
 						toolCall.Arguments = parseStreamingJson(arguments)
+						// Catch-up delta for the suffix beyond the last partial.
+						if strings.HasPrefix(arguments, previous) {
+							if extra := arguments[len(previous):]; extra != "" {
+								ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: currentBlockIndex, Delta: extra, Partial: output}
+							}
+						}
 					}
 				}
 			}
@@ -404,14 +513,14 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 				case "reasoning":
 					if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 						if tc, ok := output.Content[*currentBlockIndex].(*src.ThinkingContent); ok {
-							if summary, ok := item["summary"].([]map[string]interface{}); ok {
-								var parts []string
-								for _, s := range summary {
-									if text, ok := s["text"].(string); ok {
-										parts = append(parts, text)
-									}
-								}
-								tc.Thinking = strings.Join(parts, "\n\n")
+							summaryText := joinTextParts(item["summary"])
+							contentText := joinTextParts(item["content"])
+							// The authoritative item content wins; the live
+							// accumulation is only the fallback.
+							if summaryText != "" {
+								tc.Thinking = summaryText
+							} else if contentText != "" {
+								tc.Thinking = contentText
 							}
 							sig, _ := json.Marshal(item)
 							tc.ThinkingSignature = string(sig)
@@ -423,18 +532,33 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 				case "message":
 					if currentBlockIndex != nil && *currentBlockIndex < len(output.Content) {
 						if tc, ok := output.Content[*currentBlockIndex].(*src.TextContent); ok {
-							if content, ok := item["content"].([]map[string]interface{}); ok {
+							// Authoritative final content: output_text parts
+							// contribute text, refusal parts their refusal.
+							if content, ok := item["content"].([]interface{}); ok {
 								var textParts []string
 								for _, c := range content {
-									if t, ok := c["text"].(string); ok {
-										textParts = append(textParts, t)
+									if cm, ok := c.(map[string]interface{}); ok {
+										switch cm["type"] {
+										case "output_text":
+											if t, ok := cm["text"].(string); ok {
+												textParts = append(textParts, t)
+											}
+										case "refusal":
+											if r, ok := cm["refusal"].(string); ok {
+												textParts = append(textParts, r)
+											}
+										}
 									}
 								}
 								tc.Text = strings.Join(textParts, "")
 							}
 							id, _ := item["id"].(string)
-							phase, _ := item["phase"].(string)
-							tc.TextSignature = encodeTextSignatureV1(id, &phase)
+							// Phase is omitted when absent (TS `item.phase ?? undefined`).
+							if phase, ok := item["phase"].(string); ok && phase != "" {
+								tc.TextSignature = encodeTextSignatureV1(id, &phase)
+							} else {
+								tc.TextSignature = encodeTextSignatureV1(id, nil)
+							}
 							ch <- src.AssistantMessageEvent{Type: "text_end", ContentIndex: currentBlockIndex, Content: tc.Text, Partial: output}
 						}
 					}
@@ -448,9 +572,16 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 							name, _ := item["name"].(string)
 							toolCall.ID = callId + "|" + id
 							toolCall.Name = name
-							if arguments, ok := item["arguments"].(string); ok {
-								toolCall.Arguments = parseStreamingJson(arguments)
+							args := ""
+							if toolCall.PartialArgs != "" {
+								args = toolCall.PartialArgs
+							} else if a, ok := item["arguments"].(string); ok {
+								args = a
 							}
+							if args == "" {
+								args = "{}"
+							}
+							toolCall.Arguments = parseStreamingJson(args)
 							ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: currentBlockIndex, ToolCall: toolCall, Partial: output}
 						}
 					}
@@ -473,23 +604,17 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 
 					inputTokens, _ := usage["input_tokens"].(float64)
 					outputTokens, _ := usage["output_tokens"].(float64)
+					totalTokens, _ := usage["total_tokens"].(float64)
 
 					output.Usage.Input = int(inputTokens - cachedTokens)
 					output.Usage.Output = int(outputTokens)
 					output.Usage.CacheRead = int(cachedTokens)
-					output.Usage.TotalTokens = int(inputTokens)
-
-// 					// Apply service tier pricing if applicable
-// 					if options != nil && options.ApplyServiceTierPricing != nil {
-// 						serviceTier := options.ServiceTier
-// 						if options.ResolveServiceTier != nil {
-// 							if responseTier, ok := response["service_tier"].(string); ok {
-// 								serviceTier = options.ResolveServiceTier(&responseTier, serviceTier)
-// 							}
-// 						}
-// 						options.ApplyServiceTierPricing(&output.Usage, serviceTier)
-// 					}
+					output.Usage.CacheWrite = 0
+					output.Usage.TotalTokens = int(totalTokens)
 				}
+				// Reference calls calculateCost after usage mapping.
+				output.Usage.Cost = usageCostFromModelCost(src.CalculateCost(&model, &output.Usage))
+				applyOpenAIResponsesServiceTierPricing(&output.Usage.Cost, response, options, model.ID)
 
 				status, _ := response["status"].(string)
 				output.StopReason = mapOpenAIResponsesStopReason(status)
@@ -501,13 +626,13 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 		case "error":
 			code, _ := event["code"].(string)
 			message, _ := event["message"].(string)
-			return fmt.Errorf("error Code %s: %s", code, message)
+			return fmt.Errorf("Error Code %s: %s", code, message)
 
 		case "response.failed":
 			if response, ok := event["response"].(map[string]interface{}); ok {
-				if err, ok := response["error"].(map[string]interface{}); ok {
-					code, _ := err["code"].(string)
-					msg, _ := err["message"].(string)
+				if errObj, ok := response["error"].(map[string]interface{}); ok {
+					code, _ := errObj["code"].(string)
+					msg, _ := errObj["message"].(string)
 					return fmt.Errorf("%s: %s", code, msg)
 				}
 				if details, ok := response["incomplete_details"].(map[string]interface{}); ok {
@@ -516,10 +641,64 @@ func processOpenAIResponsesStream(body io.ReadCloser, ch chan<- src.AssistantMes
 					}
 				}
 			}
+			return fmt.Errorf("Unknown error (no error details in response)")
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 
 	return nil
+}
+
+// joinTextParts joins the "text" field of each entry of a decoded array of
+// parts with "\n\n" (the reference's `item.summary?.map(s => s.text).join("\n\n")`).
+func joinTextParts(v interface{}) string {
+	parts, ok := v.([]interface{})
+	if !ok {
+		return ""
+	}
+	var out []string
+	for _, p := range parts {
+		if pm, ok := p.(map[string]interface{}); ok {
+			if t, ok := pm["text"].(string); ok {
+				out = append(out, t)
+			}
+		}
+	}
+	return strings.Join(out, "\n\n")
+}
+
+// applyOpenAIResponsesServiceTierPricing mirrors applyServiceTierPricing:
+// flex ×0.5, priority ×2 (×2.5 for gpt-5.5), resolved from the response tier
+// falling back to the requested tier.
+func applyOpenAIResponsesServiceTierPricing(cost *src.UsageCost, response map[string]interface{}, options *OpenAIResponsesOptions, modelID string) {
+	tier := ""
+	if options != nil && options.ServiceTier != nil {
+		tier = *options.ServiceTier
+	}
+	if rt, ok := response["service_tier"].(string); ok && rt != "" {
+		tier = rt
+	}
+	multiplier := 1.0
+	switch tier {
+	case "flex":
+		multiplier = 0.5
+	case "priority":
+		if modelID == "gpt-5.5" {
+			multiplier = 2.5
+		} else {
+			multiplier = 2
+		}
+	}
+	if multiplier == 1 {
+		return
+	}
+	cost.Input *= multiplier
+	cost.Output *= multiplier
+	cost.CacheRead *= multiplier
+	cost.CacheWrite *= multiplier
+	cost.Total = cost.Input + cost.Output + cost.CacheRead + cost.CacheWrite
 }
 
 // =============================================================================
