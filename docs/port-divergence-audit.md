@@ -1199,14 +1199,38 @@ width-keyed caches). Two real bugs:
     TS parseChunkUsage parity). **P9b REMAINS: openai-codex-responses
     (wrong host/auth/retry/WS — full re-port) + azure-openai-responses
     (legacy chat path, chat-completions chunk parser).**
-  - *P10 anthropic (registered)*: no status check → non-2xx = empty success;
-    `CalculateCost` never called (cost always 0); redacted-thinking loses its
-    flag → replay as thinking text 400s next turn; adaptive `effort` nested
-    inside `thinking` instead of top-level `output_config`; `sensitive`/
-    unknown stop reasons → stop; tool schemas serialize `properties`/
-    `required` as null; interleaved-thinking beta off unless explicitly set +
-    fine-grained gate dead (`contextTools` type assert); simple wrapper drops
-    effort/budget/maxTokens adjust; no signal/timeout/retry.
+  - *P10 anthropic (registered)* — **CORE FIXED 2026-11-04 (story 30**,
+    tests in `anthropic_parity_test.go`; 3 mutations detected: disabled
+    status check, dropped Redacted flag, stop-map reverted**)**:
+    ~~no status check → non-2xx = empty success~~ ("Anthropic API error
+    (N): body"); ~~CalculateCost never called~~ (message_start +
+    message_delta); ~~redacted-thinking loses its flag → replay 400~~
+    (flag set on stream; redacted check now BEFORE empty-thinking skip);
+    ~~adaptive `effort` nested inside `thinking`~~ (top-level
+    `output_config` sibling); ~~`sensitive`/unknown stop reasons → stop~~
+    (error + "Unhandled stop reason: N"); ~~tool schemas serialize null~~
+    (`properties ?? {}` / `required ?? []`); ~~interleaved beta off unless
+    explicit~~ (defaults true) + ~~fine-grained gate dead~~ (real
+    tools-count + compat gate, dead `contextTools` deleted) +
+    `eager_input_streaming` flag + fireworks/cloudflare-gateway compat
+    (4-flag `getAnthropicCompat`; `sendSessionAffinityHeaders`/
+    `supportsCacheControlOnTools` added to the Go compat struct);
+    ~~simple wrapper drops effort/budget~~ (adaptive → Effort; budget
+    models → AdjustMaxTokensForThinking); SSE integrity (`event: error`
+    raw wording, JSON-parse diagnostics, "Anthropic stream ended before
+    message_stop", scanner errors classified error not aborted);
+    OAuth (`claude-code-20250219,oauth-2025-04-20` betas, CC system
+    identity with cache_control on BOTH blocks, env-key-based detection,
+    `fromClaudeCodeName` streamed-name mapping); ~~toClaudeCodeName sent
+    lowercased names~~ (canonical-casing lookup table);
+    github-copilot + cloudflare-ai-gateway request branches;
+    toolChoice string → `{type: s}`; whitespace-only text filtered
+    (TrimSpace, 4 sites); content blocks = TS convertContentBlocks
+    (text-only join, image-only placeholder); PI_CACHE_RETENTION;
+    maxTokens default = model.MaxTokens/3 verbatim (4096 fallback
+    removed — uncataloged models now fail loudly at the API, TS parity);
+    `toolcall_end` re-parses accumulated args. **Remains (P15):
+    signal/timeout/retry, ThinkingLevelMap-based effort mapping.**
   - *P11 google family (unregistered)*: request nests all config under
     `"config"` (SDK-only wrapper, not a REST field); SSE fed to
     `json.Decoder`; `/models` path missing when BaseURL set (404); no status
