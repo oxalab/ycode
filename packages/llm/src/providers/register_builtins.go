@@ -135,6 +135,7 @@ func convertStreamOptionsToAnthropic(options *src.StreamOptions) *AnthropicOptio
 		MaxTokens:         options.MaxTokens,
 		Temperature:       options.Temperature,
 		Headers:           options.Headers,
+		SessionID:         options.SessionID,
 		CacheRetention:    &cacheRetention,
 	}
 }

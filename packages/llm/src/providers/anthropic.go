@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	src "ycode/packages/llm/src"
@@ -41,6 +43,7 @@ type AnthropicOptions struct {
 	ToolChoice            interface{}
 	Headers               map[string]string
 	Metadata              map[string]string
+	SessionID             string
 	CacheRetention        *src.CacheRetention
 	// Callbacks
 	OnPayload func(params interface{}, model src.Model[src.Api]) (interface{}, error)
@@ -72,9 +75,19 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 			var err error
 			var resp *http.Response
 
+			// Resolve the API key once (options → env) so OAuth detection is
+			// consistent between params and headers (reference does the same).
+			apiKey := ""
+			if options != nil && options.APIKey != "" {
+				apiKey = options.APIKey
+			} else {
+				apiKey = getEnvApiKey(string(model.Provider))
+			}
+			isOAuth := isOAuthToken(apiKey)
+
 			// Build and send request
 			client := &http.Client{}
-			params := buildAnthropicParams(model, context, options)
+			params := buildAnthropicParams(model, context, isOAuth, options)
 
 			if options != nil && options.OnPayload != nil {
 				if nextParams, e := options.OnPayload(params, model); e == nil && nextParams != nil {
@@ -82,7 +95,7 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 				}
 			}
 
-			resp, err = doAnthropicRequest(client, model, params, options)
+			resp, err = doAnthropicRequest(client, model, context, params, apiKey, options)
 			if err != nil {
 				handleAnthropicError(ch, output, err, false)
 				return
@@ -98,173 +111,8 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 			ch <- src.AssistantMessageEvent{Type: "start", Partial: output}
 
 			// Process streaming response
-			blockIndexMap := make(map[int]int)
-
-			scanner := bufio.NewScanner(resp.Body)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if !strings.HasPrefix(line, "data: ") {
-					continue
-				}
-				data := strings.TrimPrefix(line, "data: ")
-
-				if data == "[DONE]" {
-					break
-				}
-
-				var event map[string]interface{}
-				if err := json.Unmarshal([]byte(data), &event); err != nil {
-					continue
-				}
-
-				eventType, _ := event["type"].(string)
-
-				switch eventType {
-				case "message_start":
-					if msg, ok := event["message"].(map[string]interface{}); ok {
-						output.ResponseID, _ = msg["id"].(string)
-						if usage, ok := msg["usage"].(map[string]interface{}); ok {
-							if inputTokens, ok := usage["input_tokens"].(float64); ok {
-								output.Usage.Input = int(inputTokens)
-							}
-							if outputTokens, ok := usage["output_tokens"].(float64); ok {
-								output.Usage.Output = int(outputTokens)
-							}
-							if cacheRead, ok := usage["cache_read_input_tokens"].(float64); ok {
-								output.Usage.CacheRead = int(cacheRead)
-							}
-							if cacheWrite, ok := usage["cache_creation_input_tokens"].(float64); ok {
-								output.Usage.CacheWrite = int(cacheWrite)
-							}
-							output.Usage.TotalTokens = output.Usage.Input + output.Usage.Output + output.Usage.CacheRead + output.Usage.CacheWrite
-						}
-					}
-
-				case "content_block_start":
-					index := int(event["index"].(float64))
-					if block, ok := event["content_block"].(map[string]interface{}); ok {
-						blockType, _ := block["type"].(string)
-						switch blockType {
-						case "text":
-							newBlock := &src.TextContent{Type: "text", Text: ""}
-							output.Content = append(output.Content, newBlock)
-							blockIndexMap[index] = len(output.Content) - 1
-							ch <- src.AssistantMessageEvent{Type: "text_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
-						case "thinking":
-							newBlock := &src.ThinkingContent{Type: "thinking", Thinking: ""}
-							output.Content = append(output.Content, newBlock)
-							blockIndexMap[index] = len(output.Content) - 1
-							ch <- src.AssistantMessageEvent{Type: "thinking_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
-						case "redacted_thinking":
-							signature, _ := block["data"].(string)
-							newBlock := &src.ThinkingContent{Type: "thinking", Thinking: "[Reasoning redacted]", ThinkingSignature: signature}
-							output.Content = append(output.Content, newBlock)
-							blockIndexMap[index] = len(output.Content) - 1
-							ch <- src.AssistantMessageEvent{Type: "thinking_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
-						case "tool_use":
-							id, _ := block["id"].(string)
-							name, _ := block["name"].(string)
-							input := map[string]interface{}{}
-							if i, ok := block["input"].(map[string]interface{}); ok {
-								input = i
-							}
-							newBlock := &src.ToolCall{Type: "toolCall", ID: id, Name: name, Arguments: input}
-							output.Content = append(output.Content, newBlock)
-							blockIndexMap[index] = len(output.Content) - 1
-							ch <- src.AssistantMessageEvent{Type: "toolcall_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
-						}
-					}
-
-				case "content_block_delta":
-					index := int(event["index"].(float64))
-					if idx, ok := blockIndexMap[index]; ok && idx < len(output.Content) {
-						if delta, ok := event["delta"].(map[string]interface{}); ok {
-							deltaType, _ := delta["type"].(string)
-							switch deltaType {
-							case "text_delta":
-								if text, ok := delta["text"].(string); ok {
-									if tc, ok := output.Content[idx].(*src.TextContent); ok {
-										tc.Text += text
-										ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: ptr(idx), Delta: text, Partial: output}
-									}
-								}
-							case "thinking_delta":
-								if thinking, ok := delta["thinking"].(string); ok {
-									if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
-										tc.Thinking += thinking
-										ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: ptr(idx), Delta: thinking, Partial: output}
-									}
-								}
-							case "input_json_delta":
-								if partialJson, ok := delta["partial_json"].(string); ok {
-									if toolCall, ok := output.Content[idx].(*src.ToolCall); ok {
-										toolCall.PartialArgs += partialJson
-										toolCall.Arguments = parseStreamingJson(toolCall.PartialArgs)
-										ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: ptr(idx), Delta: partialJson, Partial: output}
-									}
-								}
-							case "signature_delta":
-								if signature, ok := delta["signature"].(string); ok {
-									if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
-										tc.ThinkingSignature += signature
-									}
-								}
-							}
-						}
-					}
-
-				case "content_block_stop":
-					index := int(event["index"].(float64))
-					if idx, ok := blockIndexMap[index]; ok && idx < len(output.Content) {
-						delete(blockIndexMap, index)
-						switch block := output.Content[idx].(type) {
-						case *src.TextContent:
-							ch <- src.AssistantMessageEvent{Type: "text_end", ContentIndex: ptr(idx), Content: block.Text, Partial: output}
-						case *src.ThinkingContent:
-							ch <- src.AssistantMessageEvent{Type: "thinking_end", ContentIndex: ptr(idx), Content: block.Thinking, Partial: output}
-						case *src.ToolCall:
-							ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: ptr(idx), ToolCall: block, Partial: output}
-						}
-					}
-
-				case "message_delta":
-					if delta, ok := event["delta"].(map[string]interface{}); ok {
-						if stopReason, ok := delta["stop_reason"].(string); ok {
-							output.StopReason = mapAnthropicStopReason(stopReason)
-						}
-					}
-					if usage, ok := event["usage"].(map[string]interface{}); ok {
-						if inputTokens, ok := usage["input_tokens"].(float64); ok {
-							output.Usage.Input = int(inputTokens)
-						}
-						if outputTokens, ok := usage["output_tokens"].(float64); ok {
-							output.Usage.Output = int(outputTokens)
-						}
-						if cacheRead, ok := usage["cache_read_input_tokens"].(float64); ok {
-							output.Usage.CacheRead = int(cacheRead)
-						}
-						if cacheWrite, ok := usage["cache_creation_input_tokens"].(float64); ok {
-							output.Usage.CacheWrite = int(cacheWrite)
-						}
-						output.Usage.TotalTokens = output.Usage.Input + output.Usage.Output + output.Usage.CacheRead + output.Usage.CacheWrite
-					}
-
-				case "error":
-					if errorMsg, ok := event["error"].(map[string]interface{}); ok {
-						msg, _ := errorMsg["message"].(string)
-						handleAnthropicError(ch, output, fmt.Errorf("anthropic error: %s", msg), false)
-						return
-					}
-				}
-			}
-
-			if err := scanner.Err(); err != nil {
-				handleAnthropicError(ch, output, err, true)
-				return
-			}
-
-			if output.StopReason == src.StopReasonError || output.StopReason == src.StopReasonAborted {
-				handleAnthropicError(ch, output, fmt.Errorf("stream ended with error: %s", output.StopReason), false)
+			if err := consumeAnthropicStream(resp.Body, ch, output, model, context, isOAuth, options); err != nil {
+				handleAnthropicError(ch, output, err, false)
 				return
 			}
 
@@ -275,14 +123,261 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 	}
 }
 
+// consumeAnthropicStream parses the Anthropic SSE stream into output/content
+// events. Returned errors surface as error events (never aborts — abort
+// requires a signal, which is P15).
+func consumeAnthropicStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api], context src.ChatContext, isOAuth bool, options *AnthropicOptions) error {
+	blockIndexMap := make(map[int]int)
+	sawMessageStart := false
+	sawMessageStop := false
+	sseEvent := "" // SSE `event:` field, tracked for error events
+
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if strings.HasPrefix(line, "event:") {
+			sseEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
+
+		if data == "[DONE]" {
+			break
+		}
+
+		// SSE-level error events fail the stream with the raw payload
+		// (reference iterateAnthropicEvents throws on sse.event === "error").
+		if sseEvent == "error" {
+			return fmt.Errorf("%s", data)
+		}
+
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			return fmt.Errorf("Could not parse Anthropic SSE event %s: %v; data=%s", sseEvent, err, data)
+		}
+
+		eventType, _ := event["type"].(string)
+
+		switch eventType {
+		case "message_start":
+			sawMessageStart = true
+			if msg, ok := event["message"].(map[string]interface{}); ok {
+				output.ResponseID, _ = msg["id"].(string)
+				if usage, ok := msg["usage"].(map[string]interface{}); ok {
+					if inputTokens, ok := usage["input_tokens"].(float64); ok {
+						output.Usage.Input = int(inputTokens)
+					}
+					if outputTokens, ok := usage["output_tokens"].(float64); ok {
+						output.Usage.Output = int(outputTokens)
+					}
+					if cacheRead, ok := usage["cache_read_input_tokens"].(float64); ok {
+						output.Usage.CacheRead = int(cacheRead)
+					}
+					if cacheWrite, ok := usage["cache_creation_input_tokens"].(float64); ok {
+						output.Usage.CacheWrite = int(cacheWrite)
+					}
+					output.Usage.TotalTokens = output.Usage.Input + output.Usage.Output + output.Usage.CacheRead + output.Usage.CacheWrite
+					// Reference calls calculateCost after message_start usage.
+					output.Usage.Cost = usageCostFromModelCost(src.CalculateCost(&model, &output.Usage))
+				}
+			}
+
+		case "content_block_start":
+			index, _ := event["index"].(float64)
+			if block, ok := event["content_block"].(map[string]interface{}); ok {
+				blockType, _ := block["type"].(string)
+				switch blockType {
+				case "text":
+					newBlock := &src.TextContent{Type: "text", Text: ""}
+					output.Content = append(output.Content, newBlock)
+					blockIndexMap[int(index)] = len(output.Content) - 1
+					ch <- src.AssistantMessageEvent{Type: "text_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
+				case "thinking":
+					newBlock := &src.ThinkingContent{Type: "thinking", Thinking: ""}
+					output.Content = append(output.Content, newBlock)
+					blockIndexMap[int(index)] = len(output.Content) - 1
+					ch <- src.AssistantMessageEvent{Type: "thinking_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
+				case "redacted_thinking":
+					signature, _ := block["data"].(string)
+					redacted := true
+					newBlock := &src.ThinkingContent{Type: "thinking", Thinking: "[Reasoning redacted]", ThinkingSignature: signature, Redacted: &redacted}
+					output.Content = append(output.Content, newBlock)
+					blockIndexMap[int(index)] = len(output.Content) - 1
+					ch <- src.AssistantMessageEvent{Type: "thinking_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
+				case "tool_use":
+					id, _ := block["id"].(string)
+					name, _ := block["name"].(string)
+					if isOAuth {
+						name = fromClaudeCodeName(name, context.Tools)
+					}
+					input := map[string]interface{}{}
+					if i, ok := block["input"].(map[string]interface{}); ok {
+						input = i
+					}
+					newBlock := &src.ToolCall{Type: "toolCall", ID: id, Name: name, Arguments: input}
+					output.Content = append(output.Content, newBlock)
+					blockIndexMap[int(index)] = len(output.Content) - 1
+					ch <- src.AssistantMessageEvent{Type: "toolcall_start", ContentIndex: ptr(len(output.Content) - 1), Partial: output}
+				}
+			}
+
+		case "content_block_delta":
+			index, _ := event["index"].(float64)
+			if idx, ok := blockIndexMap[int(index)]; ok && idx < len(output.Content) {
+				if delta, ok := event["delta"].(map[string]interface{}); ok {
+					deltaType, _ := delta["type"].(string)
+					switch deltaType {
+					case "text_delta":
+						if text, ok := delta["text"].(string); ok {
+							if tc, ok := output.Content[idx].(*src.TextContent); ok {
+								tc.Text += text
+								ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: ptr(idx), Delta: text, Partial: output}
+							}
+						}
+					case "thinking_delta":
+						if thinking, ok := delta["thinking"].(string); ok {
+							if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
+								tc.Thinking += thinking
+								ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: ptr(idx), Delta: thinking, Partial: output}
+							}
+						}
+					case "input_json_delta":
+						if partialJson, ok := delta["partial_json"].(string); ok {
+							if toolCall, ok := output.Content[idx].(*src.ToolCall); ok {
+								toolCall.PartialArgs += partialJson
+								toolCall.Arguments = parseStreamingJson(toolCall.PartialArgs)
+								ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: ptr(idx), Delta: partialJson, Partial: output}
+							}
+						}
+					case "signature_delta":
+						if signature, ok := delta["signature"].(string); ok {
+							if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
+								tc.ThinkingSignature += signature
+							}
+						}
+					}
+				}
+			}
+
+		case "content_block_stop":
+			index, _ := event["index"].(float64)
+			if idx, ok := blockIndexMap[int(index)]; ok && idx < len(output.Content) {
+				delete(blockIndexMap, int(index))
+				switch block := output.Content[idx].(type) {
+				case *src.TextContent:
+					ch <- src.AssistantMessageEvent{Type: "text_end", ContentIndex: ptr(idx), Content: block.Text, Partial: output}
+				case *src.ThinkingContent:
+					ch <- src.AssistantMessageEvent{Type: "thinking_end", ContentIndex: ptr(idx), Content: block.Thinking, Partial: output}
+				case *src.ToolCall:
+					block.Arguments = parseStreamingJson(block.PartialArgs)
+					ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: ptr(idx), ToolCall: block, Partial: output}
+				}
+			}
+
+		case "message_delta":
+			if delta, ok := event["delta"].(map[string]interface{}); ok {
+				if stopReason, ok := delta["stop_reason"].(string); ok {
+					reason, reasonErr := mapAnthropicStopReason(stopReason)
+					output.StopReason = reason
+					if reasonErr != "" {
+						return fmt.Errorf("%s", reasonErr)
+					}
+				}
+			}
+			if usage, ok := event["usage"].(map[string]interface{}); ok {
+				if inputTokens, ok := usage["input_tokens"].(float64); ok {
+					output.Usage.Input = int(inputTokens)
+				}
+				if outputTokens, ok := usage["output_tokens"].(float64); ok {
+					output.Usage.Output = int(outputTokens)
+				}
+				if cacheRead, ok := usage["cache_read_input_tokens"].(float64); ok {
+					output.Usage.CacheRead = int(cacheRead)
+				}
+				if cacheWrite, ok := usage["cache_creation_input_tokens"].(float64); ok {
+					output.Usage.CacheWrite = int(cacheWrite)
+				}
+				output.Usage.TotalTokens = output.Usage.Input + output.Usage.Output + output.Usage.CacheRead + output.Usage.CacheWrite
+				output.Usage.Cost = usageCostFromModelCost(src.CalculateCost(&model, &output.Usage))
+			}
+
+		case "message_stop":
+			sawMessageStop = true
+
+		case "error":
+			if errorMsg, ok := event["error"].(map[string]interface{}); ok {
+				msg, _ := errorMsg["message"].(string)
+				return fmt.Errorf("anthropic error: %s", msg)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		// A mid-stream read failure is an error, not an abort
+		// (abort only comes from a signal — P15).
+		return err
+	}
+
+	// Truncated stream: the reference fails when message_stop never arrived.
+	if sawMessageStart && !sawMessageStop {
+		return fmt.Errorf("Anthropic stream ended before message_stop")
+	}
+
+	if output.StopReason == src.StopReasonError || output.StopReason == src.StopReasonAborted {
+		return fmt.Errorf("stream ended with error: %s", output.StopReason)
+	}
+	return nil
+}
+
 // =============================================================================
 // Request handling
 // =============================================================================
 
-func doAnthropicRequest(client *http.Client, model src.Model[src.Api], params interface{}, options *AnthropicOptions) (*http.Response, error) {
+func doAnthropicRequest(client *http.Client, model src.Model[src.Api], context src.ChatContext, params interface{}, apiKey string, options *AnthropicOptions) (*http.Response, error) {
 	baseURL := anthropicAPIBaseURL
 	if model.BaseURL != "" {
 		baseURL = model.BaseURL
+	}
+
+	compat := getAnthropicCompat(model)
+
+	// Beta features: interleaved thinking defaults ON (nil = true) for
+	// non-adaptive models; fine-grained tool streaming applies to tool calls
+	// when eager per-tool streaming is unsupported.
+	interleavedThinking := options == nil || options.InterleavedThinking == nil || *options.InterleavedThinking
+	needsInterleavedBeta := interleavedThinking && !supportsAdaptiveThinking(model.ID)
+	var betaFeatures []string
+	eager := compat.SupportsEagerToolInputStreaming == nil || *compat.SupportsEagerToolInputStreaming
+	if len(context.Tools) > 0 && !eager {
+		betaFeatures = append(betaFeatures, fineGrainedToolStreamingBeta)
+	}
+	if needsInterleavedBeta {
+		betaFeatures = append(betaFeatures, interleavedThinkingBeta)
+	}
+	betaHeader := ""
+	if len(betaFeatures) > 0 {
+		betaHeader = strings.Join(betaFeatures, ",")
+	}
+
+	setStandardHeaders := func(req *http.Request) {
+		req.Header.Set("accept", "application/json")
+		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		if betaHeader != "" {
+			req.Header.Set("anthropic-beta", betaHeader)
+		}
+	}
+
+	isGateway := model.Provider == "cloudflare-ai-gateway"
+	if isGateway {
+		resolved, err := ResolveCloudflareBaseUrl(model)
+		if err != nil {
+			return nil, err
+		}
+		baseURL = resolved
 	}
 
 	body, err := json.Marshal(params)
@@ -295,52 +390,95 @@ func doAnthropicRequest(client *http.Client, model src.Model[src.Api], params in
 		return nil, err
 	}
 
-	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(anthropicVersionHeader, anthropicVersion)
 
-	apiKey := ""
-	if options != nil && options.APIKey != "" {
-		apiKey = options.APIKey
-	}
-	if apiKey == "" {
-		apiKey = getEnvApiKey(string(model.Provider))
-	}
-
-	if isOAuthToken(apiKey) {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("User-Agent", "claude-cli/"+claudeCodeVersion)
-		req.Header.Set("X-App", "cli")
-	} else {
-		req.Header.Set("x-api-key", apiKey)
-	}
-
-	// Add model headers
+	// Model headers merge before option headers (options win), matching the
+	// reference mergeHeaders order.
 	for k, v := range model.Headers {
 		req.Header.Set(k, v)
 	}
 
-	// Add beta headers
-	betaFeatures := []string{}
-	if options != nil && options.InterleavedThinking != nil && *options.InterleavedThinking && !supportsAdaptiveThinking(model.ID) {
-		betaFeatures = append(betaFeatures, interleavedThinkingBeta)
-	}
-	if options != nil && options.ThinkingEnabled != nil && *options.ThinkingEnabled && len(contextTools(params)) > 0 {
-		betaFeatures = append(betaFeatures, fineGrainedToolStreamingBeta)
-	}
-	if len(betaFeatures) > 0 {
-		req.Header.Set("anthropic-beta", strings.Join(betaFeatures, ","))
+	switch {
+	case isGateway:
+		// Gateway authenticates via cf-aig-authorization; no x-api-key.
+		setStandardHeaders(req)
+		req.Header.Set("cf-aig-authorization", "Bearer "+apiKey)
+	case model.Provider == src.GithubCopilot:
+		// Bearer auth + selective betas + dynamic intent headers.
+		setStandardHeaders(req)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		hasImages := HasCopilotVisionInput(contextMessagesParam(context))
+		for k, v := range BuildCopilotDynamicHeaders(contextMessagesParam(context), hasImages) {
+			req.Header.Set(k, v)
+		}
+	case isOAuthToken(apiKey):
+		// OAuth: Bearer auth + Claude Code identity headers + CC betas.
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("anthropic-beta", strings.Join(append([]string{"claude-code-20250219", "oauth-2025-04-20"}, betaFeatures...), ","))
+		req.Header.Set("User-Agent", "claude-cli/"+claudeCodeVersion)
+		req.Header.Set("X-App", "cli")
+		req.Header.Set("accept", "application/json")
+	default:
+		setStandardHeaders(req)
+		req.Header.Set("x-api-key", apiKey)
+		if options != nil && options.SessionID != "" && (compat.SendSessionAffinityHeaders != nil && *compat.SendSessionAffinityHeaders) {
+			req.Header.Set("x-session-affinity", options.SessionID)
+		}
 	}
 
-	// Add options headers
+	// Add options headers last (override defaults)
 	if options != nil {
 		for k, v := range options.Headers {
 			req.Header.Set(k, v)
 		}
 	}
 
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	// The reference SDK throws a structured APIError on non-2xx; without this
+	// check an error body has no `data:` lines and yields an empty "success".
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("Anthropic API error (%d): %s", resp.StatusCode, strings.TrimSpace(string(excerpt)))
+	}
+	return resp, nil
 }
+
+// getAnthropicCompat resolves per-model compat over provider auto-detection
+// (reference getAnthropicCompat): Fireworks lacks eager tool streaming, long
+// cache retention and tool cache control, and needs session affinity; the
+// Cloudflare Anthropic gateway needs session affinity too.
+func getAnthropicCompat(model src.Model[src.Api]) (compat src.AnthropicMessagesCompat) {
+	isFireworks := model.Provider == "fireworks"
+	isCloudflareAiGatewayAnthropic := model.Provider == "cloudflare-ai-gateway" && strings.Contains(model.BaseURL, "anthropic")
+
+	compat.SupportsEagerToolInputStreaming = boolPtr(!isFireworks)
+	compat.SupportsLongCacheRetention = boolPtr(!isFireworks)
+	compat.SendSessionAffinityHeaders = boolPtr(isFireworks || isCloudflareAiGatewayAnthropic)
+	compat.SupportsCacheControlOnTools = boolPtr(!isFireworks)
+
+	if mc := model.Compat.AnthropicMessages; mc != nil {
+		if mc.SupportsEagerToolInputStreaming != nil {
+			compat.SupportsEagerToolInputStreaming = mc.SupportsEagerToolInputStreaming
+		}
+		if mc.SupportsLongCacheRetention != nil {
+			compat.SupportsLongCacheRetention = mc.SupportsLongCacheRetention
+		}
+		if mc.SendSessionAffinityHeaders != nil {
+			compat.SendSessionAffinityHeaders = mc.SendSessionAffinityHeaders
+		}
+		if mc.SupportsCacheControlOnTools != nil {
+			compat.SupportsCacheControlOnTools = mc.SupportsCacheControlOnTools
+		}
+	}
+	return
+}
+
+func boolPtr(v bool) *bool { return &v }
 
 func handleAnthropicError(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, err error, isAborted bool) {
 	output.StopReason = src.StopReasonError
@@ -355,12 +493,7 @@ func handleAnthropicError(ch chan<- src.AssistantMessageEvent, output *src.Assis
 // Parameter building
 // =============================================================================
 
-func buildAnthropicParams(model src.Model[src.Api], context src.ChatContext, options *AnthropicOptions) interface{} {
-	isOAuth := false
-	if options != nil && options.APIKey != "" {
-		isOAuth = isOAuthToken(options.APIKey)
-	}
-
+func buildAnthropicParams(model src.Model[src.Api], context src.ChatContext, isOAuth bool, options *AnthropicOptions) interface{} {
 	cacheControl := getAnthropicCacheControl(model, options)
 
 	params := map[string]interface{}{
@@ -371,30 +504,38 @@ func buildAnthropicParams(model src.Model[src.Api], context src.ChatContext, opt
 	}
 
 	// System prompt
-	if context.SystemPrompt != "" {
-		if isOAuth {
-			params["system"] = []map[string]interface{}{
-				{
-					"type": "text",
-					"text": "You are Claude Code, Anthropic's official CLI for Claude.",
-				},
-				{
-					"type": "text",
-					"text": utils.SanitizeSurrogates(context.SystemPrompt),
-				},
-			}
-		} else {
-			params["system"] = []map[string]interface{}{
-				{
-					"type": "text",
-					"text": utils.SanitizeSurrogates(context.SystemPrompt),
-				},
-			}
+	if isOAuth {
+		// OAuth tokens MUST carry the Claude Code identity; cache_control
+		// applies to both blocks (reference buildParams OAuth branch).
+		system := []map[string]interface{}{
+			{
+				"type": "text",
+				"text": "You are Claude Code, Anthropic's official CLI for Claude.",
+			},
 		}
 		if cacheControl != nil {
-			system := params["system"].([]map[string]interface{})
-			system[len(system)-1]["cache_control"] = cacheControl
+			system[0]["cache_control"] = cacheControl
 		}
+		if context.SystemPrompt != "" {
+			block := map[string]interface{}{
+				"type": "text",
+				"text": utils.SanitizeSurrogates(context.SystemPrompt),
+			}
+			if cacheControl != nil {
+				block["cache_control"] = cacheControl
+			}
+			system = append(system, block)
+		}
+		params["system"] = system
+	} else if context.SystemPrompt != "" {
+		block := map[string]interface{}{
+			"type": "text",
+			"text": utils.SanitizeSurrogates(context.SystemPrompt),
+		}
+		if cacheControl != nil {
+			block["cache_control"] = cacheControl
+		}
+		params["system"] = []map[string]interface{}{block}
 	}
 
 	// Temperature (incompatible with extended thinking)
@@ -410,7 +551,13 @@ func buildAnthropicParams(model src.Model[src.Api], context src.ChatContext, opt
 
 	// Tools
 	if len(context.Tools) > 0 {
-		params["tools"] = convertAnthropicTools(context.Tools, isOAuth, cacheControl)
+		compat := getAnthropicCompat(model)
+		cacheCtlForTools := cacheControl
+		if compat.SupportsCacheControlOnTools != nil && !*compat.SupportsCacheControlOnTools {
+			cacheCtlForTools = nil
+		}
+		eager := compat.SupportsEagerToolInputStreaming == nil || *compat.SupportsEagerToolInputStreaming
+		params["tools"] = convertAnthropicTools(context.Tools, isOAuth, eager, cacheCtlForTools)
 	}
 
 	// Thinking mode
@@ -427,25 +574,26 @@ func buildAnthropicParams(model src.Model[src.Api], context src.ChatContext, opt
 			}
 
 			if supportsAdaptiveThinking(model.ID) {
-				thinking := map[string]interface{}{
-					"type":   "adaptive",
+				params["thinking"] = map[string]interface{}{
+					"type":    "adaptive",
 					"display": display,
 				}
 				if options != nil && options.Effort != nil {
-					thinking["output_config"] = map[string]interface{}{
+					// output_config is a TOP-LEVEL sibling of thinking
+					// (reference: params.output_config = { effort }).
+					params["output_config"] = map[string]interface{}{
 						"effort": *options.Effort,
 					}
 				}
-				params["thinking"] = thinking
 			} else {
 				budget := 1024
 				if options != nil && options.ThinkingBudgetTokens != nil {
 					budget = *options.ThinkingBudgetTokens
 				}
 				params["thinking"] = map[string]interface{}{
-					"type":    "enabled",
+					"type":          "enabled",
 					"budget_tokens": budget,
-					"display": display,
+					"display":       display,
 				}
 			}
 		} else if options != nil && options.ThinkingEnabled != nil && !*options.ThinkingEnabled {
@@ -455,9 +603,14 @@ func buildAnthropicParams(model src.Model[src.Api], context src.ChatContext, opt
 		}
 	}
 
-	// Tool choice
+	// Tool choice: the API expects an object ({type: ...}); wrap bare strings.
 	if options != nil && options.ToolChoice != nil {
-		params["tool_choice"] = options.ToolChoice
+		switch tc := options.ToolChoice.(type) {
+		case string:
+			params["tool_choice"] = map[string]interface{}{"type": tc}
+		default:
+			params["tool_choice"] = tc
+		}
 	}
 
 	// Metadata
@@ -488,7 +641,7 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 			}
 
 			if len(um.Content) == 1 {
-				if tc, ok := um.Content[0].(*src.TextContent); ok && tc.Text != "" {
+				if tc, ok := um.Content[0].(*src.TextContent); ok && strings.TrimSpace(tc.Text) != "" {
 					params = append(params, map[string]interface{}{
 						"role":    "user",
 						"content": utils.SanitizeSurrogates(tc.Text),
@@ -501,7 +654,7 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 			for _, item := range um.Content {
 				switch c := item.(type) {
 				case *src.TextContent:
-					if c.Text == "" {
+					if strings.TrimSpace(c.Text) == "" {
 						continue
 					}
 					blocks = append(blocks, map[string]interface{}{
@@ -538,7 +691,7 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 			for _, block := range am.Content {
 				switch b := block.(type) {
 				case *src.TextContent:
-					if b.Text == "" {
+					if strings.TrimSpace(b.Text) == "" {
 						continue
 					}
 					blocks = append(blocks, map[string]interface{}{
@@ -546,9 +699,8 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 						"text": utils.SanitizeSurrogates(b.Text),
 					})
 				case *src.ThinkingContent:
-					if b.Thinking == "" {
-						continue
-					}
+					// Redacted check FIRST — a redacted block replays as
+					// redacted_thinking even with empty thinking text.
 					if b.Redacted != nil && *b.Redacted {
 						blocks = append(blocks, map[string]interface{}{
 							"type": "redacted_thinking",
@@ -556,7 +708,10 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 						})
 						continue
 					}
-					if b.ThinkingSignature == "" {
+					if strings.TrimSpace(b.Thinking) == "" {
+						continue
+					}
+					if strings.TrimSpace(b.ThinkingSignature) == "" {
 						blocks = append(blocks, map[string]interface{}{
 							"type": "text",
 							"text": utils.SanitizeSurrogates(b.Thinking),
@@ -654,17 +809,34 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 	return params
 }
 
+// convertAnthropicContentBlocks mirrors convertContentBlocks: text-only
+// content becomes one joined string; image content becomes a block array
+// with a leading placeholder when no text is present.
 func convertAnthropicContentBlocks(content []src.ContentBlock) interface{} {
-	if len(content) == 1 {
-		if tc, ok := content[0].(*src.TextContent); ok {
-			return utils.SanitizeSurrogates(tc.Text)
+	hasImages := false
+	for _, c := range content {
+		if _, ok := c.(*src.ImageContent); ok {
+			hasImages = true
+			break
 		}
 	}
 
+	if !hasImages {
+		var texts []string
+		for _, c := range content {
+			if tc, ok := c.(*src.TextContent); ok {
+				texts = append(texts, tc.Text)
+			}
+		}
+		return utils.SanitizeSurrogates(strings.Join(texts, "\n"))
+	}
+
 	var blocks []map[string]interface{}
+	hasText := false
 	for _, c := range content {
 		switch block := c.(type) {
 		case *src.TextContent:
+			hasText = true
 			blocks = append(blocks, map[string]interface{}{
 				"type": "text",
 				"text": utils.SanitizeSurrogates(block.Text),
@@ -681,14 +853,18 @@ func convertAnthropicContentBlocks(content []src.ContentBlock) interface{} {
 		}
 	}
 
-	if len(blocks) == 0 {
-		return ""
+	if !hasText {
+		placeholder := map[string]interface{}{
+			"type": "text",
+			"text": "(see attached image)",
+		}
+		blocks = append([]map[string]interface{}{placeholder}, blocks...)
 	}
 
 	return blocks
 }
 
-func convertAnthropicTools(tools []src.Tool[any], isOAuth bool, cacheControl map[string]interface{}) []map[string]interface{} {
+func convertAnthropicTools(tools []src.Tool[any], isOAuth bool, supportsEagerToolInputStreaming bool, cacheControl map[string]interface{}) []map[string]interface{} {
 	result := make([]map[string]interface{}, len(tools))
 	for i, tool := range tools {
 		name := tool.Name
@@ -696,11 +872,13 @@ func convertAnthropicTools(tools []src.Tool[any], isOAuth bool, cacheControl map
 			name = toClaudeCodeName(name)
 		}
 
-		parameters, ok := tool.Parameters.(map[string]interface{})
-		var properties map[string]interface{}
-		var required []string
-		if ok {
-			properties, _ = parameters["properties"].(map[string]interface{})
+		parameters, _ := tool.Parameters.(map[string]interface{})
+		properties := map[string]interface{}{}
+		required := []string{}
+		if parameters != nil {
+			if p, ok := parameters["properties"].(map[string]interface{}); ok {
+				properties = p
+			}
 			if req, ok := parameters["required"].([]interface{}); ok {
 				for _, r := range req {
 					if s, ok := r.(string); ok {
@@ -719,7 +897,9 @@ func convertAnthropicTools(tools []src.Tool[any], isOAuth bool, cacheControl map
 				"required":   required,
 			},
 		}
-
+		if supportsEagerToolInputStreaming {
+			toolDef["eager_input_streaming"] = true
+		}
 		if cacheControl != nil && i == len(tools)-1 {
 			toolDef["cache_control"] = cacheControl
 		}
@@ -764,6 +944,8 @@ func getAnthropicCacheControl(model src.Model[src.Api], options *AnthropicOption
 	retention := src.CacheRetentionShort
 	if options != nil && options.CacheRetention != nil {
 		retention = *options.CacheRetention
+	} else if os.Getenv("PI_CACHE_RETENTION") == "long" {
+		retention = src.CacheRetentionLong
 	}
 
 	if retention == src.CacheRetentionNone {
@@ -774,8 +956,11 @@ func getAnthropicCacheControl(model src.Model[src.Api], options *AnthropicOption
 		"type": "ephemeral",
 	}
 
+	// Long retention only when the provider supports the 1h TTL.
 	if retention == src.CacheRetentionLong {
-		cacheControl["ttl"] = "1h"
+		if compat := getAnthropicCompat(model); compat.SupportsLongCacheRetention != nil && *compat.SupportsLongCacheRetention {
+			cacheControl["ttl"] = "1h"
+		}
 	}
 
 	return cacheControl
@@ -785,35 +970,36 @@ func getDefaultMaxTokens(model src.Model[src.Api], options *AnthropicOptions) in
 	if options != nil && options.MaxTokens != nil {
 		return *options.MaxTokens
 	}
+	// Reference: (model.maxTokens / 3) | 0 — may be 0 for uncataloged models,
+	// which the API rejects with a clear error (no invented fallback).
 	if model.MaxTokens > 0 {
 		return model.MaxTokens / 3
 	}
-	return 4096
+	return 0
 }
 
-func contextTools(params interface{}) []src.Tool[any] {
-	if p, ok := params.(map[string]interface{}); ok {
-		if tools, ok := p["tools"].([]src.Tool[any]); ok {
-			return tools
-		}
-	}
-	return nil
-}
-
-func mapAnthropicStopReason(reason string) src.StopReason {
+// mapAnthropicStopReason returns the stop reason plus an error message for
+// unknown values (the reference throws on unhandled reasons, surfacing as an
+// error event).
+func mapAnthropicStopReason(reason string) (src.StopReason, string) {
 	switch reason {
 	case "end_turn":
-		return src.StopReasonStop
+		return src.StopReasonStop, ""
 	case "max_tokens":
-		return src.StopReasonLength
+		return src.StopReasonLength, ""
 	case "tool_use":
-		return src.StopReasonToolUse
+		return src.StopReasonToolUse, ""
 	case "refusal":
-		return src.StopReasonError
-	case "pause_turn", "stop_sequence":
-		return src.StopReasonStop
+		return src.StopReasonError, ""
+	case "pause_turn":
+		return src.StopReasonStop, ""
+	case "stop_sequence":
+		return src.StopReasonStop, ""
+	case "sensitive":
+		// Content flagged by safety filters.
+		return src.StopReasonError, ""
 	default:
-		return src.StopReasonStop
+		return src.StopReasonError, "Unhandled stop reason: " + reason
 	}
 }
 
@@ -827,25 +1013,68 @@ func ptr(i int) *int {
 
 // StreamSimpleAnthropic provides a simplified streaming interface for Anthropic
 func StreamSimpleAnthropic(model src.Model[src.Api], context src.ChatContext, options *src.SimpleStreamOptions) func() <-chan src.AssistantMessageEvent {
-	opts := buildAnthropicSimpleOptions(options)
+	// The reference throws synchronously when no key is configured.
+	apiKey := ""
+	if options != nil && options.APIKey != "" {
+		apiKey = options.APIKey
+	} else {
+		apiKey = getEnvApiKey(string(model.Provider))
+	}
+	opts := buildAnthropicSimpleOptions(model, options, apiKey)
 	return StreamAnthropic(model, context, opts)
 }
 
-func buildAnthropicSimpleOptions(options *src.SimpleStreamOptions) *AnthropicOptions {
+func buildAnthropicSimpleOptions(model src.Model[src.Api], options *src.SimpleStreamOptions, apiKey string) *AnthropicOptions {
 	if options == nil {
 		return nil
 	}
 
-	thinkingEnabled := false
-	if options.Reasoning != "" {
-		thinkingEnabled = true
+	opts := &AnthropicOptions{
+		APIKey:    apiKey,
+		MaxTokens: options.MaxTokens,
+		Headers:   options.Headers,
 	}
 
-	return &AnthropicOptions{
-		APIKey:          options.APIKey,
-		MaxTokens:       options.MaxTokens,
-		Temperature:     options.Temperature,
-		ThinkingEnabled: &thinkingEnabled,
-		Headers:         options.Headers,
+	if options.Reasoning == "" {
+		disabled := false
+		opts.ThinkingEnabled = &disabled
+		return opts
 	}
+
+	// Adaptive-thinking models: effort level (thinkingLevelMap lookup is P15).
+	if supportsAdaptiveThinking(model.ID) {
+		enabled := true
+		opts.ThinkingEnabled = &enabled
+		opts.Effort = anthropicEffortPtr(options.Reasoning)
+		return opts
+	}
+
+	// Older models: budget-based thinking with an adjusted maxTokens budget.
+	adjusted := AdjustMaxTokensForThinking(derefInt(options.MaxTokens), model.MaxTokens, options.Reasoning, options.ThinkingBudgets)
+	enabled := true
+	opts.ThinkingEnabled = &enabled
+	opts.MaxTokens = &adjusted.MaxTokens
+	opts.ThinkingBudgetTokens = &adjusted.ThinkingBudget
+	return opts
+}
+
+// anthropicEffortPtr maps a thinking level to the reference effort table.
+func anthropicEffortPtr(level src.ThinkingLevel) *string {
+	var effort string
+	switch level {
+	case "minimal", "low":
+		effort = "low"
+	case "medium":
+		effort = "medium"
+	default:
+		effort = "high"
+	}
+	return &effort
+}
+
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

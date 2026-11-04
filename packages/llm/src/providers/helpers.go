@@ -2,7 +2,6 @@ package providers
 
 import (
 	"encoding/json"
-	"regexp"
 	"strings"
 
 	src "ycode/packages/llm/src"
@@ -92,22 +91,34 @@ func getFloatValueHelper(m map[string]interface{}, key string) float64 {
 // Claude code name conversion
 // =============================================================================
 
-// toClaudeCodeName converts a tool name to Claude Code format
-func toClaudeCodeName(name string) string {
-	// Remove common prefixes and convert to lowercase
-	re := regexp.MustCompile(`^__`)
-	name = re.ReplaceAllString(name, "")
-
-	re = regexp.MustCompile(`[^a-zA-Z0-9_]`)
-	name = re.ReplaceAllString(name, "_")
-
-	return strings.ToLower(name)
+// claudeCodeTools are the canonical Claude Code 2.x tool names (anthropic.ts:75-93).
+var claudeCodeTools = []string{
+	"Read", "Write", "Edit", "Bash", "Grep", "Glob", "AskUserQuestion",
+	"EnterPlanMode", "ExitPlanMode", "KillShell", "NotebookEdit", "Skill",
+	"Task", "TaskOutput", "TodoWrite", "WebFetch", "WebSearch",
 }
 
-// fromClaudeCodeName converts from Claude Code format to original tool name
-func fromClaudeCodeName(name string) string {
-	// This is a simplified version - actual implementation may need
-	// to track original names separately
+// toClaudeCodeName maps a tool name to its canonical CC casing
+// (case-insensitive list lookup, name unchanged when not a CC tool).
+func toClaudeCodeName(name string) string {
+	for _, cc := range claudeCodeTools {
+		if strings.EqualFold(cc, name) {
+			return cc
+		}
+	}
+	return name
+}
+
+// fromClaudeCodeName maps a streamed CC-cased name back to the registered
+// tool's actual name (case-insensitive first match).
+func fromClaudeCodeName(name string, tools []src.Tool[any]) string {
+	if len(tools) > 0 {
+		for _, tool := range tools {
+			if strings.EqualFold(tool.Name, name) {
+				return tool.Name
+			}
+		}
+	}
 	return name
 }
 

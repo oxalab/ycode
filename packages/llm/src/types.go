@@ -351,6 +351,11 @@ type AnthropicMessagesCompat struct {
 	*/
 	SupportsEagerToolInputStreaming 	*bool 	`json:"supportsEagerToolInputStreaming,omitempty"`
 	SupportsLongCacheRetention 			*bool 	`json:"supportsLongCacheRetention,omitempty"`
+	// Send the x-session-affinity header from SessionID when caching is
+	// enabled (Fireworks / cloudflare-ai-gateway-anthropic). Default: auto.
+	SendSessionAffinityHeaders *bool `json:"sendSessionAffinityHeaders,omitempty"`
+	// Whether cache_control may be attached to tool definitions. Default: true.
+	SupportsCacheControlOnTools *bool `json:"supportsCacheControlOnTools,omitempty"`
 }
 
 
