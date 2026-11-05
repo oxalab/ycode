@@ -451,6 +451,12 @@ type Model[TApi Api] struct {
 	Cost 			ModelCost 			`json:"cost"`
 	ContextWindow	int 				`json:"contextWindow"`
 	MaxTokens 		int 				`json:"maxTokens"`
+	/*
+	Reasoning level mapping (types.ts thinkingLevelMap). Keys are level names;
+	a nil value is the TS null ("level unavailable"), an absent key is
+	undefined. Drives xhigh availability and effort remapping.
+	*/
+	ThinkingLevelMap 	map[string]*ThinkingLevel 	`json:"thinkingLevelMap,omitempty"`
 	Headers 		map[string]string 	`json:"headers,omitempty"`
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	Compat 			Compat				`json:"compat,omitempty"`
