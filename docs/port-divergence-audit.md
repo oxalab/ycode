@@ -1196,9 +1196,61 @@ width-keyed caches). Two real bugs:
     args-done catch-up delta + added-event `arguments` seeding; "Error
     Code" capitalization. Also: completions `parseOpenAICompletionsUsage`
     now calls `src.CalculateCost` (previously zero callers repo-wide —
-    TS parseChunkUsage parity). **P9b REMAINS: openai-codex-responses
-    (wrong host/auth/retry/WS — full re-port) + azure-openai-responses
-    (legacy chat path, chat-completions chunk parser).**
+    TS parseChunkUsage parity).
+  - *P9b codex + azure* — **FIXED 2026-11-05 (story 31**, tests in
+    `openai_codex_parity_test.go` + `azure_parity_test.go`; 5 mutations
+    detected: dropped status check, dropped account-id header, disabled
+    error-event interception (generic "Error Code" wording leaked through),
+    azure legacy URL restored, friendly-message condition killed**)**:
+    *openai-codex-responses* full re-port (SSE transport; the WS stack is
+    the reference's own fallback path — deferred as P15-class): ~~wrong
+    host `api.openai.com/v1/responses`~~ (`resolveCodexURL` →
+    `chatgpt.com/backend-api/codex/responses` + suffix normalization);
+    ~~no `chatgpt-account-id`/`originator`/UA/`OpenAI-Beta:
+    responses=experimental` headers~~ (JWT account-id extraction, build-tag
+    `pi (<platform> <release>; <arch>)` UA); ~~no HTTP status check →
+    empty successes~~ (401/403 read + parsed); ~~no retry/backoff~~
+    (MAX_RETRIES=3, ×2^attempt, isRetryableError 429/5xx+text regex,
+    ctx-abortable sleep); ~~no usage-limit friendliness~~ ("You have hit
+    your ChatGPT usage limit (pro plan). Try again in ~N min." from
+    plan_type/resets_at, status-429 or code-regex); body: `instructions`
+    (default fallback string), `include:["reasoning.encrypted_content"]`,
+    `text.verbosity` (default low), `tool_choice`/`parallel_tool_calls`,
+    unconditional `prompt_cache_key`, ~~spurious `max_output_tokens`~~,
+    tools `strict:null`, ~~`"openai"` env-key fallback~~ (fails fast
+    "No API key for provider: …"); reasoning gated on the requested
+    effort + thinkingLevelMap remap with off:null → no reasoning field
+    (not model.Reasoning+"medium"); codex SSE layer (malformed JSON →
+    "Invalid Codex SSE JSON", `error` → "Codex error: …",
+    `response.failed` → message||"Codex response failed",
+    `response.done/incomplete` → normalized `response.completed` +
+    status whitelist) feeding the story-29 processor through a pipe;
+    service-tier "default→request" resolve (flex ×0.5 no longer eaten by
+    a "default" response tier); start event only after response ok;
+    mid-stream errors no longer hard-labeled `aborted`.
+    *azure-openai-responses* full re-port: ~~legacy
+    `/openai/deployments/{id}?api-version=2024-02-15-preview` with a
+    Responses-shaped body parsed as chat-completions~~ → `{base}/responses?api-version=v1`
+    via `normalizeAzureBaseUrl` (forces `/openai/v1` on Azure hosts,
+    "Invalid Azure OpenAI base URL" wording); ~~`"myresource"` fallback~~
+    (options → AZURE_OPENAI_BASE_URL/RESOURCE_NAME/API_VERSION env →
+    model.BaseURL, required-error wording); ~~chat-completions chunk
+    parser~~ (story-29 `processOpenAIResponsesStream`); status check
+    ("Azure OpenAI API error (N)"); key-required wording;
+    AZURE_OPENAI_DEPLOYMENT_NAME_MAP; body `model: deploymentName`,
+    `prompt_cache_key`, ~~spurious `store`~~, reasoning branch incl.
+    off:null; tool-call providers {openai, openai-codex, opencode,
+    azure-openai-responses}; simple wrapper throws
+    "No API key for provider: …" before delegating.
+    *Wiring* (the story-28 deferred half for these two): both registered
+    in register_builtins.go (+option converters forwarding
+    Context/SessionID/Transport); catalog groups replaced with the TS
+    entries (codex = 10 gpt-5.x @ chatgpt backend, azure = 42 models
+    under provider "azure-openai-responses" — the invented `"azure"`
+    group broke env-key resolution; `thinkingLevelMap` now a Model field,
+    `ClampThinkingLevel`/`GetSupportedThinkingLevels` ported to
+    models.go — the no-map default path needs no further Model fields).
+    Catalog sync for the OTHER groups stays the separate catalog story.
   - *P10 anthropic (registered)* — **CORE FIXED 2026-11-04 (story 30**,
     tests in `anthropic_parity_test.go`; 3 mutations detected: disabled
     status check, dropped Redacted flag, stop-map reverted**)**:
@@ -1250,10 +1302,12 @@ width-keyed caches). Two real bugs:
     payload camelCase ignored by the API; URL lacks `/chat/completions`;
     tool args don't accumulate; `toolcall_end` order randomized (Go map
     iteration); no abort support/status error formatting.
-  - *P14 registry/wiring*: only 3 of 9 APIs registered — mistral, google,
-    vertex, bedrock, azure, codex implemented but unreachable
-    (register_builtins.go:91) [DEFERRED until P11-P13 fix the families —
-    registering broken providers is strictly worse]; ~~api mismatch panics~~
+  - *P14 registry/wiring*: ~~only 3 of 9 APIs registered — mistral, google,
+    vertex, bedrock, azure, codex implemented but unreachable~~ **azure +
+    codex registered 2026-11-05 (story 31, with their P9b re-ports);
+    mistral/google/vertex/bedrock/gemini-cli remain unregistered [DEFERRED
+    until P11-P13 fix the families — registering broken providers is
+    strictly worse]**; ~~api mismatch panics~~
     ✅ FIXED 2026-10-31 (story 28: wrapStream/wrapStreamSimple emit an
     in-band error event, TS wording "Mismatched api: … expected …", the
     sdk.go no-provider pattern; mutation-verified); catalog `Api` ids
