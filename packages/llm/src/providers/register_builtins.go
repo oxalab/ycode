@@ -88,7 +88,55 @@ func RegisterBuiltInApiProviders() {
 		},
 	}, "builtin")
 
-	// Note: Additional providers (mistral, google, vertex, bedrock, azure, codex, gemini-cli)
+	// Azure OpenAI Responses API
+	src.RegisterApiProvider(src.ApiProvider{
+		Api: src.Api("azure-openai-responses"),
+		Stream: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.StreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				opts := convertStreamOptionsToAzureOpenAIResponses(options)
+				sourceCh := StreamAzureOpenAIResponses(model, chatCtx, opts)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+		StreamSimple: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.SimpleStreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				sourceCh := StreamSimpleAzureOpenAIResponses(model, chatCtx, options)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+	}, "builtin")
+
+	// OpenAI Codex Responses API (ChatGPT backend)
+	src.RegisterApiProvider(src.ApiProvider{
+		Api: src.Api("openai-codex-responses"),
+		Stream: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.StreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				opts := convertStreamOptionsToOpenAICodexResponses(options)
+				sourceCh := StreamOpenAICodexResponses(model, chatCtx, opts)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+		StreamSimple: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.SimpleStreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				sourceCh := StreamSimpleOpenAICodexResponses(model, chatCtx, options)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+	}, "builtin")
+
+	// Note: Additional providers (mistral, google, vertex, bedrock, gemini-cli)
 	// would be registered here following the same pattern once their implementations are complete.
 }
 
@@ -167,5 +215,42 @@ func convertStreamOptionsToOpenAIResponses(options *src.StreamOptions) *OpenAIRe
 		Temperature:    options.Temperature,
 		Headers:        options.Headers,
 		CacheRetention: &cacheRetention,
+	}
+}
+
+// convertStreamOptionsToOpenAICodexResponses converts StreamOptions to
+// OpenAICodexResponsesOptions
+func convertStreamOptionsToOpenAICodexResponses(options *src.StreamOptions) *OpenAICodexResponsesOptions {
+	if options == nil {
+		return nil
+	}
+	cacheRetention := options.CacheRetention
+	return &OpenAICodexResponsesOptions{
+		APIKey:         options.APIKey,
+		MaxTokens:      options.MaxTokens,
+		Temperature:    options.Temperature,
+		Headers:        options.Headers,
+		SessionID:      options.SessionID,
+		CacheRetention: &cacheRetention,
+		Context:        options.Context,
+		Transport:      options.Transport,
+	}
+}
+
+// convertStreamOptionsToAzureOpenAIResponses converts StreamOptions to
+// AzureOpenAIResponsesOptions
+func convertStreamOptionsToAzureOpenAIResponses(options *src.StreamOptions) *AzureOpenAIResponsesOptions {
+	if options == nil {
+		return nil
+	}
+	cacheRetention := options.CacheRetention
+	return &AzureOpenAIResponsesOptions{
+		APIKey:         options.APIKey,
+		MaxTokens:      options.MaxTokens,
+		Temperature:    options.Temperature,
+		Headers:        options.Headers,
+		SessionID:      options.SessionID,
+		CacheRetention: &cacheRetention,
+		Context:        options.Context,
 	}
 }
