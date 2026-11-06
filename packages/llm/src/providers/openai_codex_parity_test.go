@@ -18,6 +18,7 @@ import (
 
 func intPtr(v int) *int       { return &v }
 func strPtr(v string) *string { return &v }
+func f64Ptr(v float64) *float64 { return &v }
 
 // codexTestJWT fabricates a ChatGPT-shaped OAuth token whose payload carries
 // the account-id claim (openai-codex-responses.ts JWT_CLAIM_PATH).

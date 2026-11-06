@@ -136,7 +136,55 @@ func RegisterBuiltInApiProviders() {
 		},
 	}, "builtin")
 
-	// Note: Additional providers (mistral, google, vertex, bedrock, gemini-cli)
+	// Google Generative AI (Gemini API)
+	src.RegisterApiProvider(src.ApiProvider{
+		Api: src.Api("google-generative-ai"),
+		Stream: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.StreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				opts := convertStreamOptionsToGoogle(options)
+				sourceCh := StreamGoogle(model, chatCtx, opts)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+		StreamSimple: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.SimpleStreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				sourceCh := StreamSimpleGoogle(model, chatCtx, options)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+	}, "builtin")
+
+	// Google Vertex AI
+	src.RegisterApiProvider(src.ApiProvider{
+		Api: src.Api("google-vertex"),
+		Stream: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.StreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				opts := convertStreamOptionsToGoogleVertex(options)
+				sourceCh := StreamGoogleVertex(model, chatCtx, opts)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+		StreamSimple: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.SimpleStreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				sourceCh := StreamSimpleGoogleVertex(model, chatCtx, options)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+	}, "builtin")
+
+	// Note: Additional providers (mistral, bedrock, gemini-cli)
 	// would be registered here following the same pattern once their implementations are complete.
 }
 
@@ -252,5 +300,34 @@ func convertStreamOptionsToAzureOpenAIResponses(options *src.StreamOptions) *Azu
 		SessionID:      options.SessionID,
 		CacheRetention: &cacheRetention,
 		Context:        options.Context,
+	}
+}
+
+// convertStreamOptionsToGoogle converts StreamOptions to GoogleOptions
+func convertStreamOptionsToGoogle(options *src.StreamOptions) *GoogleOptions {
+	if options == nil {
+		return nil
+	}
+	return &GoogleOptions{
+		APIKey:      options.APIKey,
+		MaxTokens:   options.MaxTokens,
+		Temperature: options.Temperature,
+		Headers:     options.Headers,
+		Context:     options.Context,
+	}
+}
+
+// convertStreamOptionsToGoogleVertex converts StreamOptions to
+// GoogleVertexOptions
+func convertStreamOptionsToGoogleVertex(options *src.StreamOptions) *GoogleVertexOptions {
+	if options == nil {
+		return nil
+	}
+	return &GoogleVertexOptions{
+		APIKey:      options.APIKey,
+		MaxTokens:   options.MaxTokens,
+		Temperature: options.Temperature,
+		Headers:     options.Headers,
+		Context:     options.Context,
 	}
 }
