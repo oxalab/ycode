@@ -1283,13 +1283,53 @@ width-keyed caches). Two real bugs:
     removed — uncataloged models now fail loudly at the API, TS parity);
     `toolcall_end` re-parses accumulated args. **Remains (P15):
     signal/timeout/retry, ThinkingLevelMap-based effort mapping.**
-  - *P11 google family (unregistered)*: request nests all config under
-    `"config"` (SDK-only wrapper, not a REST field); SSE fed to
-    `json.Decoder`; `/models` path missing when BaseURL set (404); no status
-    check; `skip_thought_signature_validator` injected into Gemini-3 replays
-    (the vendored TS test forbids it); vertex base URL has a literal space +
-    wrong host/path/version; reads `GOOGLE_API_KEY` instead of
-    `GEMINI_API_KEY`; `toolConfig` sent without tools; cost never computed.
+  - *P11 google family* — **FIXED 2026-11-06 (story 32**, tests in
+    `google_parity_test.go` + `google_vertex_parity_test.go`; 6 mutations
+    detected: gutted status check, dropped `models/` prefix, restored
+    `"config"` body key, dropped the tools gate on `toolConfig`, dropped the
+    vertex Bearer, dropped CalculateCost**)**. Wire contract verified against
+    the locked @google/genai v1.52.0 SDK source (x-goog-api-key header;
+    `{base}/models/{id}:streamGenerateContent?alt=sse` with models/ always
+    prepended and `tunedModels/` passthrough; body = top-level
+    `generationConfig`/`systemInstruction{parts}`/`tools`/`toolConfig`
+    siblings, string systemInstruction wrapped via tContent, `model` key
+    stripped from the wire). *google-generative-ai*: ~~`"config"` body key~~;
+    ~~SSE fed to `json.Decoder`~~ (bufio `data:` scanner + parse
+    diagnostics); ~~missing `/models` segment~~; ~~no status check~~
+    ("Google API error (N)"); ~~query-param auth~~ (x-goog-api-key header);
+    ~~toolConfig without tools~~ (tools-present gate); ~~cost never
+    computed~~ (usage independent of candidates + CalculateCost); ~~parts
+    processed after finishReason~~ (TS order restored so the toolUse
+    override sees same-chunk calls); tool-call IDs get the TS
+    `name_<millis>_<n>` global-counter shape; OnPayload errors propagate;
+    mid-stream errors no longer labeled aborted; `An unknown error
+    occurred` post-check; full `streamSimpleGoogle` port (no-reasoning →
+    disabled config, clamp, off→high, gemini-3-pro/flash + gemma-4 level
+    maps, budget tables 128/2048/8192/32768 + 512-lite + 24576, custom
+    ThinkingBudgets). *google-shared*: strict base64 signature validation
+    (TS pattern + %4), anchored `getGeminiMajorVersion`, ~~invented
+    `skip_thought_signature_validator` injection~~ (dropped — TS drops
+    invalid signatures), nil args `?? {}`, sanitizeForOpenApi arrays
+    untouched, **empty-contents panic** in the functionResponse merge
+    guard (TS uses `.at(-1)` + optional chaining). *google-vertex*:
+    ~~literal space in the URL constant / wrong host / v1beta~~ (express
+    `aiplatform.googleapis.com/v1/publishers/google/models/...` + regional
+    `{location}-aiplatform.../v1/projects/{p}/locations/{l}/publishers/google/models/...`);
+    ~~`"your-project-id"`/`"us-central1"` hardcodes~~ (options →
+    GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT/GOOGLE_CLOUD_LOCATION → exact TS
+    error wording); ~~zero auth~~ (express API key with marker/placeholder
+    filtering; service-account RS256 JWT → token exchange; gcloud ADC
+    authorized-user refresh grant; token cache with expiry −60s; metadata
+    server deferred); dead stubs removed; full simple wrapper (vertex's own
+    level/budget variants — no flash-lite/gemma-4 branches, TS-faithful).
+    *Wiring* (P14 halves): both APIs registered + converters; catalog
+    groups replaced from TS (google = 28 models, google-vertex = 13 with
+    `{location}` template BaseURL + thinkingLevelMap incl. uppercase
+    GoogleThinkingLevel values like `"LOW"` stored verbatim). Env mapping
+    was already correct (`google`→GEMINI_API_KEY,
+    `google-vertex`→GOOGLE_CLOUD_API_KEY). Repo-wide typos NOT touched
+    (catalog-typos story): `StopReasonToolUse = "tooluse"` (TS "toolUse")
+    and the `thoughSignature` JSON tag.
   - *P12 amazon-bedrock (unregistered)*: parser reads JSON over eventstream
     framing; request shape wrong (system as string, no `{json:}` schema
     wrapper, `toolUse` without toolUseId, toolResult string with hardcoded
@@ -1304,10 +1344,11 @@ width-keyed caches). Two real bugs:
     iteration); no abort support/status error formatting.
   - *P14 registry/wiring*: ~~only 3 of 9 APIs registered — mistral, google,
     vertex, bedrock, azure, codex implemented but unreachable~~ **azure +
-    codex registered 2026-11-05 (story 31, with their P9b re-ports);
-    mistral/google/vertex/bedrock/gemini-cli remain unregistered [DEFERRED
-    until P11-P13 fix the families — registering broken providers is
-    strictly worse]**; ~~api mismatch panics~~
+    codex registered 2026-11-05 (story 31, with their P9b re-ports); google +
+    vertex registered 2026-11-06 (story 32, with their P11 re-ports);
+    mistral/bedrock/gemini-cli remain unregistered [DEFERRED until P13/P12/P16
+    settle those families — registering broken providers is strictly
+    worse]**; ~~api mismatch panics~~
     ✅ FIXED 2026-10-31 (story 28: wrapStream/wrapStreamSimple emit an
     in-band error event, TS wording "Mismatched api: … expected …", the
     sdk.go no-provider pattern; mutation-verified); catalog `Api` ids
