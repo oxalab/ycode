@@ -1,19 +1,12 @@
 package providers
 
 import (
-	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 
 	src "ycode/packages/llm/src"
 	"ycode/packages/llm/src/utils"
-)
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-const (
-	skipThoughtSignatureValidator = "skip_thought_signature_validator"
 )
 
 // =============================================================================
@@ -45,6 +38,10 @@ func retainThoughtSignature(existing, incoming string) string {
 	return existing
 }
 
+// base64SignaturePattern mirrors google-shared.ts: padding only at the end,
+// at least one data character, length a multiple of 4.
+var base64SignaturePattern = regexp.MustCompile(`^[A-Za-z0-9+/]+={0,2}$`)
+
 // resolveThoughtSignature only keeps signatures from the same provider/model with valid base64
 func resolveThoughtSignature(isSameProviderAndModel bool, signature string) string {
 	if !isSameProviderAndModel || signature == "" {
@@ -53,11 +50,8 @@ func resolveThoughtSignature(isSameProviderAndModel bool, signature string) stri
 	if len(signature)%4 != 0 {
 		return ""
 	}
-	// Basic base64 validation
-	for _, c := range signature {
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
-			return ""
-		}
+	if !base64SignaturePattern.MatchString(signature) {
+		return ""
 	}
 	return signature
 }
@@ -68,39 +62,19 @@ func requiresToolCallId(modelId string) bool {
 }
 
 // getGeminiMajorVersion extracts the major version from a model ID
+// (google-shared.ts: anchored at the start of the id).
+var geminiMajorVersionPattern = regexp.MustCompile(`^gemini(?:-live)?-(\d+)`)
+
 func getGeminiMajorVersion(modelId string) *int {
-	lower := strings.ToLower(modelId)
-	idx := strings.Index(lower, "gemini")
-	if idx == -1 {
+	m := geminiMajorVersionPattern.FindStringSubmatch(strings.ToLower(modelId))
+	if m == nil {
 		return nil
 	}
-
-	rest := lower[idx+6:]
-	if strings.HasPrefix(rest, "-live-") {
-		rest = rest[6:]
+	version, err := strconv.Atoi(m[1])
+	if err != nil {
+		return nil
 	}
-
-	if strings.HasPrefix(rest, "-") {
-		rest = rest[1:]
-	}
-
-	var versionStr string
-	for i, c := range rest {
-		if c >= '0' && c <= '9' {
-			versionStr += string(c)
-		} else {
-			break
-		}
-		if i > 2 { // Max 3 digits for version
-			break
-		}
-	}
-
-	var version int
-	if  err := json.Unmarshal([]byte(versionStr), &version); err == nil {
-		return &version
-	}
-	return nil
+	return &version
 }
 
 // supportsMultimodalFunctionResponse checks if a model supports multimodal function responses
@@ -223,23 +197,23 @@ func convertGoogleMessages(model src.Model[src.Api], context src.ChatContext) []
 
 				case *src.ToolCall:
 					thoughtSignature := resolveThoughtSignature(isSameProviderAndModel, b.ThoughtSignature)
-					isGemini3 := strings.Contains(strings.ToLower(model.ID), "gemini-3")
-					effectiveSignature := thoughtSignature
-					if effectiveSignature == "" && isGemini3 {
-						effectiveSignature = skipThoughtSignatureValidator
-					}
 
+					// args ?? {} — never marshal a nil map.
+					args := b.Arguments
+					if args == nil {
+						args = map[string]interface{}{}
+					}
 					functionCall := map[string]interface{}{
 						"functionCall": map[string]interface{}{
 							"name": b.Name,
-							"args": b.Arguments,
+							"args": args,
 						},
 					}
 					if requiresToolCallId(model.ID) {
 						functionCall["functionCall"].(map[string]interface{})["id"] = b.ID
 					}
-					if effectiveSignature != "" {
-						functionCall["thoughtSignature"] = effectiveSignature
+					if thoughtSignature != "" {
+						functionCall["thoughtSignature"] = thoughtSignature
 					}
 					parts = append(parts, functionCall)
 				}
@@ -320,6 +294,10 @@ func convertGoogleMessages(model src.Model[src.Api], context src.ChatContext) []
 			}
 
 			// Cloud Code Assist API requires all function responses to be in a single user turn
+			// (TS uses contents.at(-1) with optional chaining — guard the empty case).
+			if len(contents) == 0 {
+				continue
+			}
 			lastContent := contents[len(contents)-1]
 			if lastContent != nil && lastContent["role"] == "user" {
 				if parts, ok := lastContent["parts"].([]map[string]interface{}); ok {
@@ -370,7 +348,8 @@ var jsonSchemaMetaDeclarations = map[string]bool{
 	"$comment": true, "$defs": true, "definitions": true,
 }
 
-// sanitizeForOpenApi strips meta-declarations from a schema
+// sanitizeForOpenApi strips meta-declarations from a schema (arrays are
+// returned as-is, matching the reference).
 func sanitizeForOpenApi(schema interface{}) interface{} {
 	switch v := schema.(type) {
 	case map[string]interface{}:
@@ -383,11 +362,7 @@ func sanitizeForOpenApi(schema interface{}) interface{} {
 		}
 		return result
 	case []interface{}:
-		result := make([]interface{}, len(v))
-		for i, item := range v {
-			result[i] = sanitizeForOpenApi(item)
-		}
-		return result
+		return v
 	default:
 		return v
 	}

@@ -1,13 +1,17 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	src "ycode/packages/llm/src"
 	"ycode/packages/llm/src/utils"
@@ -17,25 +21,33 @@ import (
 // Constants
 // =============================================================================
 
+// Port of google.ts (the google-generative-ai provider). The reference
+// delegates transport to the @google/genai SDK; this port speaks the same
+// REST wire contract directly:
+//
+//	URL:  {base}/models/{model}:streamGenerateContent?alt=sse  (base carries
+//	      the api version, e.g. .../v1beta — tModel prepends models/)
+//	Auth: x-goog-api-key header
+//	Body: {contents, generationConfig:{temperature,maxOutputTokens,
+//	      thinkingConfig}, systemInstruction:{parts:[{text}]}, tools,
+//	      toolConfig} — all top-level siblings, no "config" key.
 const (
-	googleGenerativeAIBaseURL = "https://generativelanguage.googleapis.com/v1beta/models"
+	defaultGoogleBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 )
+
+var (
+	gemini3ProPattern   = regexp.MustCompile(`(?i)gemini-3(?:\.\d+)?-pro`)
+	gemini3FlashPattern = regexp.MustCompile(`(?i)gemini-3(?:\.\d+)?-flash`)
+	gemma4Pattern       = regexp.MustCompile(`(?i)gemma-?4`)
+)
+
+// Package-level counter for unique tool-call IDs (google.ts keeps a global
+// too; IDs embed a timestamp segment).
+var googleToolCallCounter atomic.Int64
 
 // =============================================================================
 // Types
 // =============================================================================
-
-type GoogleOptions struct {
-	APIKey     string
-	MaxTokens  *int
-	Temperature *float64
-	ToolChoice *string
-	Thinking   *GoogleThinkingConfig
-	Headers    map[string]string
-	// Callbacks
-	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
-	OnResponse func(resp interface{}, model src.Model[src.Api])
-}
 
 type GoogleThinkingConfig struct {
 	Enabled      bool
@@ -43,11 +55,26 @@ type GoogleThinkingConfig struct {
 	Level        *string
 }
 
+// GoogleOptions mirrors GoogleOptions in google.ts plus the Go Context seam.
+type GoogleOptions struct {
+	APIKey      string
+	MaxTokens   *int
+	Temperature *float64
+	ToolChoice  *string
+	Thinking    *GoogleThinkingConfig
+	Headers     map[string]string
+	Context     context.Context
+	// Callbacks
+	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
+	OnResponse func(resp interface{}, model src.Model[src.Api])
+}
+
 // =============================================================================
-// Provider registration
+// Streaming
 // =============================================================================
 
-// StreamGoogle creates an async streaming function for Google Generative AI
+// StreamGoogle creates an async streaming function for the Google
+// Generative AI (Gemini) API.
 func StreamGoogle(model src.Model[src.Api], context src.ChatContext, options *GoogleOptions) func() <-chan src.AssistantMessageEvent {
 	return func() <-chan src.AssistantMessageEvent {
 		ch := make(chan src.AssistantMessageEvent, 256)
@@ -65,39 +92,65 @@ func StreamGoogle(model src.Model[src.Api], context src.ChatContext, options *Go
 				StopReason: src.StopReasonStop,
 			}
 
-			// Build and send request
-			client := &http.Client{}
-			params := buildGoogleParams(model, context, options)
+			handleError := func(err error) {
+				if ctx := googleContext(options); ctx != nil && ctx.Err() != nil {
+					output.StopReason = src.StopReasonAborted
+				} else {
+					output.StopReason = src.StopReasonError
+				}
+				output.ErrorMessage = err.Error()
+				ch <- src.AssistantMessageEvent{Type: "error", Reason: output.StopReason, Error: output}
+			}
 
+			params := buildGoogleParams(model, context, options)
 			if options != nil && options.OnPayload != nil {
-				if nextParams, e := options.OnPayload(params, model); e == nil && nextParams != nil {
+				nextParams, e := options.OnPayload(params, model)
+				if e != nil {
+					handleError(e)
+					return
+				}
+				if nextParams != nil {
 					params = nextParams
 				}
 			}
 
-			resp, err := doGoogleRequest(client, model, params, options)
+			resp, err := doGoogleRequest(model, params, options)
 			if err != nil {
-				handleGoogleError(ch, output, err, false)
+				handleError(err)
 				return
 			}
 
 			if options != nil && options.OnResponse != nil {
 				options.OnResponse(map[string]interface{}{
-					"status": resp.StatusCode,
+					"status":  resp.StatusCode,
 					"headers": resp.Header,
 				}, model)
 			}
 
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+				resp.Body.Close()
+				handleError(fmt.Errorf("Google API error (%d): %s", resp.StatusCode, strings.TrimSpace(string(excerpt))))
+				return
+			}
+
 			ch <- src.AssistantMessageEvent{Type: "start", Partial: output}
 
-			// Process streaming response
+			// No signal support beyond request-bound Context (P15), so a
+			// mid-stream read error is an error, never an abort.
 			if err := processGoogleStream(resp.Body, ch, output, model); err != nil {
-				handleGoogleError(ch, output, err, true)
+				handleError(err)
+				return
+			}
+			resp.Body.Close()
+
+			if ctx := googleContext(options); ctx != nil && ctx.Err() != nil {
+				handleError(fmt.Errorf("Request was aborted"))
 				return
 			}
 
 			if output.StopReason == src.StopReasonError || output.StopReason == src.StopReasonAborted {
-				handleGoogleError(ch, output, fmt.Errorf("stream ended with error: %s", output.StopReason), false)
+				handleError(fmt.Errorf("An unknown error occurred"))
 				return
 			}
 
@@ -108,22 +161,57 @@ func StreamGoogle(model src.Model[src.Api], context src.ChatContext, options *Go
 	}
 }
 
+func googleContext(options *GoogleOptions) context.Context {
+	if options != nil {
+		return options.Context
+	}
+	return nil
+}
+
 // =============================================================================
 // Request handling
 // =============================================================================
 
-func doGoogleRequest(client *http.Client, model src.Model[src.Api], params interface{}, options *GoogleOptions) (*http.Response, error) {
-	baseURL := googleGenerativeAIBaseURL
-	if model.BaseURL != "" {
-		baseURL = model.BaseURL
+// resolveGoogleBaseURL normalizes the effective base (catalog entries carry
+// the api version, e.g. .../v1beta).
+func resolveGoogleBaseURL(baseURL string) string {
+	raw := strings.TrimSpace(baseURL)
+	if raw == "" {
+		raw = defaultGoogleBaseURL
 	}
+	return strings.TrimRight(raw, "/")
+}
 
-	body, err := json.Marshal(params)
+// googleModelPath mirrors the SDK's tModel: ids with an explicit models/ or
+// tunedModels/ prefix pass through, anything else gets models/.
+func googleModelPath(modelID string) string {
+	if strings.HasPrefix(modelID, "models/") || strings.HasPrefix(modelID, "tunedModels/") {
+		return modelID
+	}
+	return "models/" + modelID
+}
+
+func doGoogleRequest(model src.Model[src.Api], params interface{}, options *GoogleOptions) (*http.Response, error) {
+	body, err := marshalGoogleWireBody(params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build URL with API key
+	// {base}/models/{model}:streamGenerateContent?alt=sse
+	endpoint := fmt.Sprintf("%s/%s:streamGenerateContent?alt=sse",
+		resolveGoogleBaseURL(model.BaseURL), googleModelPath(model.ID))
+
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if ctx := googleContext(options); ctx != nil {
+		req = req.WithContext(ctx)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// SDK parity: the API key travels in the x-goog-api-key header.
 	apiKey := ""
 	if options != nil && options.APIKey != "" {
 		apiKey = options.APIKey
@@ -131,31 +219,36 @@ func doGoogleRequest(client *http.Client, model src.Model[src.Api], params inter
 	if apiKey == "" {
 		apiKey = getEnvApiKey(string(model.Provider))
 	}
-
-	url := fmt.Sprintf("%s/%s:streamGenerateContent?alt=sse&key=%s",
-		baseURL, model.ID, apiKey)
-
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	if apiKey != "" {
+		req.Header.Set("x-goog-api-key", apiKey)
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-
-	// Add model headers
 	for k, v := range model.Headers {
 		req.Header.Set(k, v)
 	}
-
-	// Add options headers
 	if options != nil {
 		for k, v := range options.Headers {
 			req.Header.Set(k, v)
 		}
 	}
 
+	client := &http.Client{}
 	return client.Do(req)
+}
+
+// marshalGoogleWireBody strips the "model" key before sending: the SDK moves
+// the model into the URL path, and the wire body must not carry it.
+func marshalGoogleWireBody(params interface{}) ([]byte, error) {
+	if m, ok := params.(map[string]interface{}); ok {
+		wire := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			if k != "model" {
+				wire[k] = v
+			}
+		}
+		return json.Marshal(wire)
+	}
+	return json.Marshal(params)
 }
 
 func handleGoogleError(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, err error, isAborted bool) {
@@ -174,26 +267,41 @@ func handleGoogleError(ch chan<- src.AssistantMessageEvent, output *src.Assistan
 func buildGoogleParams(model src.Model[src.Api], context src.ChatContext, options *GoogleOptions) interface{} {
 	contents := convertGoogleMessages(model, context)
 
-	config := map[string]interface{}{}
-
-	if context.SystemPrompt != "" {
-		config["systemInstruction"] = utils.SanitizeSurrogates(context.SystemPrompt)
+	// Params visible to onPayload mirror the TS pre-SDK shape:
+	// {model, contents, generationConfig, systemInstruction?, tools?,
+	// toolConfig?}.
+	params := map[string]interface{}{
+		"model":    model.ID,
+		"contents": contents,
 	}
 
+	generationConfig := map[string]interface{}{}
+
 	if options != nil && options.Temperature != nil {
-		config["temperature"] = *options.Temperature
+		generationConfig["temperature"] = *options.Temperature
 	}
 
 	if options != nil && options.MaxTokens != nil {
-		config["maxOutputTokens"] = *options.MaxTokens
+		generationConfig["maxOutputTokens"] = *options.MaxTokens
+	}
+
+	if context.SystemPrompt != "" {
+		// SDK tContent parity: a string systemInstruction is wrapped into a
+		// Content with a single text part.
+		params["systemInstruction"] = map[string]interface{}{
+			"parts": []map[string]interface{}{
+				{"text": utils.SanitizeSurrogates(context.SystemPrompt)},
+			},
+		}
 	}
 
 	if len(context.Tools) > 0 {
-		config["tools"] = convertGoogleTools(context.Tools, false)
+		params["tools"] = convertGoogleTools(context.Tools, false)
 	}
 
-	if options != nil && options.ToolChoice != nil {
-		config["toolConfig"] = map[string]interface{}{
+	// toolConfig only applies when tools are present (google.ts gates it).
+	if len(context.Tools) > 0 && options != nil && options.ToolChoice != nil {
+		params["toolConfig"] = map[string]interface{}{
 			"functionCallingConfig": map[string]interface{}{
 				"mode": mapGoogleToolChoice(*options.ToolChoice),
 			},
@@ -211,41 +319,53 @@ func buildGoogleParams(model src.Model[src.Api], context src.ChatContext, option
 			} else if options.Thinking.BudgetTokens != nil {
 				thinkingConfig["thinkingBudget"] = *options.Thinking.BudgetTokens
 			}
-			config["thinkingConfig"] = thinkingConfig
+			generationConfig["thinkingConfig"] = thinkingConfig
 		} else if options != nil && options.Thinking != nil && !options.Thinking.Enabled {
-			config["thinkingConfig"] = getDisabledGoogleThinkingConfig(model)
+			generationConfig["thinkingConfig"] = getDisabledGoogleThinkingConfig(model)
 		}
 	}
 
-	return map[string]interface{}{
-		"contents": contents,
-		"config":   config,
+	if len(generationConfig) > 0 {
+		params["generationConfig"] = generationConfig
 	}
+
+	return params
 }
 
 func getDisabledGoogleThinkingConfig(model src.Model[src.Api]) map[string]interface{} {
-	// Gemini 3.1 Pro cannot disable thinking
+	// Google docs: Gemini 3 Pro cannot disable thinking, and Gemini 3
+	// Flash / Gemma 4 do not support full thinking-off either. Use the
+	// lowest supported thinkingLevel so hidden thinking stays invisible.
 	if isGemini3ProModel(model.ID) {
-		return map[string]interface{}{
-			"thinkingLevel": "LOW",
-		}
+		return map[string]interface{}{"thinkingLevel": "LOW"}
+	}
+	if isGemini3FlashModel(model.ID) {
+		return map[string]interface{}{"thinkingLevel": "MINIMAL"}
+	}
+	if isGemma4Model(model.ID) {
+		return map[string]interface{}{"thinkingLevel": "MINIMAL"}
 	}
 
-	// Gemini 3 Flash and Gemma 4 use minimal thinking
-	if isGemini3FlashModel(model.ID) || isGemma4Model(model.ID) {
-		return map[string]interface{}{
-			"thinkingLevel": "MINIMAL",
-		}
-	}
-
-	// Gemini 2.x supports disabling via thinkingBudget = 0
-	return map[string]interface{}{
-		"thinkingBudget": 0,
-	}
+	// Gemini 2.x supports disabling via thinkingBudget = 0.
+	return map[string]interface{}{"thinkingBudget": 0}
 }
 
-func mapGoogleToolChoice(choice string) string {
-	switch strings.ToLower(choice) {
+func isGemini3ProModel(modelID string) bool {
+	return gemini3ProPattern.MatchString(strings.ToLower(modelID))
+}
+
+func isGemini3FlashModel(modelID string) bool {
+	return gemini3FlashPattern.MatchString(strings.ToLower(modelID))
+}
+
+func isGemma4Model(modelID string) bool {
+	return gemma4Pattern.MatchString(strings.ToLower(modelID))
+}
+
+// mapGoogleToolChoice maps toolChoice strings to Gemini function-calling
+// modes (google-shared.ts mapToolChoice).
+func mapGoogleToolChoice(toolChoice string) string {
+	switch strings.ToLower(toolChoice) {
 	case "auto":
 		return "AUTO"
 	case "none":
@@ -261,29 +381,33 @@ func mapGoogleToolChoice(choice string) string {
 // Stream processing
 // =============================================================================
 
+type googleBlockState struct {
+	Type              string
+	Text              string
+	Thinking          string
+	TextSignature     string
+	ThinkingSignature string
+}
+
 func processGoogleStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api]) error {
-	decoder := json.NewDecoder(body)
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
-	var currentBlock struct {
-		Type                string
-		Text                string
-		Thinking            string
-		TextSignature       string
-		ThinkingSignature   string
-		ID                  string
-		Name                string
-		Arguments           map[string]interface{}
-	}
+	var currentBlock googleBlockState
 
-	currentBlock.Type = ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
 
-	// Tool call counter for generating unique IDs
-	toolCallCounter := 0
-
-	for decoder.More() {
 		var chunk map[string]interface{}
-		if err := decoder.Decode(&chunk); err != nil {
-			return err
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return fmt.Errorf("Could not parse Google SSE event: %v", err)
 		}
 
 		// Set response ID
@@ -291,127 +415,8 @@ func processGoogleStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent
 			output.ResponseID = responseID
 		}
 
-		// Get candidate
-		candidates, ok := chunk["candidates"].([]interface{})
-		if !ok || len(candidates) == 0 {
-			continue
-		}
-
-		candidate, ok := candidates[0].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Parse finish reason
-		if finishReason, ok := candidate["finishReason"].(string); ok {
-			output.StopReason = mapGoogleStopReason(finishReason)
-			if hasToolCallsInContent(output.Content) {
-				output.StopReason = src.StopReasonToolUse
-			}
-		}
-
-		// Parse content parts
-		if content, ok := candidate["content"].(map[string]interface{}); ok {
-			if parts, ok := content["parts"].([]interface{}); ok {
-				for _, part := range parts {
-					if p, ok := part.(map[string]interface{}); ok {
-						// Text part
-						if text, ok := p["text"].(string); ok {
-							isThinking := isGoogleThinkingPart(p)
-							if currentBlock.Type == "" ||
-								(isThinking && currentBlock.Type != "thinking") ||
-								(!isThinking && currentBlock.Type != "text") {
-								finishCurrentGoogleBlock(ch, output, &currentBlock)
-								currentBlock.Type = "text"
-								if isThinking {
-									currentBlock.Type = "thinking"
-								}
-								currentBlock.Text = ""
-								currentBlock.Thinking = ""
-
-								if isThinking {
-									newBlock := &src.ThinkingContent{Type: "thinking", Thinking: ""}
-									output.Content = append(output.Content, newBlock)
-									idx := len(output.Content) - 1
-									ch <- src.AssistantMessageEvent{Type: "thinking_start", ContentIndex: &idx, Partial: output}
-								} else {
-									newBlock := &src.TextContent{Type: "text", Text: ""}
-									output.Content = append(output.Content, newBlock)
-									idx := len(output.Content) - 1
-									ch <- src.AssistantMessageEvent{Type: "text_start", ContentIndex: &idx, Partial: output}
-								}
-							}
-
-							idx := len(output.Content) - 1
-							if currentBlock.Type == "thinking" {
-								currentBlock.Thinking += text
-								if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
-									tc.Thinking = currentBlock.Thinking
-									currentBlock.ThinkingSignature = retainGoogleThoughtSignature(currentBlock.ThinkingSignature, getGoogleThoughtSignature(p))
-									tc.ThinkingSignature = currentBlock.ThinkingSignature
-									ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: &idx, Delta: text, Partial: output}
-								}
-							} else {
-								currentBlock.Text += text
-								if tc, ok := output.Content[idx].(*src.TextContent); ok {
-									tc.Text = currentBlock.Text
-									currentBlock.TextSignature = retainGoogleThoughtSignature(currentBlock.TextSignature, getGoogleThoughtSignature(p))
-									tc.TextSignature = currentBlock.TextSignature
-									ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: &idx, Delta: text, Partial: output}
-								}
-							}
-						}
-
-						// Function call part
-						if functionCall, ok := p["functionCall"].(map[string]interface{}); ok {
-							finishCurrentGoogleBlock(ch, output, &currentBlock)
-							currentBlock.Type = ""
-
-							name := ""
-							if n, ok := functionCall["name"].(string); ok {
-								name = n
-							}
-
-							args := map[string]interface{}{}
-							if a, ok := functionCall["args"].(map[string]interface{}); ok {
-								args = a
-							}
-
-							// Generate unique ID
-							providedId := ""
-							if id, ok := functionCall["id"].(string); ok {
-								providedId = id
-							}
-							toolCallId := providedId
-							if toolCallId == "" || hasToolCallID(output.Content, toolCallId) {
-								toolCallId = fmt.Sprintf("%s_%d", name, toolCallCounter)
-								toolCallCounter++
-							}
-
-							toolCall := &src.ToolCall{
-								Type:      "toolCall",
-								ID:        toolCallId,
-								Name:      name,
-								Arguments: args,
-							}
-
-							if sig := getGoogleThoughtSignature(p); sig != "" {
-								toolCall.ThoughtSignature = sig
-							}
-
-							output.Content = append(output.Content, toolCall)
-							idx := len(output.Content) - 1
-							argsJson, _ := json.Marshal(args)
-							ch <- src.AssistantMessageEvent{Type: "toolcall_start", ContentIndex: &idx, Partial: output}
-							ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: &idx, Delta: string(argsJson), Partial: output}
-							ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: &idx, ToolCall: toolCall, Partial: output}
-						}
-					}
-				}
-			}
-		}
-
-		// Parse usage metadata
+		// usageMetadata is processed independently of candidates (a chunk
+		// may carry usage without any candidate).
 		if usageMetadata, ok := chunk["usageMetadata"].(map[string]interface{}); ok {
 			promptTokens := getFloatValue(usageMetadata, "promptTokenCount")
 			candidatesTokens := getFloatValue(usageMetadata, "candidatesTokenCount")
@@ -424,59 +429,170 @@ func processGoogleStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent
 			output.Usage.CacheRead = int(cachedTokens)
 			output.Usage.CacheWrite = 0
 			output.Usage.TotalTokens = int(totalTokens)
+			output.Usage.Cost = usageCostFromModelCost(src.CalculateCost(&model, &output.Usage))
 		}
+
+		candidates, ok := chunk["candidates"].([]interface{})
+		if !ok || len(candidates) == 0 {
+			continue
+		}
+
+		candidate, ok := candidates[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Content parts are processed BEFORE the finish reason (TS order) so
+		// the toolUse override below sees tool calls from this same chunk.
+		if content, ok := candidate["content"].(map[string]interface{}); ok {
+			if parts, ok := content["parts"].([]interface{}); ok {
+				for _, part := range parts {
+					p, ok := part.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					processGooglePart(p, ch, output, &currentBlock)
+				}
+			}
+		}
+
+		// Parse finish reason
+		if finishReason, ok := candidate["finishReason"].(string); ok {
+			output.StopReason = mapGoogleStopReason(finishReason)
+			if hasToolCallsInContent(output.Content) {
+				output.StopReason = src.StopReasonToolUse
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 
 	finishCurrentGoogleBlock(ch, output, &currentBlock)
 	return nil
 }
 
-func finishCurrentGoogleBlock(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, block *struct {
-	Type                string
-	Text                string
-	Thinking            string
-	TextSignature       string
-	ThinkingSignature   string
-	ID                  string
-	Name                string
-	Arguments           map[string]interface{}
-}) {
-	switch block.Type {
-	case "text":
-		if len(output.Content) > 0 {
-			idx := len(output.Content) - 1
-			if tc, ok := output.Content[idx].(*src.TextContent); ok {
-				ch <- src.AssistantMessageEvent{Type: "text_end", ContentIndex: &idx, Content: tc.Text, Partial: output}
+func processGooglePart(p map[string]interface{}, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, currentBlock *googleBlockState) {
+	// Text part
+	if text, ok := p["text"].(string); ok {
+		isThinking := isGoogleThinkingPart(p)
+		if currentBlock.Type == "" ||
+			(isThinking && currentBlock.Type != "thinking") ||
+			(!isThinking && currentBlock.Type != "text") {
+			finishCurrentGoogleBlock(ch, output, currentBlock)
+			*currentBlock = googleBlockState{}
+			if isThinking {
+				currentBlock.Type = "thinking"
+				newBlock := &src.ThinkingContent{Type: "thinking", Thinking: ""}
+				output.Content = append(output.Content, newBlock)
+				idx := len(output.Content) - 1
+				ch <- src.AssistantMessageEvent{Type: "thinking_start", ContentIndex: &idx, Partial: output}
+			} else {
+				currentBlock.Type = "text"
+				newBlock := &src.TextContent{Type: "text", Text: ""}
+				output.Content = append(output.Content, newBlock)
+				idx := len(output.Content) - 1
+				ch <- src.AssistantMessageEvent{Type: "text_start", ContentIndex: &idx, Partial: output}
 			}
 		}
-	case "thinking":
-		if len(output.Content) > 0 {
-			idx := len(output.Content) - 1
+
+		idx := len(output.Content) - 1
+		if currentBlock.Type == "thinking" {
+			currentBlock.Thinking += text
 			if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
-				ch <- src.AssistantMessageEvent{Type: "thinking_end", ContentIndex: &idx, Content: tc.Thinking, Partial: output}
+				tc.Thinking = currentBlock.Thinking
+				currentBlock.ThinkingSignature = retainGoogleThoughtSignature(currentBlock.ThinkingSignature, getGoogleThoughtSignature(p))
+				tc.ThinkingSignature = currentBlock.ThinkingSignature
+				ch <- src.AssistantMessageEvent{Type: "thinking_delta", ContentIndex: &idx, Delta: text, Partial: output}
+			}
+		} else {
+			currentBlock.Text += text
+			if tc, ok := output.Content[idx].(*src.TextContent); ok {
+				tc.Text = currentBlock.Text
+				currentBlock.TextSignature = retainGoogleThoughtSignature(currentBlock.TextSignature, getGoogleThoughtSignature(p))
+				tc.TextSignature = currentBlock.TextSignature
+				ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: &idx, Delta: text, Partial: output}
 			}
 		}
 	}
 
+	// Function call part
+	if functionCall, ok := p["functionCall"].(map[string]interface{}); ok {
+		finishCurrentGoogleBlock(ch, output, currentBlock)
+		*currentBlock = googleBlockState{}
+
+		name := ""
+		if n, ok := functionCall["name"].(string); ok {
+			name = n
+		}
+
+		// args ?? {} — never marshal a nil map.
+		args := map[string]interface{}{}
+		if a, ok := functionCall["args"].(map[string]interface{}); ok {
+			args = a
+		}
+
+		// Unique ID when missing or duplicated
+		// (google.ts: `${name}_${Date.now()}_${++counter}`).
+		providedID := ""
+		if id, ok := functionCall["id"].(string); ok {
+			providedID = id
+		}
+		toolCallID := providedID
+		if toolCallID == "" || hasToolCallID(output.Content, toolCallID) {
+			toolCallID = fmt.Sprintf("%s_%d_%d", name, time.Now().UnixMilli(), googleToolCallCounter.Add(1))
+		}
+
+		toolCall := &src.ToolCall{
+			Type:      "toolCall",
+			ID:        toolCallID,
+			Name:      name,
+			Arguments: args,
+		}
+
+		if sig := getGoogleThoughtSignature(p); sig != "" {
+			toolCall.ThoughtSignature = sig
+		}
+
+		output.Content = append(output.Content, toolCall)
+		idx := len(output.Content) - 1
+		argsJson, _ := json.Marshal(args)
+		ch <- src.AssistantMessageEvent{Type: "toolcall_start", ContentIndex: &idx, Partial: output}
+		ch <- src.AssistantMessageEvent{Type: "toolcall_delta", ContentIndex: &idx, Delta: string(argsJson), Partial: output}
+		ch <- src.AssistantMessageEvent{Type: "toolcall_end", ContentIndex: &idx, ToolCall: toolCall, Partial: output}
+	}
+}
+
+func finishCurrentGoogleBlock(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, block *googleBlockState) {
+	if block == nil || block.Type == "" {
+		return
+	}
+	idx := len(output.Content) - 1
+	if idx < 0 {
+		return
+	}
+	if block.Type == "text" {
+		if tc, ok := output.Content[idx].(*src.TextContent); ok {
+			tc.TextSignature = block.TextSignature
+			ch <- src.AssistantMessageEvent{Type: "text_end", ContentIndex: &idx, Content: tc.Text, Partial: output}
+		}
+	} else if block.Type == "thinking" {
+		if tc, ok := output.Content[idx].(*src.ThinkingContent); ok {
+			tc.ThinkingSignature = block.ThinkingSignature
+			ch <- src.AssistantMessageEvent{Type: "thinking_end", ContentIndex: &idx, Content: tc.Thinking, Partial: output}
+		}
+	}
 	block.Type = ""
-	block.Text = ""
-	block.Thinking = ""
-	block.TextSignature = ""
-	block.ThinkingSignature = ""
 }
 
 func isGoogleThinkingPart(part map[string]interface{}) bool {
-	if thought, ok := part["thought"].(bool); ok {
-		return thought
-	}
-	return false
+	thought, ok := part["thought"].(bool)
+	return ok && thought
 }
 
 func getGoogleThoughtSignature(part map[string]interface{}) string {
-	if sig, ok := part["thoughtSignature"].(string); ok {
-		return sig
-	}
-	return ""
+	sig, _ := part["thoughtSignature"].(string)
+	return sig
 }
 
 func retainGoogleThoughtSignature(existing, incoming string) string {
@@ -505,61 +621,146 @@ func hasToolCallsInContent(content []src.ContentBlock) bool {
 }
 
 // =============================================================================
-// Model detection helpers
+// Simple stream wrapper
 // =============================================================================
 
-var (
-	gemma4Pattern      = regexp.MustCompile(`(?i)gemma-?4`)
-	gemini3ProPattern  = regexp.MustCompile(`(?i)gemini-3(?:\.\d+)?-pro`)
-	gemini3FlashPattern = regexp.MustCompile(`(?i)gemini-3(?:\.\d+)?-flash`)
-)
-
-func isGemma4Model(modelId string) bool {
-	return gemma4Pattern.MatchString(modelId)
-}
-
-func isGemini3ProModel(modelId string) bool {
-	return gemini3ProPattern.MatchString(modelId)
-}
-
-func isGemini3FlashModel(modelId string) bool {
-	return gemini3FlashPattern.MatchString(modelId)
-}
-
-func getGoogleThinkingLevel(effort src.ThinkingLevel, modelId string) string {
-	clamped := src.High
-	if effort == src.Minimal || effort == src.Low {
-		clamped = effort
+// StreamSimpleGoogle provides a simplified streaming interface for the
+// Google Generative AI API (google.ts streamSimpleGoogle).
+func StreamSimpleGoogle(model src.Model[src.Api], context src.ChatContext, options *src.SimpleStreamOptions) func() <-chan src.AssistantMessageEvent {
+	apiKey := ""
+	if options != nil {
+		apiKey = options.APIKey
+	}
+	if apiKey == "" {
+		apiKey = getEnvApiKey(string(model.Provider))
+	}
+	if apiKey == "" {
+		return noKeyErrorStream(model, fmt.Errorf("No API key for provider: %s", model.Provider))
 	}
 
-	if isGemini3ProModel(modelId) {
-		switch clamped {
-		case src.Minimal, src.Low:
+	base := BuildBaseOptions(model, options, "")
+	if options == nil || options.Reasoning == "" {
+		opts := googleOptionsFromStreamOptions(base)
+		opts.APIKey = apiKey
+		opts.Thinking = &GoogleThinkingConfig{Enabled: false}
+		return StreamGoogle(model, context, opts)
+	}
+
+	clamped := src.ClampThinkingLevel(&model, options.Reasoning)
+	effort := string(clamped)
+	if clamped == src.Off {
+		effort = "high"
+	}
+
+	modelID := model.ID
+	if isGemini3ProModel(modelID) || isGemini3FlashModel(modelID) || isGemma4Model(modelID) {
+		level := getGoogleThinkingLevel(effort, modelID)
+		opts := googleOptionsFromStreamOptions(base)
+		opts.APIKey = apiKey
+		opts.Thinking = &GoogleThinkingConfig{Enabled: true, Level: &level}
+		return StreamGoogle(model, context, opts)
+	}
+
+	var customBudgets *src.ThinkingBudgets
+	if options != nil {
+		customBudgets = options.ThinkingBudgets
+	}
+	budget := getGoogleBudget(modelID, effort, customBudgets)
+	opts := googleOptionsFromStreamOptions(base)
+	opts.APIKey = apiKey
+	opts.Thinking = &GoogleThinkingConfig{Enabled: true, BudgetTokens: &budget}
+	return StreamGoogle(model, context, opts)
+}
+
+func googleOptionsFromStreamOptions(base src.StreamOptions) *GoogleOptions {
+	return &GoogleOptions{
+		MaxTokens:   base.MaxTokens,
+		Temperature: base.Temperature,
+		Headers:     base.Headers,
+		Context:     base.Context,
+	}
+}
+
+// getGoogleThinkingLevel ports getThinkingLevel: level-based thinking for
+// Gemini 3 Pro/Flash and Gemma 4 models.
+func getGoogleThinkingLevel(effort string, modelID string) string {
+	if isGemini3ProModel(modelID) {
+		switch effort {
+		case "minimal", "low":
 			return "LOW"
-		case src.Medium, src.High:
+		case "medium", "high":
 			return "HIGH"
 		}
 	}
-
-	if isGemma4Model(modelId) {
-		switch clamped {
-		case src.Minimal, src.Low:
+	if isGemma4Model(modelID) {
+		switch effort {
+		case "minimal", "low":
 			return "MINIMAL"
-		case src.Medium, src.High:
+		case "medium", "high":
 			return "HIGH"
 		}
 	}
-
-	switch clamped {
-	case src.Minimal:
+	switch effort {
+	case "minimal":
 		return "MINIMAL"
-	case src.Low:
+	case "low":
 		return "LOW"
-	case src.Medium:
+	case "medium":
 		return "MEDIUM"
-	case src.High:
+	case "high":
 		return "HIGH"
-	default:
-		return "MEDIUM"
 	}
+	return "MEDIUM"
+}
+
+// getGoogleBudget ports getGoogleBudget: budget-based thinking for Gemini
+// 2.5 models, -1 (dynamic) otherwise.
+func getGoogleBudget(modelID string, effort string, customBudgets *src.ThinkingBudgets) int {
+	if customBudgets != nil {
+		switch effort {
+		case "minimal":
+			if customBudgets.Minimal != nil {
+				return *customBudgets.Minimal
+			}
+		case "low":
+			if customBudgets.Low != nil {
+				return *customBudgets.Low
+			}
+		case "medium":
+			if customBudgets.Medium != nil {
+				return *customBudgets.Medium
+			}
+		case "high":
+			if customBudgets.High != nil {
+				return *customBudgets.High
+			}
+		}
+	}
+
+	lower := strings.ToLower(modelID)
+	type budgetTable struct {
+		minimal, low, medium, high int
+	}
+	var table budgetTable
+	switch {
+	case strings.Contains(lower, "2.5-pro"):
+		table = budgetTable{minimal: 128, low: 2048, medium: 8192, high: 32768}
+	case strings.Contains(lower, "2.5-flash-lite"):
+		table = budgetTable{minimal: 512, low: 2048, medium: 8192, high: 24576}
+	case strings.Contains(lower, "2.5-flash"):
+		table = budgetTable{minimal: 128, low: 2048, medium: 8192, high: 24576}
+	default:
+		return -1
+	}
+	switch effort {
+	case "minimal":
+		return table.minimal
+	case "low":
+		return table.low
+	case "medium":
+		return table.medium
+	case "high":
+		return table.high
+	}
+	return -1
 }
