@@ -184,7 +184,31 @@ func RegisterBuiltInApiProviders() {
 		},
 	}, "builtin")
 
-	// Note: Additional providers (mistral, bedrock, gemini-cli)
+	// Mistral (chat completions)
+	src.RegisterApiProvider(src.ApiProvider{
+		Api: src.Api("mistral-conversations"),
+		Stream: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.StreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				opts := convertStreamOptionsToMistral(options)
+				sourceCh := StreamMistral(model, chatCtx, opts)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+		StreamSimple: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.SimpleStreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				sourceCh := StreamSimpleMistral(model, chatCtx, options)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+	}, "builtin")
+
+	// Note: Additional providers (bedrock, gemini-cli)
 	// would be registered here following the same pattern once their implementations are complete.
 }
 
@@ -328,6 +352,21 @@ func convertStreamOptionsToGoogleVertex(options *src.StreamOptions) *GoogleVerte
 		MaxTokens:   options.MaxTokens,
 		Temperature: options.Temperature,
 		Headers:     options.Headers,
+		Context:     options.Context,
+	}
+}
+
+// convertStreamOptionsToMistral converts StreamOptions to MistralOptions
+func convertStreamOptionsToMistral(options *src.StreamOptions) *MistralOptions {
+	if options == nil {
+		return nil
+	}
+	return &MistralOptions{
+		APIKey:      options.APIKey,
+		MaxTokens:   options.MaxTokens,
+		Temperature: options.Temperature,
+		Headers:     options.Headers,
+		SessionID:   options.SessionID,
 		Context:     options.Context,
 	}
 }

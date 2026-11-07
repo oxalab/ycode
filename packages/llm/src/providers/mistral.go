@@ -1,7 +1,9 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
+	gocontext "context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,26 +19,29 @@ import (
 // =============================================================================
 
 const (
-	mistralAPIBaseURL        = "https://api.mistral.ai/v1/chat/completions"
-	mistralToolCallIDLength = 9
+	mistralDefaultBaseURL  = "https://api.mistral.ai"
+	mistralChatCompletionsPath = "/v1/chat/completions"
+	mistralToolCallIDLength    = 9
+	mistralMaxErrorBodyChars   = 4000
 )
 
 // =============================================================================
 // Types
 // =============================================================================
 
+// MistralOptions mirrors MistralOptions in mistral.ts plus the Go Context seam.
 type MistralOptions struct {
-	APIKey         string
-	MaxTokens      *int
-	Temperature    *float64
-	ToolChoice     interface{}
-	PromptMode     *string
+	APIKey          string
+	MaxTokens       *int
+	Temperature     *float64
+	ToolChoice      interface{}
+	PromptMode      *string
 	ReasoningEffort *string
-	SessionID      string
-	Headers        map[string]string
+	SessionID       string
+	Headers         map[string]string
+	Context         gocontext.Context
 	// Callbacks
-	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
-	OnResponse func(resp interface{}, model src.Model[src.Api])
+	OnPayload func(params interface{}, model src.Model[src.Api]) (interface{}, error)
 }
 
 type MistralToolCallIDNormalizer struct {
@@ -45,7 +50,7 @@ type MistralToolCallIDNormalizer struct {
 }
 
 // =============================================================================
-// Provider registration
+// Provider entry points
 // =============================================================================
 
 // StreamMistral creates an async streaming function for Mistral Conversations API
@@ -55,6 +60,11 @@ func StreamMistral(model src.Model[src.Api], context src.ChatContext, options *M
 
 		go func() {
 			defer close(ch)
+
+			ctx := gocontext.Background()
+			if options != nil && options.Context != nil {
+				ctx = options.Context
+			}
 
 			output := &src.AssistantMessage{
 				Role:       src.RoleAssistant,
@@ -66,8 +76,18 @@ func StreamMistral(model src.Model[src.Api], context src.ChatContext, options *M
 				StopReason: src.StopReasonStop,
 			}
 
-			// Build and send request
-			client := &http.Client{}
+			apiKey := ""
+			if options != nil && options.APIKey != "" {
+				apiKey = options.APIKey
+			}
+			if apiKey == "" {
+				apiKey = getEnvApiKey(string(model.Provider))
+			}
+			if apiKey == "" {
+				handleMistralError(ch, output, fmt.Errorf("No API key for provider: %s", model.Provider), false)
+				return
+			}
+
 			normalizer := NewMistralToolCallIDNormalizer()
 			transformedMessages := TransformMessages(context.Messages, model, func(id string, _ src.Model[src.Api], _ src.AssistantMessage) string {
 				return normalizer.Normalize(id)
@@ -81,29 +101,35 @@ func StreamMistral(model src.Model[src.Api], context src.ChatContext, options *M
 				}
 			}
 
-			resp, err := doMistralRequest(client, model, params, options)
+			resp, err := doMistralRequest(ctx, model, params, options, apiKey)
 			if err != nil {
-				handleMistralError(ch, output, err, false)
+				if ctx.Err() != nil {
+					handleMistralError(ch, output, fmt.Errorf("Request was aborted"), true)
+				} else {
+					handleMistralError(ch, output, err, false)
+				}
 				return
 			}
-
-			if options != nil && options.OnResponse != nil {
-				options.OnResponse(map[string]interface{}{
-					"status": resp.StatusCode,
-					"headers": resp.Header,
-				}, model)
-			}
+			defer resp.Body.Close()
 
 			ch <- src.AssistantMessageEvent{Type: "start", Partial: output}
 
-			// Process streaming response
-			if err := processMistralStream(resp.Body, ch, output, model, normalizer); err != nil {
-				handleMistralError(ch, output, err, true)
+			if err := processMistralStream(resp.Body, ch, output, model); err != nil {
+				if ctx.Err() != nil {
+					handleMistralError(ch, output, fmt.Errorf("Request was aborted"), true)
+				} else {
+					handleMistralError(ch, output, err, false)
+				}
+				return
+			}
+
+			if ctx.Err() != nil {
+				handleMistralError(ch, output, fmt.Errorf("Request was aborted"), true)
 				return
 			}
 
 			if output.StopReason == src.StopReasonError || output.StopReason == src.StopReasonAborted {
-				handleMistralError(ch, output, fmt.Errorf("stream ended with error: %s", output.StopReason), false)
+				handleMistralError(ch, output, fmt.Errorf("An unknown error occurred"), false)
 				return
 			}
 
@@ -114,40 +140,76 @@ func StreamMistral(model src.Model[src.Api], context src.ChatContext, options *M
 	}
 }
 
-// =============================================================================
-// Request handling
-// =============================================================================
-
-func doMistralRequest(client *http.Client, model src.Model[src.Api], params interface{}, options *MistralOptions) (*http.Response, error) {
-	baseURL := mistralAPIBaseURL
-	if model.BaseURL != "" {
-		baseURL = model.BaseURL
-	}
-
-	body, err := json.Marshal(params)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", baseURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-
+// StreamSimpleMistral maps provider-agnostic SimpleStreamOptions to Mistral
+// options (streamSimpleMistral in mistral.ts).
+func StreamSimpleMistral(model src.Model[src.Api], context src.ChatContext, options *src.SimpleStreamOptions) func() <-chan src.AssistantMessageEvent {
 	apiKey := ""
-	if options != nil && options.APIKey != "" {
+	if options != nil {
 		apiKey = options.APIKey
 	}
 	if apiKey == "" {
 		apiKey = getEnvApiKey(string(model.Provider))
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("No API key for provider: %s", model.Provider)
+		return noKeyErrorStream(model, fmt.Errorf("No API key for provider: %s", model.Provider))
 	}
 
+	base := BuildBaseOptions(model, options, "")
+	base.APIKey = apiKey
+
+	opts := &MistralOptions{
+		APIKey:      base.APIKey,
+		MaxTokens:   base.MaxTokens,
+		Temperature: base.Temperature,
+		Headers:     base.Headers,
+		SessionID:   base.SessionID,
+		Context:     base.Context,
+	}
+
+	level := ""
+	if options != nil && options.Reasoning != "" {
+		clamped := src.ClampThinkingLevel(&model, options.Reasoning)
+		if clamped != src.Off {
+			level = string(clamped)
+		}
+	}
+	shouldUseReasoning := model.Reasoning && level != ""
+
+	if shouldUseReasoning && !usesMistralReasoningEffort(model) {
+		promptMode := "reasoning"
+		opts.PromptMode = &promptMode
+	}
+	if shouldUseReasoning && usesMistralReasoningEffort(model) {
+		opts.ReasoningEffort = mapMistralReasoningEffort(model, level)
+	}
+
+	return StreamMistral(model, context, opts)
+}
+
+// =============================================================================
+// Request handling
+// =============================================================================
+
+func doMistralRequest(ctx gocontext.Context, model src.Model[src.Api], params interface{}, options *MistralOptions, apiKey string) (*http.Response, error) {
+	baseURL := mistralDefaultBaseURL
+	if model.BaseURL != "" {
+		baseURL = strings.TrimRight(model.BaseURL, "/")
+	}
+	endpoint := baseURL + mistralChatCompletionsPath
+
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	// Add model headers
@@ -155,16 +217,24 @@ func doMistralRequest(client *http.Client, model src.Model[src.Api], params inte
 		req.Header.Set(k, v)
 	}
 
-	// Add session affinity header
-	if options != nil && options.SessionID != "" {
+	// Mistral infrastructure uses `x-affinity` for KV-cache reuse (prefix
+	// caching). Respect explicit caller-provided header values.
+	sessionID := ""
+	if options != nil {
+		sessionID = options.SessionID
+	}
+	if sessionID != "" {
 		hasAffinity := false
-		if options.Headers != nil {
+		if _, ok := model.Headers["x-affinity"]; ok {
+			hasAffinity = true
+		}
+		if options != nil {
 			if _, ok := options.Headers["x-affinity"]; ok {
 				hasAffinity = true
 			}
 		}
 		if !hasAffinity {
-			req.Header.Set("x-affinity", options.SessionID)
+			req.Header.Set("x-affinity", sessionID)
 		}
 	}
 
@@ -175,7 +245,29 @@ func doMistralRequest(client *http.Client, model src.Model[src.Api], params inte
 		}
 	}
 
-	return client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		bodyText := strings.TrimSpace(string(raw))
+		if bodyText != "" {
+			return nil, fmt.Errorf("Mistral API error (%d): %s", resp.StatusCode, truncateMistralErrorText(bodyText, mistralMaxErrorBodyChars))
+		}
+		return nil, fmt.Errorf("Mistral API error (%d): Response returned an error code", resp.StatusCode)
+	}
+
+	return resp, nil
+}
+
+func truncateMistralErrorText(text string, maxChars int) string {
+	if len(text) <= maxChars {
+		return text
+	}
+	return fmt.Sprintf("%s... [truncated %d chars]", text[:maxChars], len(text)-maxChars)
 }
 
 func handleMistralError(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, err error, isAborted bool) {
@@ -216,7 +308,7 @@ func buildMistralParams(model src.Model[src.Api], context src.ChatContext, trans
 	}
 
 	if options != nil && options.MaxTokens != nil {
-		params["maxTokens"] = *options.MaxTokens
+		params["max_tokens"] = *options.MaxTokens
 	}
 
 	if len(context.Tools) > 0 {
@@ -224,15 +316,15 @@ func buildMistralParams(model src.Model[src.Api], context src.ChatContext, trans
 	}
 
 	if options != nil && options.ToolChoice != nil {
-		params["toolChoice"] = mapMistralToolChoice(options.ToolChoice)
+		params["tool_choice"] = mapMistralToolChoice(options.ToolChoice)
 	}
 
 	if options != nil && options.PromptMode != nil {
-		params["promptMode"] = *options.PromptMode
+		params["prompt_mode"] = *options.PromptMode
 	}
 
 	if options != nil && options.ReasoningEffort != nil {
-		params["reasoningEffort"] = *options.ReasoningEffort
+		params["reasoning_effort"] = *options.ReasoningEffort
 	}
 
 	return params
@@ -276,7 +368,7 @@ func toMistralChatMessages(messages []src.Message, supportsImages bool) []map[st
 					if supportsImages {
 						content = append(content, map[string]interface{}{
 							"type":      "image_url",
-							"imageUrl": "data:" + c.MimeType + ";base64," + c.Data,
+							"image_url": "data:" + c.MimeType + ";base64," + c.Data,
 						})
 					}
 				}
@@ -341,14 +433,15 @@ func toMistralChatMessages(messages []src.Message, supportsImages bool) []map[st
 			}
 
 			assistantMsg := map[string]interface{}{
-				"role": "assistant",
+				"role":   "assistant",
+				"prefix": false,
 			}
 
 			if len(contentParts) > 0 {
 				assistantMsg["content"] = contentParts
 			}
 			if len(toolCalls) > 0 {
-				assistantMsg["toolCalls"] = toolCalls
+				assistantMsg["tool_calls"] = toolCalls
 			}
 
 			if len(contentParts) > 0 || len(toolCalls) > 0 {
@@ -393,17 +486,17 @@ func toMistralChatMessages(messages []src.Message, supportsImages bool) []map[st
 					if ic, ok := c.(*src.ImageContent); ok {
 						toolContent = append(toolContent, map[string]interface{}{
 							"type":      "image_url",
-							"imageUrl": "data:" + ic.MimeType + ";base64," + ic.Data,
+							"image_url": "data:" + ic.MimeType + ";base64," + ic.Data,
 						})
 					}
 				}
 			}
 
 			result = append(result, map[string]interface{}{
-				"role":       "tool",
-				"toolCallId": tr.ToolCallID,
-				"name":       tr.ToolName,
-				"content":    toolContent,
+				"role":         "tool",
+				"tool_call_id": tr.ToolCallID,
+				"name":         tr.ToolName,
+				"content":      toolContent,
 			})
 		}
 	}
@@ -491,7 +584,7 @@ func mapMistralToolChoice(choice interface{}) interface{} {
 		case "auto", "none", "any", "required":
 			return v
 		default:
-			return "auto"
+			return v
 		}
 	case map[string]interface{}:
 		if typ, ok := v["type"].(string); ok && typ == "function" {
@@ -508,15 +601,16 @@ func mapMistralToolChoice(choice interface{}) interface{} {
 		}
 	}
 
-	return "auto"
+	return nil
 }
 
 // =============================================================================
 // Stream processing
 // =============================================================================
 
-func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api], normalizer *MistralToolCallIDNormalizer) error {
-	decoder := json.NewDecoder(body)
+func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api]) error {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	var currentBlock struct {
 		Type  string
@@ -526,11 +620,22 @@ func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEven
 	currentBlock.Type = ""
 
 	toolBlocksByKey := make(map[string]int)
+	partialArgsByKey := make(map[string]string)
+	var toolKeyOrder []string
 
-	for decoder.More() {
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+
 		var chunk map[string]interface{}
-		if err := decoder.Decode(&chunk); err != nil {
-			return err
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return fmt.Errorf("Could not parse Mistral SSE event: %v", err)
 		}
 
 		// Set response ID
@@ -540,12 +645,15 @@ func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEven
 
 		// Parse usage
 		if usage, ok := chunk["usage"].(map[string]interface{}); ok {
-			output.Usage.Input = int(getFloatValue(usage, "promptTokens"))
-			output.Usage.Output = int(getFloatValue(usage, "completionTokens"))
-			output.Usage.TotalTokens = int(getFloatValue(usage, "totalTokens"))
+			output.Usage.Input = int(getFloatValue(usage, "prompt_tokens"))
+			output.Usage.Output = int(getFloatValue(usage, "completion_tokens"))
+			output.Usage.CacheRead = 0
+			output.Usage.CacheWrite = 0
+			output.Usage.TotalTokens = int(getFloatValue(usage, "total_tokens"))
 			if output.Usage.TotalTokens == 0 {
 				output.Usage.TotalTokens = output.Usage.Input + output.Usage.Output
 			}
+			output.Usage.Cost = usageCostFromModelCost(src.CalculateCost(&model, &output.Usage))
 		}
 
 		// Get choice
@@ -594,6 +702,9 @@ func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEven
 					}
 
 					currentBlock.Text += textDelta
+					if tc, ok := output.Content[len(output.Content)-1].(*src.TextContent); ok {
+						tc.Text = currentBlock.Text
+					}
 					idx := len(output.Content) - 1
 					ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: &idx, Delta: textDelta, Partial: output}
 				}
@@ -648,6 +759,9 @@ func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEven
 								}
 
 								currentBlock.Text += textDelta
+								if tc, ok := output.Content[len(output.Content)-1].(*src.TextContent); ok {
+									tc.Text = currentBlock.Text
+								}
 								idx := len(output.Content) - 1
 								ch <- src.AssistantMessageEvent{Type: "text_delta", ContentIndex: &idx, Delta: textDelta, Partial: output}
 							}
@@ -658,135 +772,106 @@ func processMistralStream(body io.ReadCloser, ch chan<- src.AssistantMessageEven
 		}
 
 		// Tool calls
-		if toolCalls, ok := delta["toolCalls"].([]interface{}); ok {
+		if toolCalls, ok := delta["tool_calls"].([]interface{}); ok {
 			for _, tc := range toolCalls {
-				if toolCall, ok := tc.(map[string]interface{}); ok {
-					finishCurrentMistralBlock(ch, output, &currentBlock)
-					currentBlock.Type = ""
+				toolCall, ok := tc.(map[string]interface{})
+				if !ok {
+					continue
+				}
 
-					// Get tool call ID
-					callId := ""
-					if id, ok := toolCall["id"].(string); ok && id != "" && id != "null" {
-						callId = id
-					} else {
-						index := 0
-						if idx, ok := toolCall["index"].(float64); ok {
-							index = int(idx)
-						}
-						callId = deriveMistralToolCallId(fmt.Sprintf("toolcall:%d", index), 0)
-					}
+				finishCurrentMistralBlock(ch, output, &currentBlock)
 
+				// Get tool call ID
+				callId := ""
+				if id, ok := toolCall["id"].(string); ok && id != "" && id != "null" {
+					callId = id
+				} else {
 					index := 0
 					if idx, ok := toolCall["index"].(float64); ok {
 						index = int(idx)
 					}
-					key := fmt.Sprintf("%s:%d", callId, index)
+					callId = deriveMistralToolCallId(fmt.Sprintf("toolcall:%d", index), 0)
+				}
 
-					// Get existing block
-					var toolCallBlock *struct {
-						Type        string
-						ID          string
-						Name        string
-						Arguments   map[string]interface{}
-						PartialArgs string
-					}
+				index := 0
+				if idx, ok := toolCall["index"].(float64); ok {
+					index = int(idx)
+				}
+				key := fmt.Sprintf("%s:%d", callId, index)
 
-					if existingIndex, ok := toolBlocksByKey[key]; ok {
-						if existing, ok := output.Content[existingIndex].(*src.ToolCall); ok {
-							toolCallBlock = &struct {
-								Type        string
-								ID          string
-								Name        string
-								Arguments   map[string]interface{}
-								PartialArgs string
-							}{
-								Type:        "toolCall",
-								ID:          existing.ID,
-								Name:        existing.Name,
-								Arguments:   existing.Arguments,
-								PartialArgs: "",
-							}
+				// Get function info
+				name := ""
+				var argsDelta string
+				if fn, ok := toolCall["function"].(map[string]interface{}); ok {
+					name, _ = fn["name"].(string)
+					if args, ok := fn["arguments"].(string); ok {
+						argsDelta = args
+					} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
+						if argsJson, err := json.Marshal(argsMap); err == nil {
+							argsDelta = string(argsJson)
 						}
 					}
+				}
 
-					// Get function info
-					var argsDelta string
-					if fn, ok := toolCall["function"].(map[string]interface{}); ok {
-						if name, ok := fn["name"].(string); ok && toolCallBlock == nil {
-							toolCallBlock = &struct {
-								Type        string
-								ID          string
-								Name        string
-								Arguments   map[string]interface{}
-								PartialArgs string
-							}{
-								Type:        "toolCall",
-								ID:          callId,
-								Name:        name,
-								Arguments:   map[string]interface{}{},
-								PartialArgs: "",
-							}
-						}
-						if args, ok := fn["arguments"].(string); ok {
-							argsDelta = args
-						} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
-							if argsJson, err := json.Marshal(argsMap); err == nil {
-								argsDelta = string(argsJson)
-							}
-						}
+				if _, exists := toolBlocksByKey[key]; !exists {
+					newBlock := &src.ToolCall{
+						Type:      "toolCall",
+						ID:        callId,
+						Name:      name,
+						Arguments: map[string]interface{}{},
 					}
-
-					if toolCallBlock == nil {
-						continue
+					output.Content = append(output.Content, newBlock)
+					idx := len(output.Content) - 1
+					toolBlocksByKey[key] = idx
+					toolKeyOrder = append(toolKeyOrder, key)
+					ch <- src.AssistantMessageEvent{Type: "toolcall_start", ContentIndex: &idx, Partial: output}
+				} else if name != "" {
+					if existing, ok := output.Content[toolBlocksByKey[key]].(*src.ToolCall); ok && existing.Name == "" {
+						existing.Name = name
 					}
+				}
 
-					toolCallBlock.PartialArgs += argsDelta
-					toolCallBlock.Arguments = parseStreamingJson(toolCallBlock.PartialArgs)
-
-					// Add new block if needed
-					if _, ok := toolBlocksByKey[key]; !ok {
-						newBlock := &src.ToolCall{
-							Type:      "toolCall",
-							ID:        toolCallBlock.ID,
-							Name:      toolCallBlock.Name,
-							Arguments: toolCallBlock.Arguments,
-						}
-						output.Content = append(output.Content, newBlock)
-						idx := len(output.Content) - 1
-						toolBlocksByKey[key] = idx
-						ch <- src.AssistantMessageEvent{Type: "toolcall_start", ContentIndex: &idx, Partial: output}
-					} else {
-						// Update existing block
-						idx := toolBlocksByKey[key]
-						if existing, ok := output.Content[idx].(*src.ToolCall); ok {
-							existing.Arguments = toolCallBlock.Arguments
-						}
-						ch <- src.AssistantMessageEvent{
-							Type:         "toolcall_delta",
-							ContentIndex: &idx,
-							Delta:        argsDelta,
-							Partial:      output,
-						}
-					}
+				// Arguments accumulate as one concatenated buffer, re-parsed
+				// each chunk (partialArgs in mistral.ts).
+				partialArgsByKey[key] += argsDelta
+				parsed := parseStreamingJson(partialArgsByKey[key])
+				idx := toolBlocksByKey[key]
+				if block, ok := output.Content[idx].(*src.ToolCall); ok {
+					block.Arguments = parsed
+				}
+				ch <- src.AssistantMessageEvent{
+					Type:         "toolcall_delta",
+					ContentIndex: &idx,
+					Delta:        argsDelta,
+					Partial:      output,
 				}
 			}
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
 	finishCurrentMistralBlock(ch, output, &currentBlock)
 
-	// Finalize tool calls
-	for _, index := range toolBlocksByKey {
-		if index >= len(output.Content) {
+	// Finalize tool calls in insertion order (TS iterates the Map's values),
+	// re-parsing each accumulated buffer and dropping the scratch state.
+	for _, key := range toolKeyOrder {
+		idx, ok := toolBlocksByKey[key]
+		if !ok || idx >= len(output.Content) {
 			continue
 		}
-		if toolCall, ok := output.Content[index].(*src.ToolCall); ok {
-			ch <- src.AssistantMessageEvent{
-				Type:         "toolcall_end",
-				ContentIndex: &index,
-				ToolCall:     toolCall,
-				Partial:      output,
-			}
+		toolCall, ok := output.Content[idx].(*src.ToolCall)
+		if !ok {
+			continue
+		}
+		toolCall.Arguments = parseStreamingJson(partialArgsByKey[key])
+		ch <- src.AssistantMessageEvent{
+			Type:         "toolcall_end",
+			ContentIndex: &idx,
+			ToolCall:     toolCall,
+			Partial:      output,
 		}
 	}
 
@@ -832,6 +917,24 @@ func mapMistralStopReason(reason string) src.StopReason {
 	default:
 		return src.StopReasonStop
 	}
+}
+
+// =============================================================================
+// Simple wrapper reasoning routing
+// =============================================================================
+
+func usesMistralReasoningEffort(model src.Model[src.Api]) bool {
+	return model.ID == "mistral-small-2603" || model.ID == "mistral-small-latest" || model.ID == "mistral-medium-3.5"
+}
+
+func mapMistralReasoningEffort(model src.Model[src.Api], level string) *string {
+	effort := "high"
+	if model.ThinkingLevelMap != nil {
+		if mapped, ok := model.ThinkingLevelMap[level]; ok && mapped != nil {
+			effort = string(*mapped)
+		}
+	}
+	return &effort
 }
 
 // =============================================================================
