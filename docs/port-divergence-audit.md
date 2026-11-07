@@ -1337,23 +1337,42 @@ width-keyed caches). Two real bugs:
     thinking/cachePoint/additionalModelRequestFields; usage reads
     invoke-model-era keys; SigV4 omits the `host` header → every signature
     invalid; stop-reason mapping wrong.
-  - *P13 mistral (unregistered)*: SSE via `json.Decoder`; camelCase keys
+  - *P13 mistral*: ~~SSE via `json.Decoder`; camelCase keys
     against the snake_case wire (usage + tool calls silently lost); request
     payload camelCase ignored by the API; URL lacks `/chat/completions`;
     tool args don't accumulate; `toolcall_end` order randomized (Go map
-    iteration); no abort support/status error formatting.
+    iteration); no abort support/status error formatting~~
+    ✅ FIXED 2026-11-07 (story 33: full re-port verified against the locked
+    @mistralai/mistralai v2.2.0 SDK source — wire is snake_case both ways
+    (`max_tokens`/`tool_choice`/`prompt_mode`/`reasoning_effort`/
+    `tool_calls`/`tool_call_id`/`image_url`, usage `prompt_tokens`…); URL
+    `{base}/v1/chat/completions` with catalog BaseURL corrected to
+    `https://api.mistral.ai` (no /v1); SSE `data:` scanner + `[DONE]`;
+    non-2xx → `Mistral API error (status): body` with 4000-char truncation;
+    tool args accumulate via a persistent buffer re-parsed per chunk;
+    `toolcall_end` in insertion order + final re-parse; usage cost via
+    CalculateCost; Context/abort plumbing with TS wording ("Request was
+    aborted" / "An unknown error occurred"); text/thinking blocks synced
+    into the final message (was empty); assistant `prefix:false` (SDK
+    outbound default); `StreamSimpleMistral` with promptMode vs
+    reasoningEffort routing + thinkingLevelMap→"high" default; registered
+    as `mistral-conversations`; catalog group = 28 TS models verbatim
+    (7 reasoning); normalizer/toolResultText/stripSymbolKeys confirmed
+    faithful TS ports and kept; 11 tests, 6 mutations detected)
   - *P14 registry/wiring*: ~~only 3 of 9 APIs registered — mistral, google,
     vertex, bedrock, azure, codex implemented but unreachable~~ **azure +
     codex registered 2026-11-05 (story 31, with their P9b re-ports); google +
     vertex registered 2026-11-06 (story 32, with their P11 re-ports);
-    mistral/bedrock/gemini-cli remain unregistered [DEFERRED until P13/P12/P16
+    mistral registered 2026-11-07 (story 33, with its P13 re-port);
+    bedrock/gemini-cli remain unregistered [DEFERRED until P12/P16
     settle those families — registering broken providers is strictly
     worse]**; ~~api mismatch panics~~
     ✅ FIXED 2026-10-31 (story 28: wrapStream/wrapStreamSimple emit an
     in-band error event, TS wording "Mismatched api: … expected …", the
     sdk.go no-provider pattern; mutation-verified); catalog `Api` ids
     diverge (`"anthropic"`, `"google-shared"`,
-    `"bedrock-converese-stream"`, `"mistral-chat"`) [catalog-typos story];
+    `"bedrock-converese-stream"`, `"mistral-chat"` — the latter two gone
+    since stories 32/33 replaced those groups) [catalog-typos story];
     registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
     OnPayload/OnResponse [deferred to P15 — providers don't honor those
     fields yet]; oauth registry never populated + 2 providers don't satisfy
