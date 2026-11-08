@@ -208,7 +208,31 @@ func RegisterBuiltInApiProviders() {
 		},
 	}, "builtin")
 
-	// Note: Additional providers (bedrock, gemini-cli)
+	// Amazon Bedrock (converse stream)
+	src.RegisterApiProvider(src.ApiProvider{
+		Api: src.Api("bedrock-converse-stream"),
+		Stream: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.StreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				opts := convertStreamOptionsToBedrock(options)
+				sourceCh := StreamAmazonBedrock(model, chatCtx, opts)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+		StreamSimple: func(ctx context.Context, model src.Model[src.Api], chatCtx src.ChatContext, options *src.SimpleStreamOptions) <-chan src.AssistantMessageEvent {
+			ch := make(chan src.AssistantMessageEvent, 256)
+			go func() {
+				defer close(ch)
+				sourceCh := StreamSimpleAmazonBedrock(model, chatCtx, options)()
+				forwardEvents(ctx, ch, sourceCh)
+			}()
+			return ch
+		},
+	}, "builtin")
+
+	// Note: Additional providers (gemini-cli)
 	// would be registered here following the same pattern once their implementations are complete.
 }
 
@@ -368,5 +392,19 @@ func convertStreamOptionsToMistral(options *src.StreamOptions) *MistralOptions {
 		Headers:     options.Headers,
 		SessionID:   options.SessionID,
 		Context:     options.Context,
+	}
+}
+
+// convertStreamOptionsToBedrock converts StreamOptions to AmazonBedrockOptions
+func convertStreamOptionsToBedrock(options *src.StreamOptions) *AmazonBedrockOptions {
+	if options == nil {
+		return nil
+	}
+	return &AmazonBedrockOptions{
+		MaxTokens:      options.MaxTokens,
+		Temperature:    options.Temperature,
+		Headers:        options.Headers,
+		CacheRetention: options.CacheRetention,
+		Context:        options.Context,
 	}
 }

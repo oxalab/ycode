@@ -1330,13 +1330,50 @@ width-keyed caches). Two real bugs:
     `google-vertex`→GOOGLE_CLOUD_API_KEY). Repo-wide typos NOT touched
     (catalog-typos story): `StopReasonToolUse = "tooluse"` (TS "toolUse")
     and the `thoughSignature` JSON tag.
-  - *P12 amazon-bedrock (unregistered)*: parser reads JSON over eventstream
+  - *P12 amazon-bedrock*: ~~parser reads JSON over eventstream
     framing; request shape wrong (system as string, no `{json:}` schema
     wrapper, `toolUse` without toolUseId, toolResult string with hardcoded
     status); modelId dots→slashes corrupts ARNs/inference profiles; no
     thinking/cachePoint/additionalModelRequestFields; usage reads
     invoke-model-era keys; SigV4 omits the `host` header → every signature
-    invalid; stop-reason mapping wrong.
+    invalid; stop-reason mapping wrong~~
+    ✅ FIXED 2026-11-08 (story 34: full re-port verified against the TS
+    source and the locked @aws-sdk/client-bedrock-runtime 3.1044.0 /
+    @smithy/eventstream-codec 4.2.14 sources — the reference delegates all
+    HTTP to the SDK, so the Go port reimplements its layers: (1) NEW AWS
+    eventstream binary framing decoder (`aws_eventstream.go`: prelude
+    CRCs + message CRC verified cumulative-over-0..len-4 — pinned by the
+    codec's own `int32_header` test vector; header table types 0-9);
+    (2) SigV4 now signs `host` (Go keeps it outside req.Header) and all
+    headers are set before signing; (3) converse wire shape: system
+    `[{text},{cachePoint}]`, toolUse with toolUseId, toolResult per-block
+    content + error/success + consecutive results coalesced into ONE user
+    message, `{json:}` inputSchema wrapper, thinking replay (signature
+    when Claude+present / degrade to text when missing / signature-less
+    for non-Claude), cachePoints via Claude detection +
+    `AWS_BEDROCK_FORCE_CACHE` + `resolveCacheRetention`, inferenceConfig
+    maxTokens+temperature only, additionalModelRequestFields (adaptive
+    opus-4-6/opus-4-7/sonnet-4-6 + output_config.effort + native xhigh +
+    thinkingLevelMap "max" vs enabled budgets {1024,2048,8192,16384} +
+    anthropic_beta interleaved default-on + GovCloud display omission);
+    (4) URL modelId verbatim dots + `%3A` colon (smithy
+    extended-encode), endpoint/region resolution matrix (option > env >
+    endpoint-region > profile-config > us-east-1); (5) auth chain:
+    explicit creds → env → AWS_PROFILE shared-credentials file →
+    skip-auth dummy → error, plus Bearer `AWS_BEARER_TOKEN_BEDROCK`
+    (no SigV4); (6) stream events messageStart (role check +
+    start-on-messageStart TS parity)/contentBlockStart/Delta/Stop by
+    contentBlockIndex/messageStop (default→error)/metadata usage
+    inputTokens+cache+CalculateCost/5 exception events → prefix table
+    ("Throttling error: …"); (7) StreamSimpleAmazonBedrock with
+    AdjustMaxTokensForThinking + merged budgets for non-adaptive Claude,
+    passthrough for adaptive/non-Claude; registered as
+    `bedrock-converse-stream` (fixes the `bedrock-converese-stream` +
+    `cluade` typos); catalog group = 93 TS models verbatim (53 reasoning,
+    9 thinkingLevelMap, 7 EU models on eu-central-1). 13 tests, 7
+    mutations detected. Accepted divergences documented: HTTP/1.1
+    transport (reference defaults to HTTP/2 since SDK 3.798 — Bedrock
+    accepts both), proxy-agent support omitted.)
   - *P13 mistral*: ~~SSE via `json.Decoder`; camelCase keys
     against the snake_case wire (usage + tool calls silently lost); request
     payload camelCase ignored by the API; URL lacks `/chat/completions`;
@@ -1364,15 +1401,17 @@ width-keyed caches). Two real bugs:
     codex registered 2026-11-05 (story 31, with their P9b re-ports); google +
     vertex registered 2026-11-06 (story 32, with their P11 re-ports);
     mistral registered 2026-11-07 (story 33, with its P13 re-port);
-    bedrock/gemini-cli remain unregistered [DEFERRED until P12/P16
-    settle those families — registering broken providers is strictly
-    worse]**; ~~api mismatch panics~~
+    bedrock registered 2026-11-08 (story 34, with its P12 re-port);
+    gemini-cli remains unregistered [DEFERRED until P16 settles that
+    family — registering broken providers is strictly worse]**; ~~api mismatch panics~~
     ✅ FIXED 2026-10-31 (story 28: wrapStream/wrapStreamSimple emit an
     in-band error event, TS wording "Mismatched api: … expected …", the
     sdk.go no-provider pattern; mutation-verified); catalog `Api` ids
     diverge (`"anthropic"`, `"google-shared"`,
     `"bedrock-converese-stream"`, `"mistral-chat"` — the latter two gone
-    since stories 32/33 replaced those groups) [catalog-typos story];
+    since stories 32/33 replaced those groups, and bedrock's
+    `"bedrock-converese-stream"` + the `cluade` model-ID typo went with
+    story 34's group replacement) [catalog-typos story];
     registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
     OnPayload/OnResponse [deferred to P15 — providers don't honor those
     fields yet]; oauth registry never populated + 2 providers don't satisfy

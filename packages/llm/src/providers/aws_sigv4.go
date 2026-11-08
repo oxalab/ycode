@@ -104,6 +104,8 @@ func canonicalQuery(u *url.URL) string {
 }
 
 // buildCanonicalHeaders builds the canonical headers string and signed headers list.
+// The Host header is a separate http.Request field in Go, not part of req.Header,
+// so it must be merged in explicitly — SigV4 requires `host` to be signed.
 func buildCanonicalHeaders(req *http.Request) (string, string) {
 	// Collect and sort header names
 	headers := make(map[string][]string)
@@ -111,6 +113,13 @@ func buildCanonicalHeaders(req *http.Request) (string, string) {
 		lk := strings.ToLower(k)
 		headers[lk] = vv
 	}
+
+	// Merge in the host (Go stores it outside req.Header).
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
+	}
+	headers["host"] = []string{host}
 
 	// Sort header names
 	sorted := make([]string, 0, len(headers))
