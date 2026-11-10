@@ -115,47 +115,7 @@ func (p *GithubCopilotProvider) GetApiKey(credentials OAuthCredentials) string {
 }
 func (p *GithubCopilotProvider) UseCallbackServer() bool { return true }
 
-// AntiGravityProvider
-type AntigravityProvider struct {}
-func (p *AntigravityProvider) ID() string { return "google-antigravity" }
-func (p *AntigravityProvider) Name() string { return "Antigravity (Gemini 3, Claude, GPT-OSS)"}
-func (p *AntigravityProvider) Login(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthCredentials, error) {
-	return LoginAntigravity(ctx, callbacks)
-}
-func (p *AntigravityProvider) RefreshTokens(ctx context.Context, credentials OAuthCredentials) (*OAuthCredentials, error) {
-	return RefreshAntigravityToken(ctx, credentials)
-}
-func (p *AntigravityProvider) GetApiKey(credentials OAuthCredentials) string {
-	projectID := ""
-	if val, ok := credentials.Extra["project_id"].(string); ok {
-		projectID = val
-	}
-	return fmt.Sprintf(`{"token":"%s","projectId":"%s"}`, credentials.Access, projectID)
-}
-func(p *AntigravityProvider) UseCallbackServer() bool { return true }
-
-
-// GeminiCLIProvider
-type GeminiCLIProvider struct {}
-func (p *GeminiCLIProvider) ID() string { return "gemini-cli-provider" }
-func (p *GeminiCLIProvider) Name() string { return "Google Cloud Code Assist (Gemini CLI)"}
-func (p *GeminiCLIProvider) Login(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthCredentials, error) {
-	return LoginGeminiCli(ctx, callbacks)
-}
-func (p *GeminiCLIProvider) RefreshToken(ctx context.Context, credentials OAuthCredentials) (*OAuthCredentials, error) {
-	return RefreshGeminiCliToken(ctx, credentials)
-}
-func (p *GeminiCLIProvider) GetApiKey(credentials OAuthCredentials) string {
-	projectID := ""
-	if val, ok := credentials.Extra["project_id"].(string); ok {
-		projectID = val
-	}
-	return fmt.Sprintf(`{"token":"%s","projectId":"%s"}`, credentials.Access, projectID)
-}
-func (p *GeminiCLIProvider) UseCallbackServer() bool { return true }
-
-
-// OpenAICodexProvider 
+// OpenAICodexProvider
 type OpenaiCodexProvider struct {}
 func (p *OpenaiCodexProvider) ID() string { return "openai-codex" }
 func (p *OpenaiCodexProvider) Name() string { return "ChatGPT Plus/Pro (Codex Subscription)"}

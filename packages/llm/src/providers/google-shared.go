@@ -16,9 +16,8 @@ import (
 type GoogleApiType string
 
 const (
-	GoogleGenerativeAI  GoogleApiType = "google-generative-ai"
-	GoogleGeminiCLI      GoogleApiType = "google-gemini-cli"
-	GoogleVertex          GoogleApiType = "google-vertex"
+	GoogleGenerativeAI GoogleApiType = "google-generative-ai"
+	GoogleVertex       GoogleApiType = "google-vertex"
 )
 
 // =============================================================================

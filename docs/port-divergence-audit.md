@@ -1402,8 +1402,8 @@ width-keyed caches). Two real bugs:
     vertex registered 2026-11-06 (story 32, with their P11 re-ports);
     mistral registered 2026-11-07 (story 33, with its P13 re-port);
     bedrock registered 2026-11-08 (story 34, with its P12 re-port);
-    gemini-cli remains unregistered [DEFERRED until P16 settles that
-    family — registering broken providers is strictly worse]**; ~~api mismatch panics~~
+    gemini-cli: nothing to register — the family was deleted for parity
+    in story 35 (P16; the TS reference removed it in 0.71.0)]**; ~~api mismatch panics~~
     ✅ FIXED 2026-10-31 (story 28: wrapStream/wrapStreamSimple emit an
     in-band error event, TS wording "Mismatched api: … expected …", the
     sdk.go no-provider pattern; mutation-verified); catalog `Api` ids
@@ -1431,11 +1431,36 @@ width-keyed caches). Two real bugs:
     pattern + Xiaomi silent-overflow case; `ValidateToolArguments` is a no-op
     (TS runs TypeBox Convert+Check); faux provider never emits `*_start`
     events and ignores options/abort/usage.
-  - *P16 gemini-cli*: Go-only extra (no TS counterpart in this reference
+  - *P16 gemini-cli*: ~~Go-only extra (no TS counterpart in this reference
     snapshot; Cloud Code Assist provider, likely from an older upstream pi) —
     unregistered; retry always hits `endpoints[0]` ignoring the failover
     index; dead baseURL trim. No parity verdict possible; keep-or-delete is a
-    product call, not an audit item.
+    product call, not an audit item~~
+    ✅ RESOLVED 2026-11-10 — **DELETED, parity restoration (user decision
+    after seeing the evidence)**. The TS reference REMOVED the family
+    upstream in v0.71.0 (CHANGELOG breaking change: "Removed built-in
+    Google Gemini CLI and Google Antigravity support, including provider
+    registration, model metadata, OAuth, and package exports"); the
+    reference snapshot is 0.74.0, post-removal — no file, no registration,
+    no catalog models, no exports. The Go port carried the entire dead
+    pre-removal family: `providers/google-gemini-cli.go` (881 lines,
+    unregistered, zero callers, zero tests, zero catalog models),
+    `utils/oauth/google-gemini-cli.go` (369) + `google-antigravity.go`
+    (328) + the `AntigravityProvider`/`GeminiCLIProvider` blocks in
+    `utils/oauth/index.go` (the oauth registry was never populated —
+    `RegisterBuiltInProviders` has zero callers — and the provider structs
+    did not even satisfy the oauth interface as written), the dead
+    `GoogleGeminiCLI` Api / `GoogleGeminiCli` Provider constants
+    (types.go), the `GoogleGeminiCLI GoogleApiType` constant
+    (google-shared.go), and a TUI add-provider entry offering the dead
+    API type (add_provider.go — removable-by-compile proof it was the
+    only live consumer). ~1,630 lines removed. Shared helpers all have
+    independent callers (`mapGoogleToolChoice` google.go,
+    `randomString` faux.go, `convertGoogleMessages`/`convertGoogleTools`/
+    `mapGoogleStopReason` google.go) — verified per-symbol before
+    deletion. Verification: build+vet green, full suite + `-count=3`
+    green, post-delete `grep -rni "gemini-cli|antigravity" packages/ cmd/`
+    returns zero source references (audit-doc prose only).
 - Known documented deferrals (do NOT re-audit as divergences): qjs threading
   (tracked in `.versions/upcoming/0.1.1.md`), `tools.ResizeImage` stub, image
   dimension notes, branch/skill/custom message renderers.

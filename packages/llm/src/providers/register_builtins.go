@@ -232,8 +232,8 @@ func RegisterBuiltInApiProviders() {
 		},
 	}, "builtin")
 
-	// Note: Additional providers (gemini-cli)
-	// would be registered here following the same pattern once their implementations are complete.
+	// Note: all nine built-in APIs are registered — the set matches the TS
+	// reference (the gemini-cli family was removed upstream in 0.71.0).
 }
 
 // ResetApiProviders clears all providers and re-registers built-in providers
