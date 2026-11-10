@@ -39,7 +39,6 @@ var providerAPIChoices = []llm.Api{
 	llm.OpenAICodexResponses,
 	llm.AzureOpenAIResponses,
 	llm.GoogleGenerativeAI,
-	llm.GoogleGeminiCLI,
 	llm.GoogleVertexAI,
 	llm.BedrockConverseStream,
 }
