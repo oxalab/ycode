@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	llm "ycode/packages/llm/src"
@@ -150,4 +151,68 @@ func TestAgentLoopKeepsAssistantToolCallsInContext(t *testing.T) {
 	if toolMsg.ToolCallID != "call-1" {
 		t.Errorf("tool result id = %q, want call-1", toolMsg.ToolCallID)
 	}
+}
+
+// P15: prepareToolCall validates arguments against the tool's JSON schema
+// after PrepareArguments and before beforeToolCall (reference agent-loop.ts
+// order); a failure becomes an immediate error tool result fed back to the
+// model.
+func TestPrepareToolCallValidatesArguments(t *testing.T) {
+	tool := AgentTool[any]{
+		Name:        "read",
+		Label:       "Read",
+		Description: "read a file",
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"path": map[string]any{"type": "string"}},
+			"required":   []any{"path"},
+		},
+		Execute: func(toolCallID string, params any, signal context.Context, onUpdate AgentToolUpdateCallback[any]) (AgentToolResult[any], error) {
+			return AgentToolResult[any]{Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: "ok"}}}, nil
+		},
+	}
+	agentCtx := AgentContext{Tools: []AgentTool[any]{tool}}
+	config := AgentLoopConfig{}
+
+	beforeToolCalls := 0
+	config.BeforeToolCall = func(ctx BeforeToolCallContext, signal context.Context) (*BeforeToolCallResult, error) {
+		beforeToolCalls++
+		return nil, nil
+	}
+
+	assistantMessage := llm.AssistantMessage{Role: llm.RoleAssistant}
+
+	t.Run("invalid arguments become an immediate error tool result", func(t *testing.T) {
+		outcome := prepareToolCall(agentCtx, assistantMessage, llm.ToolCall{
+			ID: "call-1", Name: "read",
+			Arguments: map[string]any{"path": map[string]any{"x": 1}},
+		}, config, context.Background())
+		if outcome.Kind != preparationImmediate || !outcome.IsError {
+			t.Fatalf("outcome = %+v, want immediate error", outcome)
+		}
+		tc, ok := outcome.Result.Content[0].(llm.TextContent)
+		if !ok || !strings.Contains(tc.Text, "Validation failed for tool \"read\":") {
+			t.Fatalf("result text = %#v, want the validation failure message", outcome.Result.Content)
+		}
+		if beforeToolCalls != 0 {
+			t.Fatalf("beforeToolCall ran %d times; validation must precede it", beforeToolCalls)
+		}
+	})
+
+	t.Run("valid arguments pass through to the prepared outcome", func(t *testing.T) {
+		outcome := prepareToolCall(agentCtx, assistantMessage, llm.ToolCall{
+			ID: "call-2", Name: "read",
+			Arguments: map[string]any{"path": "a.go"},
+		}, config, context.Background())
+		if outcome.Kind == preparationImmediate {
+			t.Fatalf("outcome = %+v, want prepared", outcome)
+		}
+		args, ok := outcome.Args.(map[string]any)
+		if !ok || args["path"] != "a.go" {
+			t.Fatalf("args = %#v, want path a.go", outcome.Args)
+		}
+		if beforeToolCalls != 1 {
+			t.Fatalf("beforeToolCall ran %d times, want 1", beforeToolCalls)
+		}
+	})
 }

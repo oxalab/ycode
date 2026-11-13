@@ -3,6 +3,7 @@ package providers
 import (
 	"bufio"
 	"bytes"
+	gocontext "context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,12 +20,12 @@ import (
 // =============================================================================
 
 const (
-	anthropicAPIBaseURL      = "https://api.anthropic.com/v1/messages"
-	anthropicVersionHeader   = "anthropic-version"
-	anthropicVersion         = "2023-06-01"
+	anthropicAPIBaseURL          = "https://api.anthropic.com/v1/messages"
+	anthropicVersionHeader       = "anthropic-version"
+	anthropicVersion             = "2023-06-01"
 	fineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14"
-	interleavedThinkingBeta  = "interleaved-thinking-2025-05-14"
-	claudeCodeVersion        = "2.1.75"
+	interleavedThinkingBeta      = "interleaved-thinking-2025-05-14"
+	claudeCodeVersion            = "2.1.75"
 )
 
 // =============================================================================
@@ -32,21 +33,28 @@ const (
 // =============================================================================
 
 type AnthropicOptions struct {
-	APIKey                string
-	MaxTokens             *int
-	Temperature           *float64
-	ThinkingEnabled       *bool
-	ThinkingBudgetTokens  *int
-	Effort                *string
-	ThinkingDisplay       *string
-	InterleavedThinking   *bool
-	ToolChoice            interface{}
-	Headers               map[string]string
-	Metadata              map[string]string
-	SessionID             string
-	CacheRetention        *src.CacheRetention
+	APIKey               string
+	MaxTokens            *int
+	Temperature          *float64
+	ThinkingEnabled      *bool
+	ThinkingBudgetTokens *int
+	Effort               *string
+	ThinkingDisplay      *string
+	InterleavedThinking  *bool
+	ToolChoice           interface{}
+	Headers              map[string]string
+	Metadata             map[string]string
+	SessionID            string
+	CacheRetention       *src.CacheRetention
+	// Context carries the caller's abort signal (the Go equivalent of the TS
+	// AbortSignal). Cancelling it aborts the request and the stream.
+	Context gocontext.Context
+	// TimeoutMs caps each attempt (SDK default 10 minutes); MaxRetries
+	// overrides the SDK default of 2. The reference threads both per request.
+	TimeoutMs  int
+	MaxRetries *int
 	// Callbacks
-	OnPayload func(params interface{}, model src.Model[src.Api]) (interface{}, error)
+	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
 	OnResponse func(resp interface{}, model src.Model[src.Api])
 }
 
@@ -63,12 +71,12 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 			defer close(ch)
 
 			output := &src.AssistantMessage{
-				Role:      src.RoleAssistant,
-				Content:   []src.ContentBlock{},
-				Api:       model.Api,
-				Provider:  model.Provider,
-				Model:     model.ID,
-				Usage:     src.Usage{Cost: src.UsageCost{}},
+				Role:       src.RoleAssistant,
+				Content:    []src.ContentBlock{},
+				Api:        model.Api,
+				Provider:   model.Provider,
+				Model:      model.ID,
+				Usage:      src.Usage{Cost: src.UsageCost{}},
 				StopReason: src.StopReasonStop,
 			}
 
@@ -95,15 +103,21 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 				}
 			}
 
+			// The reference catch maps every failure to "aborted" only when the
+			// caller's signal fired; a mid-stream read error is a plain error.
+			ctxAborted := func() bool {
+				return options != nil && options.Context != nil && options.Context.Err() != nil
+			}
+
 			resp, err = doAnthropicRequest(client, model, context, params, apiKey, options)
 			if err != nil {
-				handleAnthropicError(ch, output, err, false)
+				handleAnthropicError(ch, output, err, ctxAborted())
 				return
 			}
 
 			if options != nil && options.OnResponse != nil {
 				options.OnResponse(map[string]interface{}{
-					"status": resp.StatusCode,
+					"status":  resp.StatusCode,
 					"headers": resp.Header,
 				}, model)
 			}
@@ -112,7 +126,18 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 
 			// Process streaming response
 			if err := consumeAnthropicStream(resp.Body, ch, output, model, context, isOAuth, options); err != nil {
-				handleAnthropicError(ch, output, err, false)
+				if ctxAborted() {
+					// The SDK surfaces a caller abort as "Request was aborted."
+					handleAnthropicError(ch, output, fmt.Errorf("Request was aborted"), true)
+				} else {
+					handleAnthropicError(ch, output, err, false)
+				}
+				return
+			}
+
+			// Post-stream caller abort (reference throws "Request was aborted").
+			if ctxAborted() {
+				handleAnthropicError(ch, output, fmt.Errorf("Request was aborted"), true)
 				return
 			}
 
@@ -124,8 +149,8 @@ func StreamAnthropic(model src.Model[src.Api], context src.ChatContext, options 
 }
 
 // consumeAnthropicStream parses the Anthropic SSE stream into output/content
-// events. Returned errors surface as error events (never aborts — abort
-// requires a signal, which is P15).
+// events. Returned errors surface as error events unless the caller's Context
+// is cancelled (then aborted — the Go equivalent of the TS AbortSignal).
 func consumeAnthropicStream(body io.ReadCloser, ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, model src.Model[src.Api], context src.ChatContext, isOAuth bool, options *AnthropicOptions) error {
 	blockIndexMap := make(map[int]int)
 	sawMessageStart := false
@@ -434,7 +459,24 @@ func doAnthropicRequest(client *http.Client, model src.Model[src.Api], context s
 		}
 	}
 
-	resp, err := client.Do(req)
+	var optsCtx gocontext.Context
+	var timeoutMs int
+	var maxRetries *int
+	if options != nil {
+		optsCtx = options.Context
+		timeoutMs = options.TimeoutMs
+		maxRetries = options.MaxRetries
+	}
+	resp, err := doSDKStyleRequest(sdkRequestOptions{
+		Method:     http.MethodPost,
+		URL:        baseURL,
+		Body:       body,
+		Header:     req.Header,
+		Context:    optsCtx,
+		Client:     client,
+		TimeoutMs:  timeoutMs,
+		MaxRetries: maxRetries,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -792,8 +834,8 @@ func convertAnthropicMessages(messages []src.Message, model src.Model[src.Api], 
 				case string:
 					lastMsg["content"] = []map[string]interface{}{
 						{
-							"type":         "text",
-							"text":         c,
+							"type":          "text",
+							"text":          c,
 							"cache_control": cacheControl,
 						},
 					}

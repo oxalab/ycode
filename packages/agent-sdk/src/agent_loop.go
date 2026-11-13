@@ -5,15 +5,16 @@ import (
 	"fmt"
 
 	"ycode/packages/llm/src"
+	"ycode/packages/llm/src/utils"
 )
 
 // AgentLoop: Starts an Agent loop with a new prompt message
 func AgentLoop(
-	prompts 	[]AgentMessage,
-	context 	AgentContext,
-	config 		AgentLoopConfig,
-	signal 		context.Context,
-	streamFn 	StreamFn,
+	prompts []AgentMessage,
+	context AgentContext,
+	config AgentLoopConfig,
+	signal context.Context,
+	streamFn StreamFn,
 ) *EventStream {
 	stream := NewEventStream()
 	go func() {
@@ -32,10 +33,10 @@ func AgentLoop(
 
 // AgentLoopContinue: continues and agent loop from the current context
 func AgentLoopContinue(
-	context 	AgentContext,
-	config 		AgentLoopConfig,
-	signal 		context.Context,
-	streamFn 	StreamFn,
+	context AgentContext,
+	config AgentLoopConfig,
+	signal context.Context,
+	streamFn StreamFn,
 ) *EventStream {
 	if len(context.Messages) == 0 {
 		stream := NewEventStream()
@@ -53,32 +54,32 @@ func AgentLoopContinue(
 		messages, err := RunAgentLoopContinue(context, config, func(event AgentEvent) error {
 			stream.Push(event)
 			return nil
-		},signal, streamFn)
+		}, signal, streamFn)
 		if err != nil {
 			stream.EndError(err)
 			return
 		}
 		stream.End(messages)
-	} ()
+	}()
 	return stream
 }
 
 // RunAgentLoop: Runs the agent loop with new prompt
 func RunAgentLoop(
-	prompts 	[]AgentMessage,
-	context 	AgentContext,
-	config 		AgentLoopConfig, 
-	emit 		func(AgentEvent) error,
-	signal 		context.Context,
-	streamFn 	StreamFn,
+	prompts []AgentMessage,
+	context AgentContext,
+	config AgentLoopConfig,
+	emit func(AgentEvent) error,
+	signal context.Context,
+	streamFn StreamFn,
 ) ([]AgentMessage, error) {
 	newMessages := make([]AgentMessage, len(prompts))
 	copy(newMessages, prompts)
 
 	currentContext := AgentContext{
 		SystemPrompt: context.SystemPrompt,
-		Messages: 	  append([]AgentMessage{}, context.Messages...),
-		Tools: 	      append([]AgentTool[any]{}, context.Tools...),
+		Messages:     append([]AgentMessage{}, context.Messages...),
+		Tools:        append([]AgentTool[any]{}, context.Tools...),
 	}
 	currentContext.Messages = append(currentContext.Messages, prompts...)
 	emit(NewAgentStartEvent())
@@ -112,8 +113,8 @@ func RunAgentLoopContinue(
 	newMessages := []AgentMessage{}
 	currentContext := AgentContext{
 		SystemPrompt: context.SystemPrompt,
-		Messages:	  append([]AgentMessage{}, context.Messages...),
-		Tools: 		  append([]AgentTool[any]{}, context.Tools...),
+		Messages:     append([]AgentMessage{}, context.Messages...),
+		Tools:        append([]AgentTool[any]{}, context.Tools...),
 	}
 	emit(NewAgentStartEvent())
 	emit(NewTurnStartEvent())
@@ -127,12 +128,12 @@ func RunAgentLoopContinue(
 
 // runLoop: main loop logic
 func runLoop(
-	currentContext 	*AgentContext,
-	newMessages 	*[]AgentMessage,
-	config 			AgentLoopConfig,
-	signal 			context.Context,
-	emit 			func(AgentEvent) error,
-	streamFn 		StreamFn,
+	currentContext *AgentContext,
+	newMessages *[]AgentMessage,
+	config AgentLoopConfig,
+	signal context.Context,
+	emit func(AgentEvent) error,
+	streamFn StreamFn,
 ) error {
 	firstTurn := true
 	// Check for steering messages at start (intent)
@@ -253,10 +254,10 @@ func streamAssistantResponse(
 	// Build LLM Context
 	llmContext := llm.ChatContext{
 		SystemPrompt: context.SystemPrompt,
-		Messages: 	  llmMessages,
-		Tools: 	      convertTools(context.Tools),
+		Messages:     llmMessages,
+		Tools:        convertTools(context.Tools),
 	}
-	
+
 	// Use provided streamFn or get default from registry
 	streamFunc := streamFn
 	if streamFunc == nil {
@@ -275,7 +276,7 @@ func streamAssistantResponse(
 
 	// Build stream options
 	options := llm.SimpleStreamOptions{
-		StreamOptions: llm.StreamOptions {
+		StreamOptions: llm.StreamOptions{
 			Context: signal,
 			APIKey:  apiKey,
 		},
@@ -291,7 +292,7 @@ func streamAssistantResponse(
 
 	var partialMessage *llm.AssistantMessage
 	addedPartial := false
-	
+
 	// Process streaming events
 	for event := range response {
 		switch event.Type {
@@ -331,13 +332,13 @@ func streamAssistantResponse(
 
 // ExecuteToolCallBatch: Represents the result of executing a batch of tool calls
 type ExecutedToolCallBatch struct {
-	Messages 	[]llm.ToolResultMessage[any]
-	Terminate 	bool
+	Messages  []llm.ToolResultMessage[any]
+	Terminate bool
 }
 
 // executeToolCalls: Represents the result of executing a batch of tool calls
 func executeToolCalls(
-	context  AgentContext,
+	context AgentContext,
 	assistantMessage llm.AssistantMessage,
 	toolCalls []llm.ToolCall,
 	config AgentLoopConfig,
@@ -374,7 +375,7 @@ func executeToolCallsSequential(
 
 	for _, toolCall := range toolCalls {
 		emit(NewToolExecutionStartEvent(toolCall.ID, toolCall.Name, toolCall.Arguments))
-		
+
 		preparation := prepareToolCall(context, assistantMessage, toolCall, config, signal)
 		var finalized finalizedToolCallOutcome
 
@@ -383,13 +384,13 @@ func executeToolCallsSequential(
 				ToolCall: preparation.ToolCall,
 				Result:   preparation.Result,
 				IsError:  preparation.IsError,
-			}	
+			}
 		} else {
 			tool := findTool(context.Tools, toolCall.Name)
 			prepped := preparedToolCall{
 				ToolCall: toolCall,
-				Tool: *tool,
-				Args: toolCall.Arguments,
+				Tool:     *tool,
+				Args:     toolCall.Arguments,
 			}
 			executed := executePreparedToolCall(prepped, signal, emit)
 			finalized = finalizeExecutedToolCall(context, assistantMessage, prepped, executed, config, signal)
@@ -402,12 +403,11 @@ func executeToolCallsSequential(
 		finalizedCalls = append(finalizedCalls, finalized)
 		messages = append(messages, toolResultMessage)
 	}
-	return ExecutedToolCallBatch {
-		Messages: messages,
+	return ExecutedToolCallBatch{
+		Messages:  messages,
 		Terminate: shouldTerminateToolBatch(finalizedCalls),
 	}, nil
 }
-
 
 func executeToolCallsParallel(
 	context AgentContext,
@@ -422,7 +422,7 @@ func executeToolCallsParallel(
 	}
 	futures := make([]chan futureResult, len(toolCalls))
 	for i, toolCall := range toolCalls {
-		emit(NewToolExecutionStartEvent(toolCall.ID, toolCall.Name,toolCall.Arguments))
+		emit(NewToolExecutionStartEvent(toolCall.ID, toolCall.Name, toolCall.Arguments))
 		futures[i] = make(chan futureResult, 1)
 
 		preparation := prepareToolCall(context, assistantMessage, toolCall, config, signal)
@@ -439,61 +439,61 @@ func executeToolCallsParallel(
 
 		prepped := preparedToolCall{
 			ToolCall: preparation.ToolCall,
-			Tool: 	  preparation.Tool,
-			Args: 	  preparation.Args,
+			Tool:     preparation.Tool,
+			Args:     preparation.Args,
 		}
-		go func(idx int, prep preparedToolCall){
+		go func(idx int, prep preparedToolCall) {
 			executed := executePreparedToolCall(prep, signal, emit)
 			finalized := finalizeExecutedToolCall(context, assistantMessage, prep, executed, config, signal)
-			emitToolExecutionEnd(finalized,emit)
+			emitToolExecutionEnd(finalized, emit)
 			futures[idx] <- futureResult{value: finalized}
 		}(i, prepped)
 	}
 	var finalizedCalls []finalizedToolCallOutcome
 	var messages []llm.ToolResultMessage[any]
 	for _, future := range futures {
-		result := <- future
+		result := <-future
 		finalizedCalls = append(finalizedCalls, result.value)
 		toolResultMessage := createToolResultMessage(result.value)
 		emitToolResultMessage(toolResultMessage, emit)
 		messages = append(messages, toolResultMessage)
 	}
 	return ExecutedToolCallBatch{
-		Messages: messages,
+		Messages:  messages,
 		Terminate: shouldTerminateToolBatch(finalizedCalls),
 	}, nil
 }
 
 // Internal Types for tool execution
 type preparedToolCall struct {
-	Kind string
+	Kind     string
 	ToolCall llm.ToolCall
-	Tool AgentTool[any]
-	Args any
+	Tool     AgentTool[any]
+	Args     any
 }
 
 type immediateToolCallOutcome struct {
-	Kind string
+	Kind     string
 	ToolCall llm.ToolCall
-	Tool AgentTool[any]
-	Args any
-	Result AgentToolResult[any]
-	IsError bool
+	Tool     AgentTool[any]
+	Args     any
+	Result   AgentToolResult[any]
+	IsError  bool
 }
 
 type executedToolCallOutcome struct {
-	Result AgentToolResult[any]
+	Result  AgentToolResult[any]
 	IsError bool
 }
 
 type finalizedToolCallOutcome struct {
 	ToolCall llm.ToolCall
-	Result AgentToolResult[any]
-	IsError bool
+	Result   AgentToolResult[any]
+	IsError  bool
 }
 
 const (
-	preparationKind = "prepared"
+	preparationKind      = "prepared"
 	preparationImmediate = "immediate"
 )
 
@@ -527,10 +527,10 @@ func prepareToolCall(
 
 	if tool == nil {
 		return immediateToolCallOutcome{
-			Kind: preparationImmediate,
+			Kind:     preparationImmediate,
 			ToolCall: toolCall,
 			Result: AgentToolResult[any]{
-				Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: fmt.Sprintf("Tool %s not found",toolCall.Name)}},
+				Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: fmt.Sprintf("Tool %s not found", toolCall.Name)}},
 				Details: struct{}{},
 			},
 			IsError: true,
@@ -543,7 +543,7 @@ func prepareToolCall(
 		prepared, err := tool.PrepareArguments(toolCall.Arguments)
 		if err != nil {
 			return immediateToolCallOutcome{
-				Kind:    preparationImmediate,
+				Kind:     preparationImmediate,
 				ToolCall: toolCall,
 				Result: AgentToolResult[any]{
 					Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: err.Error()}},
@@ -555,21 +555,42 @@ func prepareToolCall(
 		args = prepared
 	}
 
+	// Validate the (prepared) arguments against the tool's schema — reference
+	// order: prepare -> validateToolArguments -> beforeToolCall. A failure
+	// becomes an immediate error tool result fed back to the model.
+	preparedCall := toolCall
+	if m, ok := args.(map[string]any); ok {
+		preparedCall.Arguments = m
+	}
+	validated, err := utils.ValidateToolArguments(llm.Tool[any]{Name: tool.Name, Parameters: tool.Parameters}, preparedCall)
+	if err != nil {
+		return immediateToolCallOutcome{
+			Kind:     preparationImmediate,
+			ToolCall: toolCall,
+			Result: AgentToolResult[any]{
+				Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: err.Error()}},
+				Details: struct{}{},
+			},
+			IsError: true,
+		}
+	}
+	args = validated
+
 	// Call beforeToolCall hook
 	if config.BeforeToolCall != nil {
 		beforeCtx := BeforeToolCallContext{
 			AssistantMessage: assistantMessage,
-			ToolCall: toolCall,
-			Args: args,
-			Context: context,
+			ToolCall:         toolCall,
+			Args:             args,
+			Context:          context,
 		}
 		result, err := config.BeforeToolCall(beforeCtx, signal)
 		if err != nil {
 			return immediateToolCallOutcome{
-				Kind: 	preparationImmediate,
+				Kind:     preparationImmediate,
 				ToolCall: toolCall,
 				Result: AgentToolResult[any]{
-					Content: []llm.ContentBlock{llm.TextContent{Type:"text", Text: err.Error()}},
+					Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: err.Error()}},
 					Details: struct{}{},
 				},
 				IsError: true,
@@ -577,7 +598,7 @@ func prepareToolCall(
 		}
 		if result != nil && result.Block {
 			return immediateToolCallOutcome{
-				Kind: preparationImmediate,
+				Kind:     preparationImmediate,
 				ToolCall: toolCall,
 				Result: AgentToolResult[any]{
 					Content: []llm.ContentBlock{llm.TextContent{Type: "text", Text: result.Reason}},
@@ -588,10 +609,10 @@ func prepareToolCall(
 		}
 	}
 	return immediateToolCallOutcome{
-		Kind: preparationKind,
+		Kind:     preparationKind,
 		ToolCall: toolCall,
-		Tool: *tool,
-		Args: args,
+		Tool:     *tool,
+		Args:     args,
 	}
 }
 
@@ -627,8 +648,6 @@ func executePreparedToolCall(
 	}
 }
 
-
-
 func finalizeExecutedToolCall(
 	context AgentContext,
 	assistantMessage llm.AssistantMessage,
@@ -636,28 +655,28 @@ func finalizeExecutedToolCall(
 	executed executedToolCallOutcome,
 	config AgentLoopConfig,
 	signal context.Context,
-) finalizedToolCallOutcome{
+) finalizedToolCallOutcome {
 	result := executed.Result
 	isError := executed.IsError
 
 	if config.AfterToolCall != nil {
 		afterCtx := AfterToolCallContext{
 			AssistantMessage: assistantMessage,
-			ToolCall: 		  prep.ToolCall,
-			Args: 			  prep.Args, // Would be set in prepared path
-			Result: 		  result,
-			IsError: 		  isError,
-			Context: 		  context,
+			ToolCall:         prep.ToolCall,
+			Args:             prep.Args, // Would be set in prepared path
+			Result:           result,
+			IsError:          isError,
+			Context:          context,
 		}
 		afterResult, err := config.AfterToolCall(afterCtx, signal)
-		if err == nil && afterResult != nil  {
+		if err == nil && afterResult != nil {
 			if afterResult.Content != nil {
 				result.Content = afterResult.Content
 			}
 			if afterResult.Details != nil {
 				result.Details = afterResult.Details
 			}
-			if afterResult.IsError != nil { 
+			if afterResult.IsError != nil {
 				isError = *afterResult.IsError
 			}
 			if afterResult.Terminate != nil {
@@ -672,21 +691,20 @@ func finalizeExecutedToolCall(
 	}
 }
 
-
 func createToolResultMessage(finalized finalizedToolCallOutcome) llm.ToolResultMessage[any] {
 	details := finalized.Result.Details
-	return llm.ToolResultMessage[any] {
-		Role: llm.RoleTool,
+	return llm.ToolResultMessage[any]{
+		Role:       llm.RoleTool,
 		ToolCallID: finalized.ToolCall.ID,
-		ToolName: finalized.ToolCall.Name,
-		Content: finalized.Result.Content,
-		Details: &details,
-		IsError: finalized.IsError,
-		Timestamp: 0,  // Set by caller
+		ToolName:   finalized.ToolCall.Name,
+		Content:    finalized.Result.Content,
+		Details:    &details,
+		IsError:    finalized.IsError,
+		Timestamp:  0, // Set by caller
 	}
 }
 
-func emitToolExecutionEnd(finalized finalizedToolCallOutcome, emit func(AgentEvent) error){
+func emitToolExecutionEnd(finalized finalizedToolCallOutcome, emit func(AgentEvent) error) {
 	// Result stays Content (the output blocks the TUI's extractResultText
 	// reads); Details rides in its own field so consumers can pick up typed
 	// extras (e.g. the edit diff) — it is nil for most tools.
@@ -722,7 +740,7 @@ func convertTools(tools []AgentTool[any]) []llm.Tool[any] {
 	result := make([]llm.Tool[any], len(tools))
 	for i, tool := range tools {
 		result[i] = llm.Tool[any]{
-			Name: 		 tool.Name,
+			Name:        tool.Name,
 			Description: tool.Description,
 			Parameters:  tool.Parameters,
 		}
@@ -730,23 +748,23 @@ func convertTools(tools []AgentTool[any]) []llm.Tool[any] {
 	return result
 }
 
-func createErrorMessage(config AgentLoopConfig, message string, signal context.Context) llm.AssistantMessage{
+func createErrorMessage(config AgentLoopConfig, message string, signal context.Context) llm.AssistantMessage {
 	usage := llm.Usage{
-		Input:		0,
-		Output: 	0,
-		CacheRead: 	0,
-		CacheWrite: 0,
-		TotalTokens:0,
+		Input:       0,
+		Output:      0,
+		CacheRead:   0,
+		CacheWrite:  0,
+		TotalTokens: 0,
 	}
 	return llm.AssistantMessage{
-		Role: 			llm.RoleAssistant,
-		Content: 		[]llm.ContentBlock{llm.TextContent{Type:"text", Text: message}},
-		Api: 			config.Model.Api,
-		Provider: 		config.Model.Provider,
-		Model: 			config.Model.ID,
-		Usage: 			usage,
-		StopReason: 	llm.StopReasonError,
-		Timestamp: 		0,
+		Role:       llm.RoleAssistant,
+		Content:    []llm.ContentBlock{llm.TextContent{Type: "text", Text: message}},
+		Api:        config.Model.Api,
+		Provider:   config.Model.Provider,
+		Model:      config.Model.ID,
+		Usage:      usage,
+		StopReason: llm.StopReasonError,
+		Timestamp:  0,
 	}
 }
 

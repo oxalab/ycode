@@ -3,6 +3,7 @@ package providers
 import (
 	"bufio"
 	"bytes"
+	gocontext "context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,30 +36,37 @@ type OpenAICompletionsOptions struct {
 	Headers         map[string]string
 	SessionID       string
 	CacheRetention  *src.CacheRetention
+	// Context carries the caller's abort signal (the Go equivalent of the TS
+	// AbortSignal). Cancelling it aborts the request and the stream.
+	Context gocontext.Context
+	// TimeoutMs caps each attempt (SDK default 10 minutes); MaxRetries
+	// overrides the SDK default of 2. The reference threads both per request.
+	TimeoutMs  int
+	MaxRetries *int
 	// Callbacks
 	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
 	OnResponse func(resp interface{}, model src.Model[src.Api])
 }
 
 type OpenAICompletionsCompat struct {
-	SupportsStore                      bool
-	SupportsDeveloperRole              bool
-	SupportsReasoningEffort            bool
-	ReasoningEffortMap                 map[string]string
-	SupportsUsageInStreaming           bool
-	MaxTokensField                     string
-	RequiresToolResultName             bool
-	RequiresAssistantAfterToolResult   bool
-	RequiresThinkingAsText             bool
+	SupportsStore                       bool
+	SupportsDeveloperRole               bool
+	SupportsReasoningEffort             bool
+	ReasoningEffortMap                  map[string]string
+	SupportsUsageInStreaming            bool
+	MaxTokensField                      string
+	RequiresToolResultName              bool
+	RequiresAssistantAfterToolResult    bool
+	RequiresThinkingAsText              bool
 	RequiresReasoningContentOnAssistant bool
-	ThinkingFormat                     string
-	OpenRouterRouting                  map[string]string
-	VercelGatewayRouting               map[string]interface{}
-	ZaiToolStream                      bool
-	SupportsStrictMode                 bool
-	CacheControlFormat                 string
-	SendSessionAffinityHeaders         bool
-	SupportsLongCacheRetention         bool
+	ThinkingFormat                      string
+	OpenRouterRouting                   map[string]string
+	VercelGatewayRouting                map[string]interface{}
+	ZaiToolStream                       bool
+	SupportsStrictMode                  bool
+	CacheControlFormat                  string
+	SendSessionAffinityHeaders          bool
+	SupportsLongCacheRetention          bool
 }
 
 // =============================================================================
@@ -83,10 +91,12 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 				StopReason: src.StopReasonStop,
 			}
 
-			// Build and send request. No overall client timeout — the reference
-			// sets none, and one would kill long streaming responses mid-body
-			// (http.Client.Timeout spans the whole body read). Hang protection
-			// is the user's escape-to-interrupt, same as the TS port.
+			// Build and send request. The reference inherits the SDK client
+			// defaults (10-minute per-attempt timeout, 2 retries) unless
+			// options.TimeoutMs / options.MaxRetries override them; the timeout
+			// is per attempt, so a long stream still completes. No
+			// http.Client.Timeout is set anywhere (it spans the whole body read
+			// and would kill long streams regardless of the attempt budget).
 			client := &http.Client{}
 			compat := resolveOpenAICompat(model)
 			params := buildOpenAICompletionsParams(model, context, options, compat)
@@ -97,15 +107,21 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 				}
 			}
 
+			// The reference catch maps every failure to "aborted" only when the
+			// caller's signal fired; a mid-stream read error is a plain error.
+			ctxAborted := func() bool {
+				return options != nil && options.Context != nil && options.Context.Err() != nil
+			}
+
 			resp, err := doOpenAICompletionsRequest(client, model, context, params, options, compat)
 			if err != nil {
-				handleOpenAICompletionsError(ch, output, err, false)
+				handleOpenAICompletionsError(ch, output, err, ctxAborted())
 				return
 			}
 
 			if options != nil && options.OnResponse != nil {
 				options.OnResponse(map[string]interface{}{
-					"status": resp.StatusCode,
+					"status":  resp.StatusCode,
 					"headers": resp.Header,
 				}, model)
 			}
@@ -114,12 +130,28 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 
 			// Process streaming response
 			if err := processOpenAICompletionsStream(resp.Body, ch, output, model, compat); err != nil {
-				handleOpenAICompletionsError(ch, output, err, true)
+				if ctxAborted() {
+					// The SDK surfaces a caller abort as "Request was aborted."
+					handleOpenAICompletionsError(ch, output, fmt.Errorf("Request was aborted"), true)
+				} else {
+					handleOpenAICompletionsError(ch, output, err, false)
+				}
 				return
 			}
 
-			if output.StopReason == src.StopReasonError || output.StopReason == src.StopReasonAborted {
-				handleOpenAICompletionsError(ch, output, fmt.Errorf("stream ended with error: %s", output.StopReason), false)
+			// Post-stream caller abort (reference throws "Request was aborted").
+			if ctxAborted() {
+				handleOpenAICompletionsError(ch, output, fmt.Errorf("Request was aborted"), true)
+				return
+			}
+
+			if output.StopReason == src.StopReasonError {
+				// Reference rethrows the inner errorMessage (or the fallback).
+				message := output.ErrorMessage
+				if message == "" {
+					message = "Provider returned an error stop reason"
+				}
+				handleOpenAICompletionsError(ch, output, fmt.Errorf("%s", message), false)
 				return
 			}
 
@@ -206,7 +238,24 @@ func doOpenAICompletionsRequest(client *http.Client, model src.Model[src.Api], c
 		}
 	}
 
-	return client.Do(req)
+	var optsCtx gocontext.Context
+	var timeoutMs int
+	var maxRetries *int
+	if options != nil {
+		optsCtx = options.Context
+		timeoutMs = options.TimeoutMs
+		maxRetries = options.MaxRetries
+	}
+	return doSDKStyleRequest(sdkRequestOptions{
+		Method:     http.MethodPost,
+		URL:        baseURL,
+		Body:       body,
+		Header:     req.Header,
+		Context:    optsCtx,
+		Client:     client,
+		TimeoutMs:  timeoutMs,
+		MaxRetries: maxRetries,
+	})
 }
 
 func handleOpenAICompletionsError(ch chan<- src.AssistantMessageEvent, output *src.AssistantMessage, err error, isAborted bool) {
@@ -789,8 +838,8 @@ func addCacheControlToMessage(msg map[string]interface{}, cacheControl map[strin
 		}
 		msg["content"] = []map[string]interface{}{
 			{
-				"type":         "text",
-				"text":         c,
+				"type":          "text",
+				"text":          c,
 				"cache_control": cacheControl,
 			},
 		}
@@ -1177,24 +1226,24 @@ func parseOpenAICompletionsUsage(usage map[string]interface{}, model src.Model[s
 
 func detectOpenAICompat(model src.Model[src.Api]) *OpenAICompletionsCompat {
 	compat := &OpenAICompletionsCompat{
-		SupportsStore:                    true,
-		SupportsDeveloperRole:            true,
-		SupportsReasoningEffort:          true,
-		ReasoningEffortMap:               map[string]string{},
-		SupportsUsageInStreaming:         true,
-		MaxTokensField:                   "max_completion_tokens",
-		RequiresToolResultName:           false,
-		RequiresAssistantAfterToolResult: false,
-		RequiresThinkingAsText:           false,
+		SupportsStore:                       true,
+		SupportsDeveloperRole:               true,
+		SupportsReasoningEffort:             true,
+		ReasoningEffortMap:                  map[string]string{},
+		SupportsUsageInStreaming:            true,
+		MaxTokensField:                      "max_completion_tokens",
+		RequiresToolResultName:              false,
+		RequiresAssistantAfterToolResult:    false,
+		RequiresThinkingAsText:              false,
 		RequiresReasoningContentOnAssistant: false,
-		ThinkingFormat:                   "openai",
-		OpenRouterRouting:                map[string]string{},
-		VercelGatewayRouting:             map[string]interface{}{},
-		ZaiToolStream:                    false,
-		SupportsStrictMode:               true,
-		CacheControlFormat:               "",
-		SendSessionAffinityHeaders:       false,
-		SupportsLongCacheRetention:       true,
+		ThinkingFormat:                      "openai",
+		OpenRouterRouting:                   map[string]string{},
+		VercelGatewayRouting:                map[string]interface{}{},
+		ZaiToolStream:                       false,
+		SupportsStrictMode:                  true,
+		CacheControlFormat:                  "",
+		SendSessionAffinityHeaders:          false,
+		SupportsLongCacheRetention:          true,
 	}
 
 	provider := model.Provider
@@ -1332,33 +1381,54 @@ func mapOpenAIReasoningEffort(effort string, effortMap map[string]string) string
 	return effort
 }
 
-func mapOpenAICompletionsStopReason(reason string) struct{ StopReason src.StopReason; ErrorMessage string } {
+func mapOpenAICompletionsStopReason(reason string) struct {
+	StopReason   src.StopReason
+	ErrorMessage string
+} {
 	switch reason {
 	case "stop", "end":
-		return struct{ StopReason src.StopReason; ErrorMessage string }{
+		return struct {
+			StopReason   src.StopReason
+			ErrorMessage string
+		}{
 			StopReason: src.StopReasonStop,
 		}
 	case "length":
-		return struct{ StopReason src.StopReason; ErrorMessage string }{
+		return struct {
+			StopReason   src.StopReason
+			ErrorMessage string
+		}{
 			StopReason: src.StopReasonLength,
 		}
 	case "function_call", "tool_calls":
-		return struct{ StopReason src.StopReason; ErrorMessage string }{
+		return struct {
+			StopReason   src.StopReason
+			ErrorMessage string
+		}{
 			StopReason: src.StopReasonToolUse,
 		}
 	case "content_filter":
-		return struct{ StopReason src.StopReason; ErrorMessage string }{
-			StopReason:  src.StopReasonError,
+		return struct {
+			StopReason   src.StopReason
+			ErrorMessage string
+		}{
+			StopReason:   src.StopReasonError,
 			ErrorMessage: "Provider finish_reason: content_filter",
 		}
 	case "network_error":
-		return struct{ StopReason src.StopReason; ErrorMessage string }{
-			StopReason:  src.StopReasonError,
+		return struct {
+			StopReason   src.StopReason
+			ErrorMessage string
+		}{
+			StopReason:   src.StopReasonError,
 			ErrorMessage: "Provider finish_reason: network_error",
 		}
 	default:
-		return struct{ StopReason src.StopReason; ErrorMessage string }{
-			StopReason:  src.StopReasonError,
+		return struct {
+			StopReason   src.StopReason
+			ErrorMessage string
+		}{
+			StopReason:   src.StopReasonError,
 			ErrorMessage: "Provider finish_reason: " + reason,
 		}
 	}
