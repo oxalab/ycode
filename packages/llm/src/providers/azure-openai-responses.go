@@ -52,6 +52,10 @@ type AzureOpenAIResponsesOptions struct {
 	SessionID           string
 	CacheRetention      *src.CacheRetention
 	Context             context.Context
+	// TimeoutMs caps each attempt (SDK default 10 minutes); MaxRetries
+	// overrides the SDK default of 2. The reference threads both per request.
+	TimeoutMs  int
+	MaxRetries *int
 	// Callbacks
 	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
 	OnResponse func(resp interface{}, model src.Model[src.Api])
@@ -82,7 +86,9 @@ func StreamAzureOpenAIResponses(model src.Model[src.Api], context src.ChatContex
 
 			handleError := func(err error) {
 				// TS catch block: drop streaming scratch fields, then
-				// surface the error (aborted only on real aborts).
+				// surface the error (aborted only on real aborts, where the
+				// SDK's "Request was aborted." abort error replaces the raw
+				// transport message).
 				for _, block := range output.Content {
 					if tc, ok := block.(*src.ToolCall); ok {
 						tc.PartialArgs = ""
@@ -90,10 +96,11 @@ func StreamAzureOpenAIResponses(model src.Model[src.Api], context src.ChatContex
 				}
 				if ctx := azureContext(options); ctx != nil && ctx.Err() != nil {
 					output.StopReason = src.StopReasonAborted
+					output.ErrorMessage = "Request was aborted"
 				} else {
 					output.StopReason = src.StopReasonError
+					output.ErrorMessage = err.Error()
 				}
-				output.ErrorMessage = err.Error()
 				ch <- src.AssistantMessageEvent{Type: "error", Reason: output.StopReason, Error: output}
 			}
 
@@ -187,9 +194,6 @@ func doAzureOpenAIResponsesRequest(model src.Model[src.Api], params interface{},
 	if err != nil {
 		return nil, err
 	}
-	if ctx := azureContext(options); ctx != nil {
-		req = req.WithContext(ctx)
-	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("api-key", apiKey)
@@ -203,8 +207,23 @@ func doAzureOpenAIResponsesRequest(model src.Model[src.Api], params interface{},
 		}
 	}
 
+	var timeoutMs int
+	var maxRetries *int
+	if options != nil {
+		timeoutMs = options.TimeoutMs
+		maxRetries = options.MaxRetries
+	}
 	client := &http.Client{}
-	return client.Do(req)
+	return doSDKStyleRequest(sdkRequestOptions{
+		Method:     http.MethodPost,
+		URL:        endpoint,
+		Body:       body,
+		Header:     req.Header,
+		Context:    azureContext(options),
+		Client:     client,
+		TimeoutMs:  timeoutMs,
+		MaxRetries: maxRetries,
+	})
 }
 
 // normalizeAzureBaseUrl mirrors normalizeAzureBaseUrl: trim trailing slashes,

@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"net/http"
 
 	src "ycode/packages/llm/src"
 )
@@ -274,14 +275,25 @@ func convertStreamOptionsToAnthropic(options *src.StreamOptions) *AnthropicOptio
 		return nil
 	}
 	cacheRetention := options.CacheRetention
-	return &AnthropicOptions{
-		APIKey:            options.APIKey,
-		MaxTokens:         options.MaxTokens,
-		Temperature:       options.Temperature,
-		Headers:           options.Headers,
-		SessionID:         options.SessionID,
-		CacheRetention:    &cacheRetention,
+	converted := &AnthropicOptions{
+		APIKey:         options.APIKey,
+		MaxTokens:      options.MaxTokens,
+		Temperature:    options.Temperature,
+		Headers:        options.Headers,
+		SessionID:      options.SessionID,
+		CacheRetention: &cacheRetention,
+		Context:        options.Context,
+		TimeoutMs:      options.TimeoutMs,
+		MaxRetries:     options.MaxRetries,
+		OnPayload:      adaptOnPayload(options.OnPayload),
+		OnResponse:     adaptOnResponse(options.OnResponse),
 	}
+	// The reference extracts only metadata.user_id (anthropic.ts) — other
+	// metadata keys are ignored.
+	if userID, ok := options.Metadata["user_id"].(string); ok {
+		converted.Metadata = map[string]string{"user_id": userID}
+	}
+	return converted
 }
 
 // convertStreamOptionsToOpenAICompletions converts StreamOptions to OpenAICompletionsOptions
@@ -296,6 +308,11 @@ func convertStreamOptionsToOpenAICompletions(options *src.StreamOptions) *OpenAI
 		Temperature:    options.Temperature,
 		Headers:        options.Headers,
 		CacheRetention: &cacheRetention,
+		Context:        options.Context,
+		TimeoutMs:      options.TimeoutMs,
+		MaxRetries:     options.MaxRetries,
+		OnPayload:      adaptOnPayload(options.OnPayload),
+		OnResponse:     adaptOnResponse(options.OnResponse),
 	}
 }
 
@@ -311,6 +328,11 @@ func convertStreamOptionsToOpenAIResponses(options *src.StreamOptions) *OpenAIRe
 		Temperature:    options.Temperature,
 		Headers:        options.Headers,
 		CacheRetention: &cacheRetention,
+		Context:        options.Context,
+		TimeoutMs:      options.TimeoutMs,
+		MaxRetries:     options.MaxRetries,
+		OnPayload:      adaptOnPayload(options.OnPayload),
+		OnResponse:     adaptOnResponse(options.OnResponse),
 	}
 }
 
@@ -330,6 +352,8 @@ func convertStreamOptionsToOpenAICodexResponses(options *src.StreamOptions) *Ope
 		CacheRetention: &cacheRetention,
 		Context:        options.Context,
 		Transport:      options.Transport,
+		OnPayload:      adaptOnPayload(options.OnPayload),
+		OnResponse:     adaptOnResponse(options.OnResponse),
 	}
 }
 
@@ -348,6 +372,10 @@ func convertStreamOptionsToAzureOpenAIResponses(options *src.StreamOptions) *Azu
 		SessionID:      options.SessionID,
 		CacheRetention: &cacheRetention,
 		Context:        options.Context,
+		TimeoutMs:      options.TimeoutMs,
+		MaxRetries:     options.MaxRetries,
+		OnPayload:      adaptOnPayload(options.OnPayload),
+		OnResponse:     adaptOnResponse(options.OnResponse),
 	}
 }
 
@@ -362,6 +390,7 @@ func convertStreamOptionsToGoogle(options *src.StreamOptions) *GoogleOptions {
 		Temperature: options.Temperature,
 		Headers:     options.Headers,
 		Context:     options.Context,
+		OnPayload:   adaptOnPayload(options.OnPayload),
 	}
 }
 
@@ -377,6 +406,7 @@ func convertStreamOptionsToGoogleVertex(options *src.StreamOptions) *GoogleVerte
 		Temperature: options.Temperature,
 		Headers:     options.Headers,
 		Context:     options.Context,
+		OnPayload:   adaptOnPayload(options.OnPayload),
 	}
 }
 
@@ -392,6 +422,7 @@ func convertStreamOptionsToMistral(options *src.StreamOptions) *MistralOptions {
 		Headers:     options.Headers,
 		SessionID:   options.SessionID,
 		Context:     options.Context,
+		OnPayload:   adaptOnPayload(options.OnPayload),
 	}
 }
 
@@ -406,5 +437,49 @@ func convertStreamOptionsToBedrock(options *src.StreamOptions) *AmazonBedrockOpt
 		Headers:        options.Headers,
 		CacheRetention: options.CacheRetention,
 		Context:        options.Context,
+		OnPayload:      adaptOnPayload(options.OnPayload),
+		OnResponse:     adaptOnResponse(options.OnResponse),
+	}
+}
+
+// adaptOnPayload adapts the generic StreamOptions.OnPayload callback to the
+// per-provider signature. A nil return keeps the original payload (TS:
+// undefined = keep).
+func adaptOnPayload(fn func(payload any) any) func(params interface{}, model src.Model[src.Api]) (interface{}, error) {
+	if fn == nil {
+		return nil
+	}
+	return func(params interface{}, model src.Model[src.Api]) (interface{}, error) {
+		out := fn(params)
+		if out == nil {
+			return nil, nil
+		}
+		return out, nil
+	}
+}
+
+// adaptOnResponse adapts the generic StreamOptions.OnResponse callback to the
+// per-provider signature. Providers hand over a map with "status" and
+// "headers" (or an *http.Response); the generic callback wants *http.Response,
+// so rebuild one carrying the same status and headers.
+func adaptOnResponse(fn func(resp *http.Response)) func(resp interface{}, model src.Model[src.Api]) {
+	if fn == nil {
+		return nil
+	}
+	return func(resp interface{}, model src.Model[src.Api]) {
+		out := &http.Response{Header: http.Header{}}
+		switch v := resp.(type) {
+		case *http.Response:
+			out.StatusCode = v.StatusCode
+			out.Header = v.Header
+		case map[string]interface{}:
+			if s, ok := v["status"].(int); ok {
+				out.StatusCode = s
+			}
+			if h, ok := v["headers"].(http.Header); ok {
+				out.Header = h
+			}
+		}
+		fn(out)
 	}
 }

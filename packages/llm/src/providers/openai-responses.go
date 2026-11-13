@@ -3,6 +3,7 @@ package providers
 import (
 	"bufio"
 	"bytes"
+	gocontext "context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,16 +27,23 @@ const (
 // =============================================================================
 
 type OpenAIResponsesOptions struct {
-	APIKey             string
-	MaxTokens          *int
-	MaxOutputTokens    *int
-	Temperature        *float64
-	ServiceTier        *string
-	ReasoningEffort    *string
-	ReasoningSummary   *string
-	Headers            map[string]string
-	SessionID          string
-	CacheRetention     *src.CacheRetention
+	APIKey           string
+	MaxTokens        *int
+	MaxOutputTokens  *int
+	Temperature      *float64
+	ServiceTier      *string
+	ReasoningEffort  *string
+	ReasoningSummary *string
+	Headers          map[string]string
+	SessionID        string
+	CacheRetention   *src.CacheRetention
+	// Context carries the caller's abort signal (the Go equivalent of the TS
+	// AbortSignal). Cancelling it aborts the request and the stream.
+	Context gocontext.Context
+	// TimeoutMs caps each attempt (SDK default 10 minutes); MaxRetries
+	// overrides the SDK default of 2. The reference threads both per request.
+	TimeoutMs  int
+	MaxRetries *int
 	// Callbacks
 	OnPayload  func(params interface{}, model src.Model[src.Api]) (interface{}, error)
 	OnResponse func(resp interface{}, model src.Model[src.Api])
@@ -73,30 +81,46 @@ func StreamOpenAIResponses(model src.Model[src.Api], context src.ChatContext, op
 				}
 			}
 
+			// The reference catch maps every failure to "aborted" only when the
+			// caller's signal fired; a mid-stream read error is a plain error.
+			ctxAborted := func() bool {
+				return options != nil && options.Context != nil && options.Context.Err() != nil
+			}
+
 			resp, err := doOpenAIResponsesRequest(client, model, context, params, options)
 			if err != nil {
-				handleOpenAIResponsesError(ch, output, err, false)
+				handleOpenAIResponsesError(ch, output, err, ctxAborted())
 				return
 			}
 
 			if options != nil && options.OnResponse != nil {
 				options.OnResponse(map[string]interface{}{
-					"status": resp.StatusCode,
+					"status":  resp.StatusCode,
 					"headers": resp.Header,
 				}, model)
 			}
 
 			ch <- src.AssistantMessageEvent{Type: "start", Partial: output}
 
-			// Process streaming response. No signal support yet (P15), so a
-			// mid-stream read error is an error, never an abort.
+			// Process streaming response
 			if err := processOpenAIResponsesStream(resp.Body, ch, output, model, options); err != nil {
-				handleOpenAIResponsesError(ch, output, err, false)
+				if ctxAborted() {
+					// The SDK surfaces a caller abort as "Request was aborted."
+					handleOpenAIResponsesError(ch, output, fmt.Errorf("Request was aborted"), true)
+				} else {
+					handleOpenAIResponsesError(ch, output, err, false)
+				}
+				return
+			}
+
+			// Post-stream caller abort (reference throws "Request was aborted").
+			if ctxAborted() {
+				handleOpenAIResponsesError(ch, output, fmt.Errorf("Request was aborted"), true)
 				return
 			}
 
 			if output.StopReason == src.StopReasonError || output.StopReason == src.StopReasonAborted {
-				handleOpenAIResponsesError(ch, output, fmt.Errorf("stream ended with error: %s", output.StopReason), false)
+				handleOpenAIResponsesError(ch, output, fmt.Errorf("An unknown error occurred"), false)
 				return
 			}
 
@@ -193,7 +217,24 @@ func doOpenAIResponsesRequest(client *http.Client, model src.Model[src.Api], con
 		}
 	}
 
-	resp, err := client.Do(req)
+	var optsCtx gocontext.Context
+	var timeoutMs int
+	var maxRetries *int
+	if options != nil {
+		optsCtx = options.Context
+		timeoutMs = options.TimeoutMs
+		maxRetries = options.MaxRetries
+	}
+	resp, err := doSDKStyleRequest(sdkRequestOptions{
+		Method:     http.MethodPost,
+		URL:        baseURL,
+		Body:       body,
+		Header:     req.Header,
+		Context:    optsCtx,
+		Client:     client,
+		TimeoutMs:  timeoutMs,
+		MaxRetries: maxRetries,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -237,9 +278,9 @@ func handleOpenAIResponsesError(ch chan<- src.AssistantMessageEvent, output *src
 
 func buildOpenAIResponsesParams(model src.Model[src.Api], context src.ChatContext, options *OpenAIResponsesOptions) interface{} {
 	allowedToolCallProviders := map[string]bool{
-		"openai":         true,
-		"openai-codex":   true,
-		"opencode":       true,
+		"openai":       true,
+		"openai-codex": true,
+		"opencode":     true,
 	}
 
 	convertOptions := &ConvertResponsesMessagesOptions{

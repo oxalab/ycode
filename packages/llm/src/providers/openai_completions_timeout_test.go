@@ -16,8 +16,12 @@ import (
 // http.Client.Timeout (60s). http.Client.Timeout spans the entire response
 // body read, so any stream longer than the budget died mid-body with
 // "context deadline exceeded (Client.Timeout or context cancellation while
-// reading body)". The TS reference sets no timeout at all — hang protection
-// is the user's escape-to-interrupt. These tests pin that parity.
+// reading body)". The TS reference has no such client-level timeout either:
+// the openai SDK default is a 10-MINUTE PER-ATTEMPT timeout (fresh budget
+// per attempt, so long streams still complete), which the Go port mirrors
+// via the sdk_request.go context deadline. These tests pin that an http
+// trickle is delivered whole and that no provider ever uses
+// http.Client{Timeout.
 
 // TestStreamOpenAICompletionsSpacedChunksComplete proves a stream whose body
 // trickles in over time is delivered whole (no client-level deadline cutting
@@ -75,7 +79,9 @@ func TestStreamOpenAICompletionsSpacedChunksComplete(t *testing.T) {
 
 // TestProvidersHaveNoOverallClientTimeout is a source-level guard: no provider
 // may put an overall Timeout on its streaming http.Client (it spans the body
-// read and kills long streams — the reference sets none).
+// read and kills long streams). The reference instead applies a per-attempt
+// SDK timeout (10-minute default), which sdk_request.go implements with a
+// context deadline.
 func TestProvidersHaveNoOverallClientTimeout(t *testing.T) {
 	matches, err := filepath.Glob("*.go")
 	if err != nil {
