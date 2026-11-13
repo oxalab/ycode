@@ -1,6 +1,10 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
-> **Created:** 2026-08-26 · **Status:** 34 of 34 findings fixed
+> **Created:** 2026-08-26 · **Status:** 34 of 34 findings fixed ·
+> **P-backlog CLOSED 2026-11-13** (P9–P16 all resolved; story 36 closed the
+> last group, P15 structural — only the explicitly-deferred bucket remains:
+> codex WS transport, catalog sync for untouched groups, catalog typos,
+> add-second-model TUI, oauth registry population)
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -1203,7 +1207,8 @@ width-keyed caches). Two real bugs:
     error-event interception (generic "Error Code" wording leaked through),
     azure legacy URL restored, friendly-message condition killed**)**:
     *openai-codex-responses* full re-port (SSE transport; the WS stack is
-    the reference's own fallback path — deferred as P15-class): ~~wrong
+    the reference's own fallback path — [open, follow-up bucket] transport
+    feature, not part of the P15 structural set): ~~wrong
     host `api.openai.com/v1/responses`~~ (`resolveCodexURL` →
     `chatgpt.com/backend-api/codex/responses` + suffix normalization);
     ~~no `chatgpt-account-id`/`originator`/UA/`OpenAI-Beta:
@@ -1281,8 +1286,10 @@ width-keyed caches). Two real bugs:
     (text-only join, image-only placeholder); PI_CACHE_RETENTION;
     maxTokens default = model.MaxTokens/3 verbatim (4096 fallback
     removed — uncataloged models now fail loudly at the API, TS parity);
-    `toolcall_end` re-parses accumulated args. **Remains (P15):
-    signal/timeout/retry, ThinkingLevelMap-based effort mapping.**
+    `toolcall_end` re-parses accumulated args. ~~**Remains (P15):
+    signal/timeout/retry, ThinkingLevelMap-based effort mapping.**~~
+    ✅ both closed 2026-11-13 (story 36: signal/timeout/retry via the shared
+    SDK-style transport, story 31: thinkingLevelMap + ClampThinkingLevel).
   - *P11 google family* — **FIXED 2026-11-06 (story 32**, tests in
     `google_parity_test.go` + `google_vertex_parity_test.go`; 6 mutations
     detected: gutted status check, dropped `models/` prefix, restored
@@ -1412,9 +1419,13 @@ width-keyed caches). Two real bugs:
     since stories 32/33 replaced those groups, and bedrock's
     `"bedrock-converese-stream"` + the `cluade` model-ID typo went with
     story 34's group replacement) [catalog-typos story];
-    registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
-    OnPayload/OnResponse [deferred to P15 — providers don't honor those
-    fields yet]; oauth registry never populated + 2 providers don't satisfy
+    ~~registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
+    OnPayload/OnResponse~~ ✅ FIXED 2026-11-13 (story 36: converters forward
+    Metadata (anthropic user_id only, TS parity), OnPayload/OnResponse via
+    shared adapters (all providers TS consumes them; google/vertex/mistral
+    onResponse deliberately absent), Context everywhere it is honored, and
+    TimeoutMs/MaxRetries for the four SDK-threading providers);
+    oauth registry never populated + 2 providers don't satisfy
     the interface (custom providers unregistrable) [open]; ~~env-key
     resolver divergence~~ ✅ FIXED 2026-10-31 (story 28:
     helpers.go getEnvApiKey now delegates to the faithful
@@ -1424,13 +1435,78 @@ width-keyed caches). Two real bugs:
     constant respelled `cloudflare-workers-ai`, `cloudflare-ai-gateway`
     matched, `ResolveCloudflareBaseUrl` returns an error instead of
     panicking — tests in `registry_wiring_test.go`).
-  - *P15 structural*: `Model` has no `ThinkingLevelMap` (effort mapping and
-    the openai-style off-value / openrouter `off !== null` guard can't mirror
-    TS); no retries/timeout/signal on any provider (TS OpenAI SDK defaults:
-    2 retries, 10-min timeout); overflow detection missing the Together
-    pattern + Xiaomi silent-overflow case; `ValidateToolArguments` is a no-op
-    (TS runs TypeBox Convert+Check); faux provider never emits `*_start`
-    events and ignores options/abort/usage.
+  - *P15 structural*: ~~`Model` has no `ThinkingLevelMap`~~ ✅ story 31
+    (field + ClampThinkingLevel/GetSupportedThinkingLevels); ~~no
+    retries/timeout/signal on any provider~~; ~~overflow detection missing
+    the Together pattern + Xiaomi silent-overflow case~~;
+    ~~`ValidateToolArguments` is a no-op~~; ~~faux provider never emits
+    `*_start` events and ignores options/abort/usage~~
+    ✅ **ALL FIXED 2026-11-13 (story 36** — the LAST P-group; tests in
+    `sdk_request_parity_test.go`, `convert_forwarding_test.go`,
+    `faux_parity_test.go`, `utils/overflow_test.go`,
+    `utils/validation_test.go`, agent-sdk
+    `TestPrepareToolCallValidatesArguments`; 8 mutations detected: killed
+    Together pattern, 0.99→1.0 threshold, dropped 429 from the retry set,
+    600000→500 default timeout (the ~1s trickle test dies), dropped faux
+    `text_start`, dropped user_id extraction, bypassed validation Check,
+    mutated faux abort wording**)**:
+    *retries/timeout/abort* — new `providers/sdk_request.go` ports the
+    OpenAI/Anthropic SDK transport (verified from openai@6.26.0 client.js
+    via unpkg; @anthropic-ai/sdk same lineage): maxRetries default 2,
+    PER-ATTEMPT timeout default 600000ms (fresh budget each attempt, so
+    long streams complete — the old "TS sets no timeout" premise in
+    `openai_completions_timeout_test.go` was wrong and its comment
+    corrected), retryable = x-should-retry header verbatim override else
+    408/409/429/>=500 + connection errors, delay = retry-after-ms →
+    retry-after (seconds then HTTP-date) → min(0.5·2^n, 8s)·(1−rand·0.25)
+    jitter, caller abort cancels sleep and request, per-attempt deadline
+    released on body EOF/Close. Wired into exactly the four providers TS
+    threads options.timeoutMs/maxRetries into (anthropic,
+    openai-completions, openai-responses, azure); codex keeps its own
+    ported loop; google/vertex/mistral/bedrock stay plain (TS configures
+    nothing there). Abort parity: completions no longer labels EVERY
+    mid-stream error aborted (ctx-derived now), responses gained
+    Context-abort, anthropic gained Context + request binding; all four
+    normalize caller-abort error text to "Request was aborted" and got the
+    post-stream abort check; completions/responses post-stream wordings
+    fixed to TS ("Provider returned an error stop reason" /
+    "An unknown error occurred"); options structs + converters gained
+    Context/TimeoutMs/MaxRetries.
+    *overflow* — Together AI pattern added (position after OpenRouter) +
+    Case 3 (stopReason length + output 0 + input+cacheRead ≥ 0.99·window,
+    Xiaomi MiMo silent truncation).
+    *validation* — `utils/validation.go` rewritten as the full
+    validation.ts port: coercion now covers allOf/anyOf/oneOf branch
+    selection (clone+Check per branch), additionalProperties schemas, tuple
+    items, union-member matching; new checkJSONSchema Check pass with
+    TypeBox en_US wording (must be X / must be either A or B / must have
+    required properties a, b / must not have fewer than N characters /
+    must match pattern "P" / must not have additional properties / ...) and
+    formatValidationPath paths (dots, required → first missing property,
+    root → "root"); failure message exact
+    `Validation failed for tool "x":\n  - path: msg\n\nReceived
+    arguments:\n<original args 2-space JSON>`; nil Parameters skip,
+    non-map error (was an unguarded assert that panicked — latent, zero
+    callers); `Tool "x" not found` capitalization fixed. Wired into
+    agent-sdk `prepareToolCall` (prepare → validate → beforeToolCall,
+    TS order; failure = immediate error tool result fed back to the model).
+    *faux* — full faux.ts parity: `*_start` events, abort checks at the
+    five reference points ("Request was aborted", partial preserved),
+    usage estimation (ceil(runes/4) over the serialized context + output —
+    TS counts UTF-16 units) with the session-keyed prompt-cache simulation
+    (cacheRetention "none" gate), onResponse probe ({200}), empty-queue
+    error gets usage too, step-factory panics become error events,
+    RegisterFauxProviderWithOptions (api/provider/models/tokensPerSecond/
+    tokenSize clamping), streamSimple forwards the whole StreamOptions,
+    Unregister → UnregisterApiProviders(sourceID), GetModel/GetModelByID.
+    *Residuals (documented, by design)*: google/vertex/bedrock SDK-default
+    resilience (genai/AWS SDK internal retries) unported — TS configures
+    nothing, options.timeoutMs/maxRetries are ignored there in TS too;
+    validation skips $ref/format/not/if-then-else/patternProperties/
+    propertyNames/contains/dependencies (unreachable from ycode tool
+    schemas); TS maxRetryDelayMs dead-ends in the reference as well (zero
+    provider consumers — no divergence); faux token estimate counts runes
+    where TS counts UTF-16 units.
   - *P16 gemini-cli*: ~~Go-only extra (no TS counterpart in this reference
     snapshot; Cloud Code Assist provider, likely from an older upstream pi) —
     unregistered; retry always hits `endpoints[0]` ignoring the failover
