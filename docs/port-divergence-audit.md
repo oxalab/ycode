@@ -3,8 +3,9 @@
 > **Created:** 2026-08-26 · **Status:** 34 of 34 findings fixed ·
 > **P-backlog CLOSED 2026-11-13** (P9–P16 all resolved; story 36 closed the
 > last group, P15 structural — only the explicitly-deferred bucket remains:
-> codex WS transport, catalog sync for untouched groups, catalog typos,
-> add-second-model TUI, oauth registry population)
+> codex WS transport, catalog sync for untouched groups,
+> add-second-model TUI, oauth registry population) ·
+> **catalog typos ✅ closed 2026-11-14 (story 37)**
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
 > truth) against the Go port, hunting for **behavioral divergences in code that
@@ -1077,7 +1078,8 @@ tests) — **C-group complete**, (10) ~~theme-cache verification~~ ✅ done
 2026-10-29 (recolor fix + line-cache parity verdict), (11) ~~provider-parity
 verification~~ ✅ done 2026-10-29 (story 27: first fix wave landed; follow-up
 queue = P9-P16 provider backlog above; deferred: C16 (JS runner context,
-feature family), catalog typos, add-second-model TUI gap). **All audit items
+feature family), add-second-model TUI gap; ~~catalog typos~~ ✅ story 37
+2026-11-14). **All audit items
 verified — no remaining unverified entries.** (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
@@ -1334,9 +1336,29 @@ width-keyed caches). Two real bugs:
     `{location}` template BaseURL + thinkingLevelMap incl. uppercase
     GoogleThinkingLevel values like `"LOW"` stored verbatim). Env mapping
     was already correct (`google`→GEMINI_API_KEY,
-    `google-vertex`→GOOGLE_CLOUD_API_KEY). Repo-wide typos NOT touched
-    (catalog-typos story): `StopReasonToolUse = "tooluse"` (TS "toolUse")
-    and the `thoughSignature` JSON tag.
+    `google-vertex`→GOOGLE_CLOUD_API_KEY). ~~Repo-wide typos NOT touched~~
+    ✅ FIXED 2026-11-14 (**story 37, catalog-typos**: `StopReasonToolUse` is
+    now `"toolUse"` (TS types.ts:269) — wire-visible in session JSONL, the
+    agent-sdk event stream, and the embedded export-html template whose
+    `!== 'toolUse'` check misfired on the old value; `ThoughtSignature` JSON
+    tag `"thoughtSignature"` (TS types.ts:251) — Go could not round-trip
+    TS-written sessions before; Api values `"bedrock-converse-stream"` /
+    `"mistral-conversations"` corrected — the old constants matched no
+    catalog row (catalog + registry already used the correct spellings), so
+    the add-provider chooser wrote un-dispatchable models.json entries;
+    `AllowFallbacks` tag `"allow_fallbacks"` (TS types.ts:448); agent-sdk
+    proxy wire tag `"delta"` (TS proxy.ts) — `"detla"` silently dropped every
+    text/thinking/toolcall delta from a TS-format server; identifier typos
+    MistralConversations / VercelAIGateway / SupportsUsageInStreaming;
+    wire pins in `types_wire_parity_test.go` + agent-sdk
+    `proxy_wire_test.go`, 5/5 mutations detected. Residuals: pre-fix Go
+    session files keep `"tooluse"`/`"thoughSignature"` — they decode without
+    hard failure but lose toolUse stop-reason equality (nothing compares it;
+    tool execution is content-based, TS agent-loop.ts:196 checks only
+    error/aborted) and drop the signature on read (one-time degradation of
+    Google thought reuse on old sessions); models.json entries written by the
+    old add-provider flow were already un-dispatchable; TS has no migration
+    machinery for either)**.
   - *P12 amazon-bedrock*: ~~parser reads JSON over eventstream
     framing; request shape wrong (system as string, no `{json:}` schema
     wrapper, `toolUse` without toolUseId, toolResult string with hardcoded
@@ -1418,7 +1440,9 @@ width-keyed caches). Two real bugs:
     `"bedrock-converese-stream"`, `"mistral-chat"` — the latter two gone
     since stories 32/33 replaced those groups, and bedrock's
     `"bedrock-converese-stream"` + the `cluade` model-ID typo went with
-    story 34's group replacement) [catalog-typos story];
+    story 34's group replacement) ~~[catalog-typos story]~~ ✅ closed
+    2026-11-14 (story 37: remaining constant-value + JSON-tag typos fixed —
+    see the google/vertex wiring note above);
     ~~registry stream wrappers drop SessionID/TimeoutMs/MaxRetries/Metadata/
     OnPayload/OnResponse~~ ✅ FIXED 2026-11-13 (story 36: converters forward
     Metadata (anthropic user_id only, TS parity), OnPayload/OnResponse via
