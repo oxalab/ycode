@@ -35,8 +35,8 @@ func mergeOpenAICompletionsCompat(base, override *OpenAICompletionsCompat) *Open
 	if override.ReasoningEffortMap != nil {
 		merged.ReasoningEffortMap = override.ReasoningEffortMap
 	}
-	if override.SupportUsageInStreaming != nil {
-		merged.SupportUsageInStreaming = override.SupportUsageInStreaming
+	if override.SupportsUsageInStreaming != nil {
+		merged.SupportsUsageInStreaming = override.SupportsUsageInStreaming
 	}
 	if override.MaxTokensField != nil {
 		merged.MaxTokensField = override.MaxTokensField

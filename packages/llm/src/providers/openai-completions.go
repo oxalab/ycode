@@ -1335,8 +1335,8 @@ func resolveOpenAICompat(model src.Model[src.Api]) *OpenAICompletionsCompat {
 			compat.ReasoningEffortMap[string(level)] = effort
 		}
 	}
-	if mc.SupportUsageInStreaming != nil {
-		compat.SupportsUsageInStreaming = *mc.SupportUsageInStreaming
+	if mc.SupportsUsageInStreaming != nil {
+		compat.SupportsUsageInStreaming = *mc.SupportsUsageInStreaming
 	}
 	if mc.MaxTokensField != nil {
 		compat.MaxTokensField = *mc.MaxTokensField

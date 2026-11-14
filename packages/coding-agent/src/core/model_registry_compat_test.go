@@ -48,8 +48,8 @@ func TestProviderCompatAppliesToCustomModels(t *testing.T) {
 	if compat == nil {
 		t.Fatal("model.Compat.OpenAICompletions is nil; provider-level compat was discarded")
 	}
-	if compat.SupportUsageInStreaming == nil || *compat.SupportUsageInStreaming {
-		t.Errorf("supportsUsageInStreaming = %v, want false", compat.SupportUsageInStreaming)
+	if compat.SupportsUsageInStreaming == nil || *compat.SupportsUsageInStreaming {
+		t.Errorf("supportsUsageInStreaming = %v, want false", compat.SupportsUsageInStreaming)
 	}
 	if compat.MaxTokensField == nil || *compat.MaxTokensField != "max_tokens" {
 		t.Errorf("maxTokensField = %v, want max_tokens", compat.MaxTokensField)
@@ -76,8 +76,8 @@ func TestModelCompatOverridesProviderCompat(t *testing.T) {
 	if compat == nil {
 		t.Fatal("model.Compat.OpenAICompletions is nil")
 	}
-	if compat.SupportUsageInStreaming == nil || !*compat.SupportUsageInStreaming {
-		t.Errorf("model-level supportsUsageInStreaming should win, got %v", compat.SupportUsageInStreaming)
+	if compat.SupportsUsageInStreaming == nil || !*compat.SupportsUsageInStreaming {
+		t.Errorf("model-level supportsUsageInStreaming should win, got %v", compat.SupportsUsageInStreaming)
 	}
 	if compat.MaxTokensField == nil || *compat.MaxTokensField != "max_completion_tokens" {
 		t.Errorf("model-level maxTokensField should win, got %v", compat.MaxTokensField)

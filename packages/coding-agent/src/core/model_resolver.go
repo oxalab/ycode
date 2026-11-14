@@ -20,7 +20,7 @@ var DefaultModelPerProvider = map[llm.Provider]string{
 	llm.GoogleVertex:       "gemini-3.1-pro-preview",
 	llm.GithubCopilot:      "gpt-5.4",
 	llm.Openrouter:         "moonshotai/kimi-k2.6",
-	llm.VercelAIGatewway:   "zai/glm-5.1",
+	llm.VercelAIGateway:   "zai/glm-5.1",
 	llm.XAI:                "grok-4.20-0309-reasoning",
 	llm.Groq:               "openai/gpt-oss-120b",
 	llm.Cerebras:           "zai-glm-4.7",
