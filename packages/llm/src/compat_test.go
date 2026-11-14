@@ -12,19 +12,19 @@ func strPtr(s string) *string { return &s }
 
 func TestMergeCompatOverrideWinsPerField(t *testing.T) {
 	base := Compat{OpenAICompletions: &OpenAICompletionsCompat{
-		SupportUsageInStreaming: boolPtr(false),
+		SupportsUsageInStreaming: boolPtr(false),
 		MaxTokensField:          strPtr("max_tokens"),
 	}}
 	override := Compat{OpenAICompletions: &OpenAICompletionsCompat{
-		SupportUsageInStreaming: boolPtr(true),
+		SupportsUsageInStreaming: boolPtr(true),
 	}}
 
 	merged := MergeCompat(base, override)
 	if merged.OpenAICompletions == nil {
 		t.Fatal("merged compat lost OpenAICompletions")
 	}
-	if merged.OpenAICompletions.SupportUsageInStreaming == nil || !*merged.OpenAICompletions.SupportUsageInStreaming {
-		t.Errorf("override supportsUsageInStreaming should win, got %v", merged.OpenAICompletions.SupportUsageInStreaming)
+	if merged.OpenAICompletions.SupportsUsageInStreaming == nil || !*merged.OpenAICompletions.SupportsUsageInStreaming {
+		t.Errorf("override supportsUsageInStreaming should win, got %v", merged.OpenAICompletions.SupportsUsageInStreaming)
 	}
 	if merged.OpenAICompletions.MaxTokensField == nil || *merged.OpenAICompletions.MaxTokensField != "max_tokens" {
 		t.Errorf("base maxTokensField should survive, got %v", merged.OpenAICompletions.MaxTokensField)

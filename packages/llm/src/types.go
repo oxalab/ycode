@@ -9,12 +9,12 @@ type Api string
 
 const (
 	OpenAICompletions     Api = "openai-completions"
-	MistalConversations   Api = "mistral-converations"
+	MistralConversations  Api = "mistral-conversations"
 	OpenAIResponses       Api = "openai-responses"
 	AzureOpenAIResponses  Api = "azure-openai-responses"
 	OpenAICodexResponses  Api = "openai-codex-responses"
 	AnthropicMessages     Api = "anthropic-messages"
-	BedrockConverseStream Api = "beedrock-converse-stream"
+	BedrockConverseStream Api = "bedrock-converse-stream"
 	GoogleGenerativeAI    Api = "google-generative-ai"
 	GoogleVertexAI        Api = "google-vertex"
 )
@@ -34,7 +34,7 @@ const (
 	Groq               Provider = "groq"
 	Cerebras           Provider = "cerebras"
 	Openrouter         Provider = "openrouter"
-	VercelAIGatewway   Provider = "vercel-ai-gateway"
+	VercelAIGateway    Provider = "vercel-ai-gateway"
 	ZAI                Provider = "zai"
 	Mistral            Provider = "mistral"
 	Minimax            Provider = "minimax"
@@ -87,7 +87,7 @@ type StopReason string
 const (
 	StopReasonStop 		StopReason = "stop"
 	StopReasonLength	StopReason = "length"
-	StopReasonToolUse	StopReason = "tooluse"
+	StopReasonToolUse	StopReason = "toolUse"
 	StopReasonError 	StopReason = "error"
 	StopReasonAborted	StopReason = "aborted"
 )
@@ -106,7 +106,7 @@ type StreamOptions struct {
 	Context     	 context.Context 	`json:"-"`
 	APIKey			 string 			`json:"apiKey,omitempty"`
 	/*
-	Preferred transport for porviders that support multiple transports
+	Preferred transport for providers that support multiple transports
 	Providers that do not support this option, ignore it.
 	*/
 	Transport 		 Transport 			`json:"transport,omitempty"`
@@ -162,7 +162,7 @@ type ProviderStreamOptions struct {
 	Extra 	map[string]any  `json:",inline"`
 }
 
-// SimpleStreamOptions extends StreamOptions by adding reasonin/thinking fields.
+// SimpleStreamOptions extends StreamOptions by adding reasoning/thinking fields.
 type SimpleStreamOptions struct {
 	// Embedding StreamOptions makes all its fields available directly on SimpleStreamOptions
 	StreamOptions
@@ -211,7 +211,7 @@ type ToolCall struct {
 	ID 			string  		`json:"id"`
 	Name 		string 			`json:"name"`
 	Arguments 	map[string]any 	`json:"arguments"`
-	ThoughtSignature 	string 	`json:"thoughSignature,omitempty"` // Google Specific: Opaque signature for reusing thought context
+	ThoughtSignature 	string 	`json:"thoughtSignature,omitempty"` // Google Specific: Opaque signature for reusing thought context
 	// Streaming scratch: accumulated raw argument string while the call is
 	// still in flight. Never serialized (the reference deletes it at finalize).
 	PartialArgs string `json:"-"`
@@ -305,7 +305,7 @@ type OpenAICompletionsCompat struct {
 	/* Optional Mapping from y-ai reasoning level to provider/model-specific `reasoning_effort` values. */
 	ReasoningEffortMap 							map[ThinkingLevel]string 	`json:"reasoningEffortMap,omitempty"`
 	/* Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
-	SupportUsageInStreaming						*bool 						`json:"supportsUsageInStreaming,omitempty"`
+	SupportsUsageInStreaming						*bool 						`json:"supportsUsageInStreaming,omitempty"`
 	/* Which field to use for max tokens. Default: auto-detected from URL. */
 	MaxTokensField 								*string 					`json:"maxTokensField,omitempty"`
 	/* Whether tool results require the `name` field. Default: auto-detected from URL. */
@@ -364,7 +364,7 @@ type AnthropicMessagesCompat struct {
  * @see https://openrouter.ai/docs/guides/routing/provider-selection
 */
 type OpenRouterRouting struct {
-	AllowFallbacks 			*bool 					`json:"allow_fallback,omitempty"`
+	AllowFallbacks 			*bool 					`json:"allow_fallbacks,omitempty"`
 	RequireParameters 		*bool 					`json:"require_parameters,omitempty"`
 	DataCollection 			*string 				`json:"data_collection,omitempty"`
 	Zdr 					*bool 					`json:"zdr,omitempty"`

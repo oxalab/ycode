@@ -575,7 +575,7 @@ func TestBedrockStreamHappyPath(t *testing.T) {
 		t.Fatal("no done event")
 	}
 	if final.StopReason != src.StopReasonToolUse {
-		t.Fatalf("stopReason = %q, want tooluse (tool_use)", final.StopReason)
+		t.Fatalf("stopReason = %q, want toolUse (tool_use)", final.StopReason)
 	}
 
 	// Usage + cost (3/1e6*100 + 15/1e6*50; cache terms 0.3/1e6*10, 3.75/1e6*20).

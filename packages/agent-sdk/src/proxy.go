@@ -17,7 +17,7 @@ import (
 type ProxyAssistantMessageEvent struct {
 	Type 				string 			`json:"type"`
 	ContentIndex		*int 			`json:"contentIndex,omitempty"`
-	Delta 				string 			`json:"detla,omitempty"`
+	Delta 				string 			`json:"delta,omitempty"`
 	ContentSignature	string 			`json:"contentSignature,omitempty"`
 	ID 					string 			`json:"id,omitempty"`
 	ToolName 			string 			`json:"toolName,omitempty"`

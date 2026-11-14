@@ -39,7 +39,7 @@ type CreateAgentSessionServicesOptions struct {
 }
 
 /* AgentSessionServices: Bundle of cwd-bound runtime services.
-Infrastructure only - AgentSession itself is created seperately. */
+Infrastructure only - AgentSession itself is created separately. */
 type AgentSessionServices struct {
 	Cwd 			string
 	AgentDir 		string

@@ -35,7 +35,7 @@ var providerAPIChoices = []llm.Api{
 	llm.OpenAICompletions,
 	llm.OpenAIResponses,
 	llm.AnthropicMessages,
-	llm.MistalConversations,
+	llm.MistralConversations,
 	llm.OpenAICodexResponses,
 	llm.AzureOpenAIResponses,
 	llm.GoogleGenerativeAI,
