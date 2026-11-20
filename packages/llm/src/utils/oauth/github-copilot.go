@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	// Decoded from base64: "IV1.b507a08c87ecfe98="
-	githubClientID = "IV1.b507a08c87ecfe98="
-
+	// Decoded from base64: "SXYxLmI1MDdhMDhjODdlY2ZlOTg=" (TS github-copilot.ts:14 CLIENT_ID)
+	githubClientID = "Iv1.b507a08c87ecfe98"
 	githubCopilotUserAgent      = "GitHubCopilotChat/0.35.0"
 	githubCopilotEditorVersion  = "vscode/1.107.0"
 	githubCopilotPluginVersion  = "copilot-chat/0.35.0"
@@ -84,7 +83,11 @@ func getBaseUrlFromToken(token string) string {
 	for _, part := range parts {
 		if strings.HasPrefix(part, "proxy-ep=") {
 			proxyHost := strings.TrimPrefix(part, "proxy-ep=")
-			apiHost := strings.Replace(proxyHost, "proxy.", "api.", 1)
+			// TS anchors the rewrite: proxyHost.replace(/^proxy\./, "api.")
+			apiHost := proxyHost
+			if strings.HasPrefix(apiHost, "proxy.") {
+				apiHost = "api." + strings.TrimPrefix(apiHost, "proxy.")
+			}
 			return fmt.Sprintf("https://%s", apiHost)
 		}
 	}
@@ -219,7 +222,7 @@ func pollForGitHubAccessToken(ctx context.Context, domain string, deviceCode str
 	return "", fmt.Errorf("device flow timed out")
 }
 
-func refreshGitHubCopilotToken(ctx context.Context, refreshToken string, enterpriseDomain string) (*OAuthCredentials, error) {
+func refreshGitHubCopilotToken(ctx context.Context, refreshToken string, enterpriseDomain string) (OAuthCredentials, error) {
 	domain := enterpriseDomain
 	if domain == "" {
 		domain = "github.com"
@@ -228,7 +231,7 @@ func refreshGitHubCopilotToken(ctx context.Context, refreshToken string, enterpr
 
 	req, err := http.NewRequestWithContext(ctx, "POST", urls.copilotTokenUrl, nil)
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+refreshToken)
@@ -240,13 +243,13 @@ func refreshGitHubCopilotToken(ctx context.Context, refreshToken string, enterpr
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("copilot token refresh failed: %d %s: %s", resp.StatusCode, resp.Status, string(body))
+		return OAuthCredentials{}, fmt.Errorf("copilot token refresh failed: %d %s: %s", resp.StatusCode, resp.Status, string(body))
 	}
 
 	var data struct {
@@ -254,10 +257,10 @@ func refreshGitHubCopilotToken(ctx context.Context, refreshToken string, enterpr
 		ExpiresAt int64  `json:"expires_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("invalid copilot token response: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("invalid copilot token response: %w", err)
 	}
 
-	return &OAuthCredentials{
+	return OAuthCredentials{
 		Refresh: refreshToken,
 		Access:  data.Token,
 		Expires: data.ExpiresAt*1000 - 5*60*1000,
@@ -267,7 +270,7 @@ func refreshGitHubCopilotToken(ctx context.Context, refreshToken string, enterpr
 	}, nil
 }
 
-func LoginGitHubCopilot(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthCredentials, error) {
+func LoginGitHubCopilot(ctx context.Context, callbacks OAuthLoginCallbacks) (OAuthCredentials, error) {
 	prompt := OAuthPrompt{
 		Message:     "GitHub Enterprise URL/domain (blank for github.com)",
 		Placeholder: "company.ghe.com",
@@ -275,13 +278,13 @@ func LoginGitHubCopilot(ctx context.Context, callbacks OAuthLoginCallbacks) (*OA
 	}
 	input, err := callbacks.OnPrompt(prompt)
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	enterpriseDomain := normalizeDomain(input)
 	trimmed := strings.TrimSpace(input)
 	if trimmed != "" && enterpriseDomain == "" {
-		return nil, fmt.Errorf("invalid GitHub Enterprise URL/domain")
+		return OAuthCredentials{}, fmt.Errorf("invalid GitHub Enterprise URL/domain")
 	}
 	domain := enterpriseDomain
 	if domain == "" {
@@ -290,7 +293,7 @@ func LoginGitHubCopilot(ctx context.Context, callbacks OAuthLoginCallbacks) (*OA
 
 	device, err := startDeviceFlow(ctx, domain)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start device flow: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("failed to start device flow: %w", err)
 	}
 
 	callbacks.OnAuth(OAuthAuthInfo{
@@ -300,18 +303,18 @@ func LoginGitHubCopilot(ctx context.Context, callbacks OAuthLoginCallbacks) (*OA
 
 	githubAccessToken, err := pollForGitHubAccessToken(ctx, domain, device.DeviceCode, device.Interval, device.ExpiresIn)
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	creds, err := refreshGitHubCopilotToken(ctx, githubAccessToken, enterpriseDomain)
 	if err != nil {
-		return nil, fmt.Errorf("failed to exchange for copilot token: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("failed to exchange for copilot token: %w", err)
 	}
 
 	return creds, nil
 }
 
-func RefreshGitHubCopilotToken(ctx context.Context, credentials OAuthCredentials) (*OAuthCredentials, error) {
+func RefreshGitHubCopilotToken(ctx context.Context, credentials OAuthCredentials) (OAuthCredentials, error) {
 	enterpriseURL := ""
 	if val, ok := credentials.Extra["enterprise_url"].(string); ok {
 		enterpriseURL = val

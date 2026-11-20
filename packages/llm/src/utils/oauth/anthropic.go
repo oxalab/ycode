@@ -161,7 +161,7 @@ func postJSON(ctx context.Context, urlStr string, body map[string]string) (strin
 	return string(b), nil
 }
 
-func exchangeAuthCode(ctx context.Context, code, state, verifier, redirectURI string) (*OAuthCredentials, error) {
+func exchangeAuthCode(ctx context.Context, code, state, verifier, redirectURI string) (OAuthCredentials, error) {
 	body := map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     anthropicClientID,
@@ -173,7 +173,7 @@ func exchangeAuthCode(ctx context.Context, code, state, verifier, redirectURI st
 
 	respBody, err := postJSON(ctx, anthropicTokenURL, body)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange failed: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("token exchange failed: %w", err)
 	}
 
 	var data struct {
@@ -182,10 +182,10 @@ func exchangeAuthCode(ctx context.Context, code, state, verifier, redirectURI st
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal([]byte(respBody), &data); err != nil {
-		return nil, fmt.Errorf("invalid token response JSON: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("invalid token response JSON: %w", err)
 	}
 
-	return &OAuthCredentials{
+	return OAuthCredentials{
 		Refresh: data.RefreshToken,
 		Access:  data.AccessToken,
 		Expires: time.Now().UnixMilli() + data.ExpiresIn*1000 - 5*60*1000,
@@ -193,15 +193,15 @@ func exchangeAuthCode(ctx context.Context, code, state, verifier, redirectURI st
 }
 
 // LoginAnthropic runs the Anthropic OAuth flow (authorization code + PKCE).
-func LoginAnthropic(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthCredentials, error) {
+func LoginAnthropic(ctx context.Context, callbacks OAuthLoginCallbacks) (OAuthCredentials, error) {
 	verifier, challenge, err := GeneratePKCE()
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	srv, err := startCallbackServer(ctx, anthropicCallbackPort, anthropicCallbackPath, verifier)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start callback server: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("failed to start callback server: %w", err)
 	}
 	defer srv.server.Close()
 
@@ -223,7 +223,7 @@ func LoginAnthropic(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthC
 
 	result, err := srv.waitForCode()
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	var code, state string
@@ -234,18 +234,18 @@ func LoginAnthropic(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthC
 
 	if code == "" {
 		if callbacks.OnPrompt == nil {
-			return nil, fmt.Errorf("missing authorization code")
+			return OAuthCredentials{}, fmt.Errorf("missing authorization code")
 		}
 		input, err := callbacks.OnPrompt(OAuthPrompt{
 			Message:     "Paste the authorization code or full redirect URL:",
 			Placeholder: anthropicRedirectURI,
 		})
 		if err != nil {
-			return nil, err
+			return OAuthCredentials{}, err
 		}
 		parsed := parseAuthorizationInput(input)
 		if parsed == nil || parsed.Code == "" {
-			return nil, fmt.Errorf("missing authorization code")
+			return OAuthCredentials{}, fmt.Errorf("missing authorization code")
 		}
 		code = parsed.Code
 		state = parsed.State
@@ -260,13 +260,13 @@ func LoginAnthropic(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthC
 
 	creds, err := exchangeAuthCode(ctx, code, state, verifier, srv.redirectURI)
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 	return creds, nil
 }
 
 // RefreshAnthropicToken refreshes an Anthropic OAuth token.
-func RefreshAnthropicToken(ctx context.Context, refreshToken string) (*OAuthCredentials, error) {
+func RefreshAnthropicToken(ctx context.Context, refreshToken string) (OAuthCredentials, error) {
 	body := map[string]string{
 		"grant_type":    "refresh_token",
 		"client_id":     anthropicClientID,
@@ -275,7 +275,7 @@ func RefreshAnthropicToken(ctx context.Context, refreshToken string) (*OAuthCred
 
 	respBody, err := postJSON(ctx, anthropicTokenURL, body)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic token refresh failed: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("anthropic token refresh failed: %w", err)
 	}
 
 	var data struct {
@@ -284,10 +284,10 @@ func RefreshAnthropicToken(ctx context.Context, refreshToken string) (*OAuthCred
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal([]byte(respBody), &data); err != nil {
-		return nil, fmt.Errorf("invalid refresh response JSON: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("invalid refresh response JSON: %w", err)
 	}
 
-	return &OAuthCredentials{
+	return OAuthCredentials{
 		Refresh: data.RefreshToken,
 		Access:  data.AccessToken,
 		Expires: time.Now().UnixMilli() + data.ExpiresIn*1000 - 5*60*1000,
