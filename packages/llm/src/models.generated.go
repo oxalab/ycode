@@ -3,6 +3,12 @@ package llm
 // This file contains minimal model definitions for each provider.
 // This is a small set. More models will be added as per requirements.
 
+// compatBool/compatStr take addresses for the pointer fields of
+// OpenAICompletionsCompat (named to avoid clashing with the test-file
+// boolPtr/strPtr helpers).
+func compatBool(v bool) *bool { return &v }
+func compatStr(v string) *string { return &v }
+
 var Models = map[string]map[string]*Model[Api]{
 	"anthropic": {
 		"claude-3-5-haiku-20241022":{
@@ -2737,6 +2743,30 @@ var Models = map[string]map[string]*Model[Api]{
 			Cost: 		ModelCost{Input: 2, Output: 12, CacheRead: 0.2, CacheWrite: 0},
 			ContextWindow: 1048576,
 			MaxTokens: 	65536,
+		},
+	},
+	"subq": {
+		"subq-savant-1.4" : {
+			ID: 		"subq-savant-1.4",
+			Name: 		"SubQ Savant 1.4",
+			Api: 		"openai-completions",
+			Provider: 	"subq",
+			BaseURL: 	"https://api.subq.ai/v1/chat/completions",
+			Reasoning: 	true,
+			// SubQ reasoning cannot be disabled (effort "none" is rejected) and
+			// accepts low/high/max, with minimal/medium/xhigh as aliases.
+			ThinkingLevelMap: map[string]*ThinkingLevel{"off": nil, "minimal": ThinkingLevelPtr(ThinkingLevel("low")), "low": ThinkingLevelPtr(ThinkingLevel("low")), "medium": ThinkingLevelPtr(ThinkingLevel("high")), "high": ThinkingLevelPtr(ThinkingLevel("high")), "xhigh": ThinkingLevelPtr(ThinkingLevel("max"))},
+			// URL detection treats unknown hosts as OpenAI semantics; SubQ
+			// diverges: no "developer" role (only system/user/assistant/tool)
+			// and max_tokens (not max_completion_tokens).
+			Compat: Compat{OpenAICompletions: &OpenAICompletionsCompat{
+				SupportsDeveloperRole: compatBool(false),
+				MaxTokensField:        compatStr("max_tokens"),
+			}},
+			Input: 		[]InputType{InputText},
+			Cost: 		ModelCost{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0},
+			ContextWindow: 4000000,
+			MaxTokens: 	16384,
 		},
 	},
 	"faux": {

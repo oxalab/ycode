@@ -43,6 +43,7 @@ const (
 	Fireworks          Provider = "fireworks"
 	Opencode           Provider = "opencode"
 	OpencodeGo         Provider = "opencode-go"
+	SubQ               Provider = "subq"
 	KimiCoding         Provider = "kimi-coding"
 	CloudflareWorkerAI Provider = "cloudflare-workers-ai" // TS spelling; gateway handled by string match in cloudflare.go
 )

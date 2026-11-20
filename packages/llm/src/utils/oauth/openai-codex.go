@@ -182,20 +182,20 @@ func refreshOpenAICode(ctx context.Context, refreshToken string) (*tokenResult, 
 	}, nil
 }
 
-func LoginOpenAICodex(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAuthCredentials, error) {
+func LoginOpenAICodex(ctx context.Context, callbacks OAuthLoginCallbacks) (OAuthCredentials, error) {
 	verifier, challenge, err := GeneratePKCE()
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	state, err := createOpenAIState()
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	srv, err := startCallbackServer(ctx, openaiCodexCallbackPort, "/auth/callback", state)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start callback server: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("failed to start callback server: %w", err)
 	}
 	defer srv.server.Close()
 
@@ -219,7 +219,7 @@ func LoginOpenAICodex(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAut
 
 	result, err := srv.waitForCode()
 	if err != nil {
-		return nil, err
+		return OAuthCredentials{}, err
 	}
 
 	var code string
@@ -229,36 +229,36 @@ func LoginOpenAICodex(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAut
 
 	if code == "" {
 		if callbacks.OnPrompt == nil {
-			return nil, fmt.Errorf("missing authorization code")
+			return OAuthCredentials{}, fmt.Errorf("missing authorization code")
 		}
 		input, err := callbacks.OnPrompt(OAuthPrompt{
 			Message: "Paste the authorization code (or full redirect URL):",
 		})
 		if err != nil {
-			return nil, err
+			return OAuthCredentials{}, err
 		}
 		parsed := parseAuthorizationInput(input)
 		if parsed == nil || parsed.Code == "" {
-			return nil, fmt.Errorf("missing authorization code")
+			return OAuthCredentials{}, fmt.Errorf("missing authorization code")
 		}
 		code = parsed.Code
 	}
 
 	tokenResult, err := exchangeOpenAICode(ctx, code, verifier, openaiCodexRedirectURI)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange failed: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("token exchange failed: %w", err)
 	}
 
 	if tokenResult.Type != "success" {
-		return nil, fmt.Errorf("token exchange failed")
+		return OAuthCredentials{}, fmt.Errorf("token exchange failed")
 	}
 
 	accountID, err := getOpenAIAccountID(tokenResult.Success.Access)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract account_id from token: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("failed to extract account_id from token: %w", err)
 	}
 
-	return &OAuthCredentials{
+	return OAuthCredentials{
 		Refresh: tokenResult.Success.Refresh,
 		Access:  tokenResult.Success.Access,
 		Expires: tokenResult.Success.Expires,
@@ -268,22 +268,22 @@ func LoginOpenAICodex(ctx context.Context, callbacks OAuthLoginCallbacks) (*OAut
 	}, nil
 }
 
-func RefreshOpenAICodexToken(ctx context.Context, credentials OAuthCredentials) (*OAuthCredentials, error) {
+func RefreshOpenAICodexToken(ctx context.Context, credentials OAuthCredentials) (OAuthCredentials, error) {
 	result, err := refreshOpenAICode(ctx, credentials.Refresh)
 	if err != nil {
-		return nil, fmt.Errorf("token refresh failed: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("token refresh failed: %w", err)
 	}
 
 	if result.Type != "success" {
-		return nil, fmt.Errorf("token refresh failed")
+		return OAuthCredentials{}, fmt.Errorf("token refresh failed")
 	}
 
 	accountID, err := getOpenAIAccountID(result.Success.Access)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract account_id from token: %w", err)
+		return OAuthCredentials{}, fmt.Errorf("failed to extract account_id from token: %w", err)
 	}
 
-	return &OAuthCredentials{
+	return OAuthCredentials{
 		Refresh: result.Success.Refresh,
 		Access:  result.Success.Access,
 		Expires: result.Success.Expires,

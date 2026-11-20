@@ -119,6 +119,16 @@ func StreamOpenAICompletions(model src.Model[src.Api], context src.ChatContext, 
 				return
 			}
 
+			// Non-2xx: the body is a JSON error object, not SSE. The reference
+			// SDK raises on non-2xx before stream parsing; without this check an
+			// error body silently parses as an empty stream (no reply, no error).
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				resp.Body.Close()
+				handleOpenAICompletionsError(ch, output, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes))), ctxAborted())
+				return
+			}
+
 			if options != nil && options.OnResponse != nil {
 				options.OnResponse(map[string]interface{}{
 					"status":  resp.StatusCode,
