@@ -23,6 +23,7 @@ var BuiltInProviderDisplayNames = map[string]string{
 	"opencode-go": 				"OpenCode Go",
 	"openai": 					"OpenAI",
 	"openrouter": 				"OpenRouter",
+	"subq": 					"SubQ",
 	"together": 				"Together AI",
 	"vercel-ai-gateway": 		"Vercel AI Gateway",
 	"xai": 						"xAI",

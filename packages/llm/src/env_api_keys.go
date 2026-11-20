@@ -117,6 +117,8 @@ func GetApiKeyEnvVars(provider string) []string {
 		return []string{"TOGETHER_API_KEY"}
 	case "opencode", "opencode-go":
 		return []string{"OPENCODE_API_KEY"}
+	case "subq":
+		return []string{"SUBQ_API_KEY"}
 	case "kimi-coding":
 		return []string{"KIMI_API_KEY"}
 	case "cloudflare-workers-ai", "cloudflare-ai-gateway":
