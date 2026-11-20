@@ -4,7 +4,8 @@
 > **P-backlog CLOSED 2026-11-13** (P9–P16 all resolved; story 36 closed the
 > last group, P15 structural — only the explicitly-deferred bucket remains:
 > codex WS transport, catalog sync for untouched groups,
-> add-second-model TUI, oauth registry population) ·
+> add-second-model TUI · ~~oauth registry population~~ ✅ closed 2026-11-20
+> (story 38)) ·
 > **catalog typos ✅ closed 2026-11-14 (story 37)**
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
@@ -1449,8 +1450,37 @@ width-keyed caches). Two real bugs:
     shared adapters (all providers TS consumes them; google/vertex/mistral
     onResponse deliberately absent), Context everywhere it is honored, and
     TimeoutMs/MaxRetries for the four SDK-threading providers);
-    oauth registry never populated + 2 providers don't satisfy
-    the interface (custom providers unregistrable) [open]; ~~env-key
+    ~~oauth registry never populated + providers don't satisfy
+    the interface (custom providers unregistrable)~~ ✅ FIXED 2026-11-20
+    (**story 38**: `utils/oauth` init() now seeds the registry with
+    anthropic/github-copilot/openai-codex — the TS reference populates via a
+    module-load array literal (oauth/index.ts:34-42), so Go package init is
+    the faithful analog and the same idiom as providers/register_builtins.go;
+    all three provider structs now satisfy OAuthProviderInterface, pinned by
+    compile-time `var _` assertions — value returns from Login/RefreshTokens,
+    `UseCallbackServer` renamed to the interface's `UsesCallbackServer`,
+    ModifyModels added (anthropic/codex identity — TS omits the hook;
+    copilot ports TS github-copilot.ts:390-395, rewriting baseUrl on
+    github-copilot models from the access token's proxy-ep claim or the
+    enterprise domain). Along the way: copilot client ID
+    `"IV1.b507a08c87ecfe98="` → `"Iv1.b507a08c87ecfe98"` (wrong case +
+    trailing `=` — every device-flow request carried a broken client_id);
+    copilot UsesCallbackServer true → **false** (TS leaves it unset — device
+    flow, no local server); anthropic Name → "Anthropic (Claude Pro/Max)"
+    (TS verbatim); `getBaseUrlFromToken` proxy.→api. rewrite anchored to the
+    host prefix (TS `/^proxy\./`) instead of first-anywhere. This lights up
+    the entire already-plumbed consumer stack: /login chooser (which printed
+    "No subscription (OAuth) providers available"), AuthStorage.Login,
+    refresh-with-lock at stream time, model_registry ModifyModels,
+    display names, llm-oauth CLI. Tests: `oauth_registry_test.go` (9 —
+    first tests in the package); 6/6 mutations detected. Residuals: custom
+    oauth providers from config stay C16-gated (TS model-registry.ts:863
+    registers function-carrying provider objects — extensions only; Go's
+    `RegisterOAuthProvider(id)` keeps TS-unregister semantics,
+    restore-builtin-or-delete; `agent_session_services.go` providerConfigToInput
+    OAuth conversion is best-effort/nil until the JS runner exists);
+    `UsesCallbackServer` has no Go consumer yet (TS login-dialog reads it —
+    TUI-tier)); ~~env-key
     resolver divergence~~ ✅ FIXED 2026-10-31 (story 28:
     helpers.go getEnvApiKey now delegates to the faithful
     env_api_keys.go port; GetApiKeyEnvVars gained the 8 missing entries —
