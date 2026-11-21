@@ -3,7 +3,8 @@
 > **Created:** 2026-08-26 · **Status:** 34 of 34 findings fixed ·
 > **P-backlog CLOSED 2026-11-13** (P9–P16 all resolved; story 36 closed the
 > last group, P15 structural — only the explicitly-deferred bucket remains:
-> codex WS transport, catalog sync for untouched groups,
+> ~~codex WS transport~~ ✅ closed 2026-11-21 (story 39 — see the resolved
+> record in the deferred-bucket section), catalog sync for untouched groups,
 > add-second-model TUI · ~~oauth registry population~~ ✅ closed 2026-11-20
 > (story 38)) ·
 > **catalog typos ✅ closed 2026-11-14 (story 37)**
@@ -1130,6 +1131,79 @@ width-keyed caches). Two real bugs:
 
 ---
 
+## ✅ Deferred bucket — codex WebSocket transport — FIXED (2026-11-21, story 39)
+
+The reference's codex provider defaults to **WS-first** (`transport || "auto"`,
+settings-manager.ts:659 defaults the app setting to "auto"): every request
+tries a WebSocket before the SSE fetch loop, which is the reference's own
+fallback — story 31 had ported only that fallback. Full port, all mechanics
+hand-verified at source (openai-codex-responses.ts):
+
+- **NEW `providers/ws_client.go`** — hand-rolled RFC 6455 client (zero deps,
+  the aws_eventstream.go pattern): ws/wss dial + opening handshake with
+  custom headers (Sec-WebSocket-Key/Accept SHA1 validation), frame codec
+  with client-side masking (MUT-checked), fragmentation reassembly,
+  auto-pong, close-code parsing, ctx-abortable reads (abort closes the
+  socket, "Request was aborted"). No keepalive/ping intervals/subprotocols —
+  TS leaves all of that to the runtime.
+- **NEW `providers/codex_websocket.go`** — the transport layer:
+  `resolveCodexWebSocketURL` (scheme swap), `buildCodexWebSocketHeaders`
+  (drops accept/content-type, `OpenAI-Beta: responses_websockets=2026-02-06`,
+  x-client-request-id + session_id = sessionId-or-UUID; the reference's :797
+  mixed-case delete is a no-op under Fetch lowercasing so the beta header
+  rides the handshake), ONE text frame `{"type":"response.create", ...body}`
+  (:1202) per request, session connection cache keyed by sessionId
+  (reuse iff idle+open; busy hit spawns an uncached one-shot conn; keep=false
+  or dead socket evicts; 5-min idle eviction close(1000,"idle_timeout"); no
+  sessionId → fresh conn always closed), **sticky per-session SSE fallback
+  after ONE pre-first-event transport failure** (Set, no TTL; sessionId-less
+  requests never stick; aborts and non-transport errors never stick), lazy
+  `start` on the first provider event, close-after-completion = clean end /
+  close-before = transport failure, `websocket-cached` continuation
+  (everything but input/previous_response_id must be JSON-identical and the
+  new input strictly extends baseline = previous input + last assistant
+  items minus function_call_output — else full resend; cleared on error),
+  `codexApiError`/`codexProtocolError` typed errors + `isCodexNonTransportError`,
+  `closeOpenAICodexWebSocketSessions`/`resetCodexWebSocketSessions`.
+  Event pipeline reuses the SSE path's `mapCodexEvent` → pipe →
+  `processOpenAIResponsesStream` unchanged.
+- **Entry flow** (`openai-codex-responses.go`): WS attempt block before the
+  SSE retry loop; `provider_transport_failure` diagnostic on transport
+  failure (configuredTransport, fallbackTransport=sse only when nothing
+  emitted, eventsEmitted, phase, requestBytes); mapCodexEvent
+  error/response.failed failures are now typed `codexApiError`.
+- **Diagnostics machinery** (new `llm/src/diagnostics.go` + the
+  `AssistantMessage.Diagnostics` field, TS types.ts:285 +
+  utils/diagnostics.ts port: `{type, timestamp, error{name,message,stack,code}, details}`).
+- **Plumbing**: `TransportWebsocketCached` added to the Go Transport enum
+  (was missing); agent default transport `"sse"` → `"auto"` (TS
+  settings-manager.ts:659 — the WS-first default is now live);
+  agent_loop.go stamps `Transport` + `SessionID` from AgentLoopConfig into
+  per-call StreamOptions (both existed but were never copied).
+
+Tests: `codex_websocket_test.go` (12, over a hand-rolled Hijacker-based WS
+test server that also serves SSE for fallback composition): success+reuse,
+cached delta + body-change invalidation, fallback diagnostic 5-field pin +
+stickiness + reset, api-error-no-fallback + no-stickiness, mid-stream close
+terminal (eventsEmitted=true, fallbackTransport undefined), pre-start close
+falls back, abort mid-stream, handshake header pins, idle eviction, no-session
+fresh conns, URL matrix, converter pin; agent-sdk
+`TestAgentTransportDefaultAuto`; diagnostics marshal pin. Existing codex SSE
+tests pin `Transport: TransportSSE` in the collect helper (their handlers
+don't speak WS). **7/7 mutations detected** (sticky-add dropped, beta value
+flipped, response.incomplete dropped from completion detection, client
+masking removed, bogus previous_response_id, diagnostic append dropped,
+agent default sse). Full suite + vet + `-count=3` green.
+
+Residuals: TS `websocketDebugStats` counters not ported (debug-only, zero Go
+consumers); Bun proxy-env WS subclass not ported (Go dials directly, no
+CONNECT proxy for WS); `registerSessionResourceCleanup` teardown seam absent
+in Go — `closeOpenAICodexWebSocketSessions` exported for future wiring; the
+reference has NO read/handshake timeouts on WS (faithful — a silent server
+hangs the stream until the connection dies).
+
+---
+
 ## ⚠️ Unverified / needs re-audit
 
 - **markdown theme cache — ✅ VERIFIED + FIXED (2026-10-24, story 26)** —
@@ -1209,9 +1283,11 @@ width-keyed caches). Two real bugs:
     detected: dropped status check, dropped account-id header, disabled
     error-event interception (generic "Error Code" wording leaked through),
     azure legacy URL restored, friendly-message condition killed**)**:
-    *openai-codex-responses* full re-port (SSE transport; the WS stack is
+    *openai-codex-responses* full re-port (SSE transport; ~~the WS stack is
     the reference's own fallback path — [open, follow-up bucket] transport
-    feature, not part of the P15 structural set): ~~wrong
+    feature, not part of the P15 structural set~~ ✅ WS transport ported
+    2026-11-21 — story 39, see the resolved record in the deferred-bucket
+    notes at the bottom of this file): ~~wrong
     host `api.openai.com/v1/responses`~~ (`resolveCodexURL` →
     `chatgpt.com/backend-api/codex/responses` + suffix normalization);
     ~~no `chatgpt-account-id`/`originator`/UA/`OpenAI-Beta:
