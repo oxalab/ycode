@@ -206,7 +206,9 @@ func NewAgent(options AgentOptions) *Agent {
 
 	transport := options.Transport
 	if transport == "" {
-		transport = "sse"
+		// TS settings-manager.ts:659 defaults the transport setting to "auto"
+		// — codex tries the WebSocket transport first and falls back to SSE.
+		transport = llm.TransportAuto
 	}
 
 	toolExecution := options.ToolExecution

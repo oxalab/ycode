@@ -277,8 +277,10 @@ func streamAssistantResponse(
 	// Build stream options
 	options := llm.SimpleStreamOptions{
 		StreamOptions: llm.StreamOptions{
-			Context: signal,
-			APIKey:  apiKey,
+			Context:   signal,
+			APIKey:    apiKey,
+			SessionID: config.SessionID,
+			Transport: config.Transport,
 		},
 	}
 

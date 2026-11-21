@@ -78,9 +78,10 @@ const (
 type Transport string
 
 const (
-	TransportSSE       Transport = "sse"
-	TransportWebsocket Transport = "websocket"
-	TransportAuto      Transport = "auto"
+	TransportSSE              Transport = "sse"
+	TransportWebsocket        Transport = "websocket"
+	TransportWebsocketCached  Transport = "websocket-cached"
+	TransportAuto             Transport = "auto"
 )
 
 type StopReason string 
@@ -266,6 +267,9 @@ type AssistantMessage struct {
 	StopReason 	StopReason 		`json:"stopReason"`
 	ErrorMessage string 		`json:"errorMessage,string"`
 	Timestamp 	int64 			`json:"timestamp"`
+	// Redacted provider/runtime diagnostics for failures and recoveries
+	// (TS types.ts:285). e.g. a codex WS→SSE transport fallback.
+	Diagnostics []AssistantMessageDiagnostic 	`json:"diagnostics,omitempty"`
 }
 
 func (AssistantMessage) IsMessage() {}

@@ -55,11 +55,18 @@ func startCodexServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 }
 
 // collectCodexStream drives StreamOpenAICodexResponses and returns the final
-// message plus all event types.
+// message plus all event types. The transport defaults to SSE here because
+// these handlers speak HTTP/SSE only — with the reference default ("auto")
+// the provider would probe a WebSocket upgrade first (GET, empty body), which
+// these SSE handlers would then misparse; the WS tests use the same helper
+// with an explicit transport.
 func collectCodexStream(t *testing.T, m src.Model[src.Api], opts *OpenAICodexResponsesOptions) (*src.AssistantMessage, []string, error) {
 	t.Helper()
 	if opts == nil {
 		opts = &OpenAICodexResponsesOptions{}
+	}
+	if opts.Transport == "" {
+		opts.Transport = src.TransportSSE
 	}
 	if opts.Context == nil {
 		opts.Context = context.Background()
