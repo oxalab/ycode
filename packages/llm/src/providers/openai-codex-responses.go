@@ -62,9 +62,10 @@ var codexUsageLimitPattern = regexp.MustCompile(`(?i)usage_limit_reached|usage_n
 
 // OpenAICodexResponsesOptions mirrors OpenAICodexResponsesOptions in
 // openai-codex-responses.ts (plus Context/Transport from the Go StreamOptions
-// seam). Transport is accepted but ignored: the WebSocket transport is
-// deferred (P15-class) and this port always uses the SSE path, which is the
-// reference's own functional fallback.
+// seam). Transport is honored per the reference: "auto" (the default) tries
+// the WebSocket transport first and falls back to SSE after one transport
+// failure; "websocket" fails without fallback; "websocket-cached" adds
+// connection-scoped previous_response_id continuation.
 type OpenAICodexResponsesOptions struct {
 	APIKey           string
 	MaxTokens        *int // accepted but never sent: the codex body carries no token limit (TS parity)
@@ -150,13 +151,75 @@ func StreamOpenAICodexResponses(model src.Model[src.Api], context src.ChatContex
 
 			headers := buildCodexSSEHeaders(model.Headers, optionsHeaders(options), accountId, apiKey, optionsSessionID(options))
 
-			// Fetch with retry logic for rate limits and transient errors.
-			client := &http.Client{}
+			// WebSocket-first transport (TS :160-228). Default is "auto": try
+			// WS, fall back to the SSE loop below after one transport failure.
+			transport := src.TransportAuto
+			if options != nil && options.Transport != "" {
+				transport = options.Transport
+			}
+			sessionID := optionsSessionID(options)
+			websocketRequestID := sessionID
+			if websocketRequestID == "" {
+				websocketRequestID = codexCreateRequestID()
+			}
+			websocketDisabledForSession := transport != src.TransportSSE && isCodexWSSSEFallbackActive(sessionID)
+			if websocketDisabledForSession {
+				recordCodexWSSSEFallback(sessionID)
+			}
+
 			body, err := json.Marshal(params)
 			if err != nil {
 				handleError(err)
 				return
 			}
+
+			if transport != src.TransportSSE && !websocketDisabledForSession {
+				websocketHeaders := buildCodexWebSocketHeaders(model.Headers, optionsHeaders(options), accountId, apiKey, websocketRequestID)
+				websocketStarted := false
+				wsErr := processCodexWebSocketStream(model, ch, output, websocketHeaders, params, options, websocketRequestID, &websocketStarted)
+				if wsErr == nil {
+					// Even a successfully completed WS stream throws when the
+					// caller aborted after completion (TS :197-199).
+					if ctx := codexContext(options); ctx != nil && ctx.Err() != nil {
+						handleError(fmt.Errorf("Request was aborted"))
+						return
+					}
+					ch <- src.AssistantMessageEvent{Type: "done", Reason: output.StopReason, Message: output}
+					return
+				}
+				aborted := codexContext(options) != nil && codexContext(options).Err() != nil
+				if aborted || isCodexNonTransportError(wsErr) {
+					handleError(wsErr)
+					return
+				}
+				// Transport failure: append the provider_transport_failure
+				// diagnostic (TS :212-221), stick the session to SSE, and
+				// rethrow only if events had already been emitted.
+				fallbackTransport := interface{}(nil)
+				if !websocketStarted {
+					fallbackTransport = "sse"
+				}
+				src.AppendAssistantMessageDiagnostic(output, src.CreateAssistantMessageDiagnostic(
+					"provider_transport_failure",
+					wsErr,
+					map[string]any{
+						"configuredTransport": string(transport),
+						"fallbackTransport":   fallbackTransport,
+						"eventsEmitted":       websocketStarted,
+						"phase": map[bool]string{true: "after_message_stream_start", false: "before_message_stream_start"}[websocketStarted],
+						"requestBytes":        len(body),
+					},
+				))
+				recordCodexWSFailure(sessionID)
+				if websocketStarted {
+					handleError(wsErr)
+					return
+				}
+				recordCodexWSSSEFallback(sessionID)
+			}
+
+			// Fetch with retry logic for rate limits and transient errors.
+			client := &http.Client{}
 
 			var resp *http.Response
 			var lastErr error
@@ -624,7 +687,9 @@ func mapCodexEvent(event map[string]interface{}, pw *io.PipeWriter, options *Ope
 		if message == "" {
 			message = fallback
 		}
-		return false, fmt.Errorf("Codex error: %s", message)
+		// CodexApiError: application-level server errors are non-transport
+		// (no WS→SSE fallback), on both the SSE and WS paths.
+		return false, &codexApiError{Message: fmt.Sprintf("Codex error: %s", message), Code: code}
 	}
 
 	if eventType == "response.failed" {
@@ -636,7 +701,7 @@ func mapCodexEvent(event map[string]interface{}, pw *io.PipeWriter, options *Ope
 				}
 			}
 		}
-		return false, fmt.Errorf("%s", message)
+		return false, &codexApiError{Message: message}
 	}
 
 	if eventType == "response.done" || eventType == "response.completed" || eventType == "response.incomplete" {
