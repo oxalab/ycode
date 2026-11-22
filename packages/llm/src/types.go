@@ -336,7 +336,7 @@ type OpenAICompletionsCompat struct {
 	/* Whether to send known session-affinity headers (`session_id`, `x-client-request-id`, `x-session-affinity`) from `options.sessionId` when caching is enabled. Default: false. */
 	SendSessionAffinityHeaders 					*bool 						`json:"sendSessionAffinityHeaders,omitempty"`
 	/* Whether the provider supports long prompt cache retention (`prompt_cache_retention: "24h"` or Anthropic-style `cache_control.ttl: "1h"`, depending on format). Default: true. */
-	SupportsLongCacheRetention 					*bool 						`json:"supportsLongCacheRetention"`
+	SupportsLongCacheRetention 					*bool 						`json:"supportsLongCacheRetention,omitempty"`
 }
 
 type OpenAIResponsesCompat struct {
