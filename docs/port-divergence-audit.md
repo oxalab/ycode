@@ -4,9 +4,9 @@
 > **P-backlog CLOSED 2026-11-13** (P9–P16 all resolved; story 36 closed the
 > last group, P15 structural — only the explicitly-deferred bucket remains:
 > ~~codex WS transport~~ ✅ closed 2026-11-21 (story 39 — see the resolved
-> record in the deferred-bucket section), catalog sync for untouched groups,
-> add-second-model TUI · ~~oauth registry population~~ ✅ closed 2026-11-20
-> (story 38)) ·
+> record in the deferred-bucket section), ~~catalog sync for untouched
+> groups~~ ✅ closed 2026-11-21 (story 40), add-second-model TUI ·
+> ~~oauth registry population~~ ✅ closed 2026-11-20 (story 38)) ·
 > **catalog typos ✅ closed 2026-11-14 (story 37)**
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
@@ -1081,7 +1081,8 @@ tests) — **C-group complete**, (10) ~~theme-cache verification~~ ✅ done
 verification~~ ✅ done 2026-10-29 (story 27: first fix wave landed; follow-up
 queue = P9-P16 provider backlog above; deferred: C16 (JS runner context,
 feature family), add-second-model TUI gap; ~~catalog typos~~ ✅ story 37
-2026-11-14). **All audit items
+2026-11-14; ~~catalog sync for untouched groups~~ ✅ story 40 2026-11-21).
+**All audit items
 verified — no remaining unverified entries.** (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
@@ -1199,8 +1200,56 @@ Residuals: TS `websocketDebugStats` counters not ported (debug-only, zero Go
 consumers); Bun proxy-env WS subclass not ported (Go dials directly, no
 CONNECT proxy for WS); `registerSessionResourceCleanup` teardown seam absent
 in Go — `closeOpenAICodexWebSocketSessions` exported for future wiring; the
-reference has NO read/handshake timeouts on WS (faithful — a silent server
-hangs the stream until the connection dies).
+  reference has NO read/handshake timeouts on WS (faithful — a silent server
+  hangs the stream until the connection dies).
+
+## ✅ Catalog sync — remaining untouched groups — FIXED (2026-11-21, story 40)
+
+`models.generated.go` (hand-maintained despite the name) had three groups
+never touched since the original port; stories 31–34 had replaced the other
+six. Field-diffed ALL 11 Go groups against the TS snapshot (throwaway parser
++ dumper, deleted after): the six story-31–34 groups were already
+field-clean; the three originals carried invented rows:
+
+- `anthropic` 3 → 23 TS rows (the invented rows even used Api
+  `"anthropic"` — matches no registry dispatch; TS is
+  `"anthropic-messages"` — and a TS-nonexistent `claude-3-7-opus-20250219`).
+- `openai` 3 → 42 TS rows (stale names/costs/context windows).
+- `github` → **renamed `github-copilot`**, 2 → 26 TS rows (12
+  openai-responses / 7 anthropic-messages / 7 openai-completions, per-row
+  Copilot headers, compat, thinkingLevelMap). The old key/Provider
+  `"github"` never matched `env_api_keys.go` or the story-38 copilot oauth
+  `ModifyModels` (which rewrites `BaseURL` only on `Provider ==
+  "github-copilot"` rows) — a live bug until now.
+
+Plus one tag fix: `OpenAICompletionsCompat.SupportsLongCacheRetention`
+lacked `omitempty` (types.go) — unset rows marshaled a spurious
+`"supportsLongCacheRetention":null` (every other field in the struct has
+it). Azure rows ship empty `baseUrl` faithfully (TS resolves the endpoint
+at runtime).
+
+Tests: `models_catalog_parity_test.go` (7) — group key set (incl. no
+`"github"`), all 11 row-count pins, Provider==group-key invariant across
+every row (would have caught the copilot bug), copilot row pins (baseURL +
+exact 4 headers + 12/7/7 api distribution), verbatim sampled rows
+(claude-3-5-haiku-20241022 / gpt-4.1 / claude-haiku-4.5 compat /
+claude-opus-4.6 thinkingLevelMap), whole-catalog sanity, env-key coherence
+per group (exempt: bedrock AWS detection, codex oauth, faux). **6/6
+mutations detected** (provider flip, header value, row deletion, compat
+flip, cost digit, api distribution). Full suite + vet + `-count=3` green;
+drift re-verified 0 after the mutation reverts.
+
+Posture note (do NOT re-flag): the TS catalog has 23 further groups absent
+from Go on purpose — openrouter (274), vercel-ai-gateway (163), opencode
+(38), cloudflare-ai-gateway (35), huggingface (22), xai (25), fireworks
+(19), groq (18), together (17), opencode-go (12), cloudflare-workers-ai
+(8), moonshotai + moonshotai-cn (7+7), zai (5), xiaomi (5),
+xiaomi-token-plan-ams/cn/sgp (5 each), minimax + minimax-cn (2+2),
+kimi-coding (2), deepseek (2), cerebras (4). The Go port keeps a minimal
+catalog by design (the original header comment says so); every one of
+those provider ids is already covered by `env_api_keys.go`, so the
+provider/env layer is at parity — only the model rows are absent. Add
+groups as requirements demand.
 
 ---
 
@@ -1334,7 +1383,9 @@ hangs the stream until the connection dies).
     group broke env-key resolution; `thinkingLevelMap` now a Model field,
     `ClampThinkingLevel`/`GetSupportedThinkingLevels` ported to
     models.go — the no-map default path needs no further Model fields).
-    Catalog sync for the OTHER groups stays the separate catalog story.
+    ~~Catalog sync for the OTHER groups stays the separate catalog story.~~
+    ✅ closed 2026-11-21 (story 40 — anthropic/openai/github-copilot synced;
+    remaining TS groups documented as absent-by-posture).
   - *P10 anthropic (registered)* — **CORE FIXED 2026-11-04 (story 30**,
     tests in `anthropic_parity_test.go`; 3 mutations detected: disabled
     status check, dropped Redacted flag, stop-map reverted**)**:
