@@ -829,8 +829,10 @@ func (mr *ModelRegistry) UnregisterProvider(providerName string) {
 
 // SaveCustomProvider persists a custom provider (with one model) to models.json so
 // it survives restarts — RegisterProvider, by contrast, is in-memory only. It reads
-// the existing models.json, adds or overwrites the provider entry, and writes it
-// back (0o600; parent dir 0o700). The loader requires baseUrl + apiKey for
+// the existing models.json, adds or extends the provider entry, and writes it
+// back (0o600; parent dir 0o700): an existing entry keeps its models and gains
+// modelID (no-op if already present), while its name/baseUrl/apiKey/api are
+// updated to the given values. The loader requires baseUrl + apiKey for
 // non-built-in providers that define models (validateConfig), so both are
 // mandatory here. Call Refresh after so the new model becomes available.
 func (mr *ModelRegistry) SaveCustomProvider(key, displayName, baseURL, apiKey, api, modelID string) error {
@@ -842,13 +844,65 @@ func (mr *ModelRegistry) SaveCustomProvider(key, displayName, baseURL, apiKey, a
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]*providerConfig{}
 	}
-	cfg.Providers[key] = &providerConfig{
-		Name:    displayName,
-		BaseURL: baseURL,
-		ApiKey:  apiKey,
-		Api:     api,
-		Models:  []modelDefinition{{ID: modelID}}, // Name defaults to ID in parseModels
+	if existing, ok := cfg.Providers[key]; ok {
+		existing.Name = displayName
+		existing.BaseURL = baseURL
+		existing.ApiKey = apiKey
+		existing.Api = api
+		appendModelDefinition(existing, modelID)
+	} else {
+		cfg.Providers[key] = &providerConfig{
+			Name:    displayName,
+			BaseURL: baseURL,
+			ApiKey:  apiKey,
+			Api:     api,
+			Models:  []modelDefinition{{ID: modelID}}, // Name defaults to ID in parseModels
+		}
 	}
+	return writeModelsConfig(path, &cfg)
+}
+
+// AddCustomModel appends a model to an existing provider entry in models.json
+// (the /add-provider-model flow). An existing entry keeps its name/baseUrl/
+// apiKey/api — the model joins it (no-op if the id is already there). A missing
+// entry can only be a built-in provider (custom providers are born from
+// entries), so a bare {"models":[...]} entry is written: validateConfig requires
+// baseUrl/apiKey only for non-built-in providers, and mergeCustomModels appends
+// the model to the built-in group at load. Call Refresh after so the new model
+// becomes available.
+func (mr *ModelRegistry) AddCustomModel(providerKey, api, modelID string) error {
+	path := mr.modelsJsonPath
+	cfg := modelsConfig{Providers: map[string]*providerConfig{}}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &cfg) // corrupt/empty file → start fresh
+	}
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]*providerConfig{}
+	}
+	if existing, ok := cfg.Providers[providerKey]; ok {
+		appendModelDefinition(existing, modelID)
+	} else {
+		cfg.Providers[providerKey] = &providerConfig{
+			Api:    api,
+			Models: []modelDefinition{{ID: modelID}}, // Name defaults to ID in parseModels
+		}
+	}
+	return writeModelsConfig(path, &cfg)
+}
+
+// appendModelDefinition adds modelID to pc.Models unless an entry with that id
+// already exists (dedup by id — the models.json format keys models by id).
+func appendModelDefinition(pc *providerConfig, modelID string) {
+	for _, m := range pc.Models {
+		if m.ID == modelID {
+			return
+		}
+	}
+	pc.Models = append(pc.Models, modelDefinition{ID: modelID})
+}
+
+// writeModelsConfig marshals cfg back to models.json (0o600; parent dir 0o700).
+func writeModelsConfig(path string, cfg *modelsConfig) error {
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
