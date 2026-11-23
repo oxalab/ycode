@@ -8,6 +8,7 @@ package tui
 // rather than in pointer-captured closures.
 
 import (
+	"fmt"
 	"strings"
 
 	core "ycode/packages/coding-agent/src/core"
@@ -41,7 +42,10 @@ type (
 	showImagesResult        struct{ show bool }
 	settingsChangeResult    struct{ id, value string }
 	warningsChangeResult    struct{ enabled bool }
-	scopedModelsResult      struct{ enabled []string }
+	scopedModelsResult      struct {
+		enabled []string
+		allTotal int // total models offered by the picker (all-enabled = clear)
+	}
 	forkMessageResult       struct{ entryID string }
 	oauthProviderResult     struct {
 		providerID string
@@ -154,8 +158,16 @@ func (a App) handleSelectorDone(result any) (tea.Model, tea.Cmd) {
 		a.closeOverlay()
 
 	case scopedModelsResult:
-		// Enabled-model persistence requires a settings setter not yet ported.
-		a.addStaticEntry(a.theme.Fg("muted", "(scoped models saved — persistence: Phase 19+)"))
+		// Persist (reference interactive-mode.ts onPersist: all models enabled
+		// = undefined = clear the filter).
+		if a.settingsManager != nil {
+			if len(r.enabled) == r.allTotal {
+				a.settingsManager.SetEnabledModels(nil)
+			} else {
+				a.settingsManager.SetEnabledModels(r.enabled)
+			}
+		}
+		a.addStaticEntry(a.theme.Fg("muted", fmt.Sprintf("Saved %d model(s) for cycling to settings.", len(r.enabled))))
 		a.closeOverlay()
 
 	case forkMessageResult:
@@ -401,7 +413,8 @@ func (a App) openSessionSelector() (tea.Model, tea.Cmd) {
 }
 
 // openScopedModelsSelector opens the Ctrl+P model enable/reorder picker.
-// Changes are session-only; persistence is pending a settings setter.
+// Ctrl+S persists the set to settings ("enabledModels" — the --models CLI flag
+// fallback at startup) via the scopedModelsResult handler.
 func (a App) openScopedModelsSelector() (tea.Model, tea.Cmd) {
 	var allModels []*llm.Model[llm.Api]
 	var enabled []string
@@ -420,7 +433,9 @@ func (a App) openScopedModelsSelector() (tea.Model, tea.Cmd) {
 		components.ScopedModelsConfig{AllModels: allModels, EnabledModelIDs: enabled},
 		components.ScopedModelsCallbacks{
 			OnChange:  func(_ []string) tea.Cmd { return nil }, // session-only
-			OnPersist: func(ids []string) tea.Cmd { return doneCmd(scopedModelsResult{enabled: ids}) },
+			OnPersist: func(ids []string) tea.Cmd {
+				return doneCmd(scopedModelsResult{enabled: ids, allTotal: len(allModels)})
+			},
 			OnCancel:  makeCancelCmd,
 		},
 	)

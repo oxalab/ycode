@@ -618,6 +618,22 @@ func (sm *SettingsManager) GetEnabledModels() []string {
 	return sm.settings.EnabledModels
 }
 
+// SetEnabledModels persists the scoped-models (Ctrl+P cycling) set to settings
+// under "enabledModels" — the model patterns double as the --models CLI flag
+// fallback at startup. A nil or empty slice clears the setting (matching the
+// reference: all models enabled = no filter).
+func (sm *SettingsManager) SetEnabledModels(patterns []string) {
+	sm.mu.Lock()
+	if len(patterns) == 0 {
+		sm.global.EnabledModels = nil
+	} else {
+		sm.global.EnabledModels = patterns
+	}
+	sm.markModified("enabledModels", "")
+	sm.save()
+	sm.mu.Unlock()
+}
+
 func (sm *SettingsManager) GetSessionDir() string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

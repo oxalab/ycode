@@ -5,7 +5,8 @@
 > last group, P15 structural — only the explicitly-deferred bucket remains:
 > ~~codex WS transport~~ ✅ closed 2026-11-21 (story 39 — see the resolved
 > record in the deferred-bucket section), ~~catalog sync for untouched
-> groups~~ ✅ closed 2026-11-21 (story 40), add-second-model TUI ·
+> groups~~ ✅ closed 2026-11-21 (story 40), ~~add-second-model TUI~~ ✅ closed
+> 2026-11-23 (story 41) ·
 > ~~oauth registry population~~ ✅ closed 2026-11-20 (story 38)) ·
 > **catalog typos ✅ closed 2026-11-14 (story 37)**
 >
@@ -1080,7 +1081,8 @@ tests) — **C-group complete**, (10) ~~theme-cache verification~~ ✅ done
 2026-10-29 (recolor fix + line-cache parity verdict), (11) ~~provider-parity
 verification~~ ✅ done 2026-10-29 (story 27: first fix wave landed; follow-up
 queue = P9-P16 provider backlog above; deferred: C16 (JS runner context,
-feature family), add-second-model TUI gap; ~~catalog typos~~ ✅ story 37
+feature family), ~~add-second-model TUI gap~~ ✅ story 41 2026-11-23;
+~~catalog typos~~ ✅ story 37
 2026-11-14; ~~catalog sync for untouched groups~~ ✅ story 40 2026-11-21).
 **All audit items
 verified — no remaining unverified entries.** (B1's masked-path
@@ -1250,6 +1252,53 @@ catalog by design (the original header comment says so); every one of
 those provider ids is already covered by `env_api_keys.go`, so the
 provider/env layer is at parity — only the model rows are absent. Add
 groups as requirements demand.
+
+## ✅ add-second-model TUI — FIXED (2026-11-23, story 41)
+
+Coined as a bare label in `bc882fd` (2026-10-27) and never given its own
+entry: the Go-only in-TUI provider/model configuration surface had three
+holes. (The reference has NO custom-provider TUI at all — custom providers
+are hand-edited models.json / the extension API — so items 1–2 fix a
+Go-side convenience; item 3 is strict TS parity.)
+
+- **Silent model loss** — `SaveCustomProvider` (model_registry.go)
+  wholesale-replaced `cfg.Providers[key]`: re-running `/add-provider` with
+  the same name DELETED the provider's earlier models. Now appends
+  (dedup by id) and updates name/baseUrl/apiKey/api; existing models kept.
+- **`/add-provider-model` was a dead alias** of the one-shot create form.
+  Now a real add-a-model flow (`addModelForm`, add_provider.go): provider
+  picker (registry providers, deduped; api defaults to the provider's
+  existing api) → model id → API type → NEW `ModelRegistry.AddCustomModel`
+  appends to the entry without touching its fields; a missing entry can
+  only be a built-in provider, so a bare `{"models":[...]}` entry is
+  written (validateConfig requires baseUrl/apiKey only for non-built-ins;
+  mergeCustomModels appends it additively — no clobber). Persistence
+  extracted to `persistAddModel` (test-pinned method+args).
+- **Scoped-models persistence (TS parity)** — TS persists the Ctrl+P
+  cycle set via `setEnabledModels(patterns|undefined)` → settings key
+  `enabledModels` (settings-manager.ts:996-999; Ctrl+S in
+  scoped-models-selector, interactive-mode.ts:4084-4092: all-enabled =
+  clear). Go had the field, getter, and the full read path
+  (runtime.go:215-228 `--models ?? GetEnabledModels()` → ResolveModelScope)
+  but no setter and both TUIs no-op'd persist. Added
+  `SettingsManager.SetEnabledModels` (nil/empty → nil, key dropped via
+  omitempty) and wired it into both: interactive onPersist
+  (`scopedPersistPatterns`: all-selected → nil, subset → provider/id
+  patterns = the --models format) + core/tui `scopedModelsResult`
+  (allTotal-comparison clear); notices updated.
+- Cosmetic: stale `slugify` doc comment fixed (model id is a separate
+  input, not name-derived).
+
+Tests: registry save extension (append/fields-update, raw-JSON dedup
+count — the loaded view dedups via mergeCustomModels and would mask an
+on-disk duplicate; AddCustomModel custom + built-in), settings round-trip
++ clear (Flush after every write — save() is an async write queue; the
+missing trailing Flush was a Windows TempDir-cleanup flake), form flow +
+provider-option derivation + persist seam. **7/7 mutations detected**
+(replace-semantics restored, dedup dropped, save() dropped, all-enabled
+clear dropped, seam wired to SaveCustomProvider — observable on custom
+providers whose apiKey it would blank, provider-api default killed,
+markModified dropped). Full suite + vet + `-count=3` green.
 
 ---
 

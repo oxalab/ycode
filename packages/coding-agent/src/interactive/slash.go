@@ -52,8 +52,11 @@ func (o *Orchestrator) routeCommand(text string) bool {
 	case "/logout":
 		o.openLogoutSelector()
 		return true
-	case "/add-provider", "/add-provider-model", "/provider":
+	case "/add-provider", "/provider":
 		o.openAddProviderForm()
+		return true
+	case "/add-provider-model":
+		o.openAddModelForm()
 		return true
 	case "/switch", "/sessions", "/resume":
 		o.openSessionSelector()

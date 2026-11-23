@@ -345,9 +345,10 @@ func nodeFallbackLabel(n *core.SessionTreeNode) string {
 
 // openScopedModelsSelector swaps in a multi-select of available models for Ctrl+P
 // cycling (reference showModelsSelector). The selection applies in-memory to the
-// live session via AgentSession.SetScopedModels (agent_session.go:395); persisting
-// it to settings.json has no Go setter (deferred even in the BT TUI), so an honest
-// notice is shown.
+// live session via AgentSession.SetScopedModels (agent_session.go:395) and
+// persists to settings as "enabledModels" (reference setEnabledModels) — the
+// startup read path (--models ?? GetEnabledModels → ResolveModelScope) restores
+// it on the next run.
 func (o *Orchestrator) openScopedModelsSelector() {
 	registry := o.session.GetModelRegistry()
 	all := registry.GetAll()
@@ -383,13 +384,29 @@ func (o *Orchestrator) openScopedModelsSelector() {
 				entries[i] = core.ScopedModelEntry{Model: &mm}
 			}
 			o.session.SetScopedModels(entries)
+			o.settings.SetEnabledModels(scopedPersistPatterns(selected, len(all)))
 			o.closeSelector()
 			o.addNotice(o.th.Fg("dim",
-				fmt.Sprintf("Updated %d model(s) for cycling (in-memory; settings.json persistence not yet backed).", len(selected))))
+				fmt.Sprintf("Saved %d model(s) for cycling (session + settings.json).", len(selected))))
 		},
 		o.closeSelector, // onCancel
 	)
 	o.swapInSelector(sel)
+}
+
+// scopedPersistPatterns converts a persisted scoped-models selection into the
+// enabledModels setting value: nil when every model is selected (reference
+// interactive-mode.ts onPersist — all enabled = undefined = clear the filter),
+// otherwise "provider/id" patterns (the --models CLI flag format).
+func scopedPersistPatterns(selected []llm.Model[llm.Api], allTotal int) []string {
+	if len(selected) == allTotal {
+		return nil
+	}
+	patterns := make([]string, len(selected))
+	for i := range selected {
+		patterns[i] = scopedKey(selected[i].Provider, selected[i].ID)
+	}
+	return patterns
 }
 
 // scopedKey is the map key for a model in the enabled set.
