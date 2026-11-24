@@ -5,8 +5,14 @@ package extensions
 // populates the *Extension maps the runner consumes.
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 )
+
+func jsonUnmarshalText(s string, v any) error {
+	return json.Unmarshal([]byte(s), v)
+}
 
 // newAPIFixture creates a JSRuntime + Extension + runtime + a built `pi` object,
 // returning the JSAPI and the Extension it populates. Cleans up the runtime on
@@ -91,6 +97,118 @@ func TestJSAPI_RegisterTool(t *testing.T) {
 	textBlock, _ := content[0].(map[string]any)
 	if textBlock["text"] != "got 42" {
 		t.Errorf("text = %v, want 'got 42'", textBlock["text"])
+	}
+}
+
+// echoCtxTool registers a tool whose execute JSON-echoes its own arguments,
+// so tests can pin the exact bridge shape (story 42 / C16).
+func echoCtxTool(t *testing.T, jsAPI *jsExtensionAPI, ext *Extension) {
+	t.Helper()
+	factoryJS := []byte(`module.exports = function (pi) {
+		pi.registerTool({
+			name: "echoCtx",
+			execute: function (toolCallId, params, signal, onUpdate, ctx) {
+				return { content: [{ type: "text", text: JSON.stringify({
+					id: toolCallId,
+					params: params,
+					aborted: signal ? signal.aborted : null,
+					ctx: ctx
+				}) }] };
+			}
+		});
+	};`)
+	js, err := TranspileExtension("/test/echo.js", factoryJS, 1)
+	if err != nil {
+		t.Fatalf("transpile: %v", err)
+	}
+	fh, err := jsAPI.jrt.EvalModule("/test/echo.js", js)
+	if err != nil {
+		t.Fatalf("EvalModule: %v", err)
+	}
+	if err := jsAPI.jrt.InvokeFactory(fh, jsAPI.PIValue()); err != nil {
+		t.Fatalf("InvokeFactory: %v", err)
+	}
+	if ext.Tools["echoCtx"] == nil {
+		t.Fatal("echoCtx not registered")
+	}
+}
+
+// With a ctx provider wired (the buildRuntime seam), execute must receive the
+// rich runner ctx (cwd/model/isIdle), the REAL toolCallId, and the signal
+// snapshot — not the old ("", params, null, null, {cwd}).
+func TestJSAPI_ExecuteReceivesRunnerCtxAndToolCallID(t *testing.T) {
+	jsAPI, ext, jrt := newAPIFixture(t)
+
+	jrt.SetToolCtxProvider(func() map[string]any {
+		return map[string]any{
+			"cwd":    "/real/cwd",
+			"model":  map[string]any{"id": "glm-x"},
+			"isIdle": true,
+		}
+	})
+	echoCtxTool(t, jsAPI, ext)
+
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt := ext.Tools["echoCtx"]
+	result, err := rt.Definition.Execute(WithToolCallID(cctx, "call-7"), []byte(`{"k":"v"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	m := result.(map[string]any)
+	seen := m["content"].([]any)[0].(map[string]any)["text"].(string)
+	var payload map[string]any
+	if err := jsonUnmarshalText(seen, &payload); err != nil {
+		t.Fatalf("echo not JSON: %v (%s)", err, seen)
+	}
+	if payload["id"] != "call-7" {
+		t.Errorf("toolCallId = %v, want call-7 (threaded via WithToolCallID)", payload["id"])
+	}
+	if payload["aborted"] != true {
+		t.Errorf("signal.aborted = %v, want true (cancelled ctx snapshot; the echo reads signal.aborted)", payload["aborted"])
+	}
+	ctxObj, ok := payload["ctx"].(map[string]any)
+	if !ok {
+		t.Fatalf("ctx = %v, want object", payload["ctx"])
+	}
+	if ctxObj["cwd"] != "/real/cwd" {
+		t.Errorf("ctx.cwd = %v, want /real/cwd (provider)", ctxObj["cwd"])
+	}
+	model, ok := ctxObj["model"].(map[string]any)
+	if !ok || model["id"] != "glm-x" {
+		t.Errorf("ctx.model = %v, want {id:glm-x}", ctxObj["model"])
+	}
+	if ctxObj["isIdle"] != true {
+		t.Errorf("ctx.isIdle = %v, want true", ctxObj["isIdle"])
+	}
+}
+
+// Without a provider (pre-bind / direct test calls), execute still gets a
+// usable {"cwd"} ctx — the no-op-default shape TS's runner uses.
+func TestJSAPI_ExecuteFallbackCtxWithoutProvider(t *testing.T) {
+	jsAPI, ext, _ := newAPIFixture(t)
+	echoCtxTool(t, jsAPI, ext)
+
+	rt := ext.Tools["echoCtx"]
+	result, err := rt.Definition.Execute(nil, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	m := result.(map[string]any)
+	seen := m["content"].([]any)[0].(map[string]any)["text"].(string)
+	var payload map[string]any
+	if err := jsonUnmarshalText(seen, &payload); err != nil {
+		t.Fatalf("echo not JSON: %v (%s)", err, seen)
+	}
+	ctxObj, ok := payload["ctx"].(map[string]any)
+	if !ok {
+		t.Fatalf("ctx = %v, want object", payload["ctx"])
+	}
+	if _, ok := ctxObj["cwd"]; !ok {
+		t.Errorf("ctx = %v, want at least cwd (fallback)", ctxObj)
+	}
+	if ctxObj["model"] != nil {
+		t.Errorf("ctx.model = %v, want absent (no provider)", ctxObj["model"])
 	}
 }
 

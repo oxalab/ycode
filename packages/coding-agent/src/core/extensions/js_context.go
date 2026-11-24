@@ -30,6 +30,7 @@ package extensions
 //   }
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 
@@ -40,9 +41,13 @@ import (
 // encoding/json at every call site.
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 
-// BuildJSContext converts a runner ctx map into a JS object. The result must
-// be freed via jrt.SafeFree (NOT raw .Free()) — it lives across the handler
-// call which can poison the runtime.
+// BuildJSContext converts a runner ctx map into a JS object.
+//
+// OWNERSHIP (story-42 correction): the returned value holds one reference.
+// Handing it to one of the CallXxxWithJSCtx methods TRANSFERS that reference
+// (qjs SetPropertyStr consumes it — freeing afterward is a double-free that
+// corrupts the WASM heap; verified by probe). Only free it yourself if you do
+// NOT pass it to the bridge.
 //
 // Caller holds jrt.mu (this is invoked from inside fireJSON's call chain,
 // which is already locked).
@@ -65,6 +70,16 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 	}
 	if hasPM, ok := runnerCtx["hasPendingMessages"].(bool); ok {
 		obj.SetPropertyStr("hasPendingMessages", ctx.NewBool(hasPM))
+	}
+
+	// signal: TS ctx.signal is the live AbortSignal (types.ts:309-311). A Go
+	// context.Context can't cross the bridge, so it renders as
+	// {aborted: <ctx.Err() != nil at build time>} — a snapshot, not live
+	// polling (documented divergence).
+	if sig, ok := runnerCtx["signal"].(context.Context); ok && sig != nil {
+		sigObj := ctx.NewObject()
+		sigObj.SetPropertyStr("aborted", ctx.NewBool(sig.Err() != nil))
+		obj.SetPropertyStr("signal", sigObj)
 	}
 
 	// model: marshal the model object through JSON.

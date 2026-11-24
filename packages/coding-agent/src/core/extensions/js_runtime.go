@@ -46,6 +46,15 @@ type JSRuntime struct {
 	// crashing the host process via the deferred Value.Free() calls that follow.
 	poisoned bool
 	nextID   int64
+
+	// toolCtx is the late-bound provider for the runner ctx map handed to JS
+	// tool/command/shortcut callables. The session wires it in buildRuntime —
+	// after the ExtensionRunner exists — mirroring TS's
+	// ctxFactory = () => runner.createContext(): the map is resolved at
+	// execute time, so later BindCore updates are reflected. nil (pre-bind, or
+	// in unit tests that call Definition.Execute directly) falls back to
+	// {"cwd": cwd} — the same no-op-default shape TS's runner uses.
+	toolCtx func() map[string]any
 }
 
 // errPoisonedRuntime is returned by every operation after the qjs runtime
@@ -424,15 +433,23 @@ func (j *JSRuntime) CallHandler(handlerHandle int64, eventObj, ctxObj any) (any,
 // when the ctx needs to carry callable JS methods (e.g. ctx.ui.notify) that
 // can't survive a JSON round-trip.
 //
-// Caller holds nothing — this method locks j.mu. The ctxValue must outlive
-// the call (it's read inside the eval); the caller frees it.
+// OWNERSHIP (story 42): this method CONSUMES ctxValue — qjs SetPropertyStr
+// takes the value's reference, so freeing the Go wrapper afterward is a
+// double-free that corrupts the WASM heap (verified: it OOBs the next
+// allocation). The caller must NOT SafeFree ctxValue after handing it here.
+//
+// Caller holds nothing — this method locks j.mu.
 func (j *JSRuntime) CallHandlerWithJSCtx(handlerHandle int64, eventObj any, ctxValue *qjs.Value) (any, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.rt == nil {
-		return nil, fmt.Errorf("JSRuntime closed")
-	}
-	if j.poisoned {
+	if j.rt == nil || j.poisoned {
+		// Pre-consume failure: we still own the ref.
+		if ctxValue != nil {
+			j.safeCall(func() error { ctxValue.Free(); return nil })
+		}
+		if j.rt == nil {
+			return nil, fmt.Errorf("JSRuntime closed")
+		}
 		return nil, errPoisonedRuntime
 	}
 	// Stash ctx on global, build a fire expression that references it via
@@ -440,7 +457,7 @@ func (j *JSRuntime) CallHandlerWithJSCtx(handlerHandle int64, eventObj any, ctxV
 	// resolve bare identifiers set via SetPropertyStr as globals in all
 	// eval scopes; globalThis.X always works).
 	g := j.ctx.Global()
-	g.SetPropertyStr("__jscall_ctx", ctxValue)
+	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
 	eventJSON, err := json.Marshal(eventObj)
 	if err != nil {
 		g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined())
@@ -448,16 +465,49 @@ func (j *JSRuntime) CallHandlerWithJSCtx(handlerHandle int64, eventObj any, ctxV
 	}
 	argsJSON := fmt.Sprintf(`[%s, globalThis.__jscall_ctx]`, string(eventJSON))
 	out, err := j.fireJSON(handlerHandle, argsJSON)
-	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined())
+	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
 	return out, err
 }
 
-// CallToolExecute invokes a pinned JS tool-execute callable with
-// (toolCallId, params, signal, onUpdate, ctx) — the 5 positional args of the
-// reference execute signature. signal/onUpdate are passed as null in v1
-// (handlers that ignore trailing args work fine, which covers the examples).
-// The return must be an AgentToolResult-shape object; it's marshaled to any.
-func (j *JSRuntime) CallToolExecute(executeHandle int64, params any, ctxObj any) (any, error) {
+// SetToolCtxProvider wires the late-bound runner-ctx provider used by the JS
+// tool/command/shortcut bridges. Called once by the session's buildRuntime,
+// after the ExtensionRunner exists. A nil fn restores the {"cwd"} fallback.
+func (j *JSRuntime) SetToolCtxProvider(fn func() map[string]any) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.toolCtx = fn
+}
+
+// runnerCtxMap resolves the runner ctx at call time (TS createContext's
+// late-binding), or nil when no provider is wired. The provider is invoked
+// outside any qjs call, so a stale-runner panic (CreateContext asserts active)
+// is recovered into nil → the caller falls back to {"cwd"}.
+func (j *JSRuntime) runnerCtxMap() (runnerCtx map[string]any) {
+	j.mu.Lock()
+	fn := j.toolCtx
+	j.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			runnerCtx = nil
+		}
+	}()
+	return fn()
+}
+
+// CallToolExecuteWithJSCtx is the ctx-rich form of the tool-execute invoke: it
+// passes (toolCallId, params, signal, null, ctx) with the ctx as a pre-built
+// JS value (toolCallId/params/signal still cross as JSON). Mirrors
+// CallHandlerWithJSCtx; used by the JS tool bridge so execute's 5th argument
+// carries the full runner ctx (cwd/model/isIdle/ui/...), which can't survive a
+// JSON round-trip.
+//
+// OWNERSHIP: CONSUMES ctxValue (qjs SetPropertyStr takes the value's
+// reference — freeing it afterward is a double-free that corrupts the WASM
+// heap). On a dead/poisoned runtime the value is left to Close's reap.
+func (j *JSRuntime) CallToolExecuteWithJSCtx(executeHandle int64, toolCallID string, params, signalObj any, ctxValue *qjs.Value) (any, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.rt == nil {
@@ -466,15 +516,31 @@ func (j *JSRuntime) CallToolExecute(executeHandle int64, params any, ctxObj any)
 	if j.poisoned {
 		return nil, errPoisonedRuntime
 	}
-	args, err := json.Marshal([]any{"", params, nil, nil, ctxObj})
-	if err != nil {
-		return nil, fmt.Errorf("marshal tool args: %w", err)
+	// Flat 5-element args array: the head pieces marshal individually and the
+	// ctx rides as a live globalThis reference (NOT nested — a marshaled
+	// []any{toolCallID, params, signal, nil} would arrive as ONE array arg).
+	// Marshal before stashing so a failure leaves us owning ctxValue.
+	idJSON, errID := json.Marshal(toolCallID)
+	paramsJSON, errParams := json.Marshal(params)
+	signalJSON, errSignal := json.Marshal(signalObj)
+	if errID != nil || errParams != nil || errSignal != nil {
+		j.safeCall(func() error { ctxValue.Free(); return nil })
+		return nil, fmt.Errorf("marshal tool args: %v/%v/%v", errID, errParams, errSignal)
 	}
-	return j.fireJSON(executeHandle, string(args))
+	g := j.ctx.Global()
+	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	argsJSON := fmt.Sprintf(`[%s, %s, %s, null, globalThis.__jscall_ctx]`, idJSON, paramsJSON, signalJSON)
+	out, err := j.fireJSON(executeHandle, argsJSON)
+	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
+	return out, err
 }
 
-// CallCommandHandler invokes a pinned JS command handler with (args, ctx).
-func (j *JSRuntime) CallCommandHandler(handlerHandle int64, args string, ctxObj any) error {
+// CallCommandHandlerWithJSCtx is the ctx-rich form of the command invoke:
+// (args, ctx) with the ctx as a pre-built JS value (TS command handlers get
+// the ExtensionCommandContext shape).
+//
+// OWNERSHIP: CONSUMES ctxValue (see CallToolExecuteWithJSCtx).
+func (j *JSRuntime) CallCommandHandlerWithJSCtx(handlerHandle int64, args string, ctxValue *qjs.Value) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.rt == nil {
@@ -483,11 +549,44 @@ func (j *JSRuntime) CallCommandHandler(handlerHandle int64, args string, ctxObj 
 	if j.poisoned {
 		return errPoisonedRuntime
 	}
-	jsArgs, err := json.Marshal([]any{args, ctxObj})
+	g := j.ctx.Global()
+	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	jsArgs := fmt.Sprintf(`[%s, globalThis.__jscall_ctx]`, mustJSONString(args))
+	_, err := j.fireJSON(handlerHandle, jsArgs)
+	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
+	return err
+}
+
+// mustJSONString marshals v to a JSON string literal; on failure returns the
+// quoted raw value (args here is a plain string, so this can't realistically
+// fail — kept total for safety).
+func mustJSONString(v string) string {
+	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("marshal command args: %w", err)
+		return `"` + v + `"`
 	}
-	_, err = j.fireJSON(handlerHandle, string(jsArgs))
+	return string(b)
+}
+
+// CallShortcutHandler invokes a pinned JS shortcut handler with (ctx) — the
+// single ExtensionContext argument of the reference signature (types.ts:1146:
+// "handler: (ctx: ExtensionContext) => ..."; the old Go bridge passed a
+// {"cwd"} event and a null ctx).
+//
+// OWNERSHIP: CONSUMES ctxValue (see CallToolExecuteWithJSCtx).
+func (j *JSRuntime) CallShortcutHandler(handlerHandle int64, ctxValue *qjs.Value) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.rt == nil {
+		return fmt.Errorf("JSRuntime closed")
+	}
+	if j.poisoned {
+		return errPoisonedRuntime
+	}
+	g := j.ctx.Global()
+	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	_, err := j.fireJSON(handlerHandle, `[globalThis.__jscall_ctx]`)
+	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
 	return err
 }
 

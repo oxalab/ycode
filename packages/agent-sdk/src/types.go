@@ -275,6 +275,9 @@ type AgentState interface {
 	IsStreaming() bool
 	// IsStreamingMessage returns the partial assistant message if streaming
 	IsStreamingMessage() AgentMessage
+	// Signal returns the active run's abort context, or nil when idle
+	// (the reference's agent.signal — extensions read it via ctx.getSignal).
+	Signal() context.Context
 	// PendingToolCalls returns the tool call IDs currently executing
 	PendingToolCalls() map[string]bool
 	// ErrorMessage returns the error from the most recent failed/aborted turn

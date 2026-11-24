@@ -91,6 +91,8 @@ func (q *PendingMessageQueue) Drain() []AgentMessage {
 type activeRun struct {
 	cancel context.CancelFunc
 	done chan struct{}
+	// ctx is this run's abort context (TS agent.signal); read by Signal().
+	ctx context.Context
 }
 
 // --- AgentOptions ---
@@ -305,6 +307,18 @@ func (a *Agent) IsStreaming() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.isStreaming
+}
+
+// Signal returns the active run's abort context, or nil when idle — the
+// counterpart of the reference's agent.signal (extensions bind it as
+// ctx.getSignal). Cancelled by Abort.
+func (a *Agent) Signal() context.Context {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.run == nil {
+		return nil
+	}
+	return a.run.ctx
 }
 
 func (a *Agent) IsStreamingMessage() AgentMessage {
@@ -627,7 +641,7 @@ func (a *Agent) runWithLifecycle(parentCtx context.Context, executor func(ctx co
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	done := make(chan struct{})
-	a.run = &activeRun{cancel: cancel, done: done}
+	a.run = &activeRun{cancel: cancel, done: done, ctx: ctx}
 	a.isStreaming = true
 	a.streamingMessage = nil
 	a.errorMessage = ""

@@ -315,20 +315,55 @@ func (s *AgentSession) bindExtensionCore(runner *extensions.ExtensionRunner) {
 		},
 	}
 
-		contextActions := &extensions.ExtensionContextActions{
-			IsIdle:   func() bool { return !s.Agent.IsStreaming() },
-			Shutdown: func() {
-				if s.extensionShutdownHandler != nil {
-					s.extensionShutdownHandler()
-				}
-			},
-		}
-
-		runner.BindCore(actions, contextActions, &struct {
-			RegisterProvider   func(name string, config *extensions.ProviderConfig)
-			UnregisterProvider func(name string)
-		}{})
+	// All nine ctx.* actions (TS AgentSession._bindExtensionCore,
+	// agent-session.ts:2202-2224). Compact runs fire-and-forget: Go's Compact
+	// BLOCKS until compaction finishes and emits session events on the way —
+	// awaited from inside a JS bridge call (which holds the qjs mutex) a
+	// nested extension emit would deadlock.
+	contextActions := &extensions.ExtensionContextActions{
+		GetModel: func() any { return s.GetModel() },
+		GetSignal: func() context.Context { return s.Agent.Signal() },
+		IsIdle:   func() bool { return !s.Agent.IsStreaming() },
+		Abort:    func() { s.Abort() },
+		HasPendingMessages: func() bool { return s.Agent.HasQueuedMessages() },
+		Shutdown: func() {
+			if s.extensionShutdownHandler != nil {
+				s.extensionShutdownHandler()
+			}
+		},
+		GetContextUsage: func() *extensions.ContextUsage {
+			cu := s.GetContextUsage()
+			return &cu
+		},
+		Compact: func(opts *extensions.CompactOptions) error {
+			instructions := ""
+			if opts != nil {
+				instructions = opts.CustomInstructions
+			}
+			go func() { _, _ = s.Compact(instructions) }() //nolint: errcheck — TS fire-and-forget; errors surface via the compaction_end event
+			return nil
+		},
+		GetSystemPrompt: func() string { return s.GetSystemPrompt() },
 	}
+
+	// Real provider actions — TS runner.bindCore flushes the queue through
+	// providerActions (agent-session.ts:2225-2234). The old empty struct
+	// silently DROPPED queued pi.registerProvider calls at bind time and left
+	// post-bind registrations nil-panicking.
+	providerActions := &struct {
+		RegisterProvider   func(name string, config *extensions.ProviderConfig)
+		UnregisterProvider func(name string)
+	}{
+		RegisterProvider: func(name string, config *extensions.ProviderConfig) {
+			_ = s.modelRegistry.RegisterProvider(name, providerConfigToInput(config))
+		},
+		UnregisterProvider: func(name string) {
+			s.modelRegistry.UnregisterProvider(name)
+		},
+	}
+
+	runner.BindCore(actions, contextActions, providerActions)
+}
 
 // --- Tool Registry ---
 
@@ -492,6 +527,21 @@ func (s *AgentSession) buildRuntime(activeToolNames []string, flagValues map[str
 	s.bindExtensionCore(s.extensionRunner)
 	s.applyExtensionBindings(s.extensionRunner)
 
+	// 5b. Wire the late-bound runner-ctx provider into the JS runtime (story 42,
+	// C16): JS tool/command/shortcut callables resolve the full runner ctx at
+	// call time — TS ctxFactory = () => runner.createContext() (wrapper.ts:17-30).
+	// Read through s.extensionRunner so session rebuilds stay late-bound.
+	if extResult != nil {
+		if jr, ok := extResult.JSRuntime.(*extensions.JSRuntime); ok && jr != nil {
+			jr.SetToolCtxProvider(func() map[string]any {
+				if s.extensionRunner == nil {
+					return nil
+				}
+				return s.extensionRunner.CreateContext()
+			})
+		}
+	}
+
 	// 6. Determine default active tools and refresh registry
 	defaultActiveTools := []string{"read", "bash", "edit", "write"}
 	if activeToolNames == nil {
@@ -619,12 +669,17 @@ func buildAgentToolFromDefinition(name string, entry ToolDefinitionEntry, ctxFac
 			// If the definition has its own Execute function, use it
 			if entry.Definition.Execute != nil {
 				args, _ := json.Marshal(params)
+				// Thread the real tool-call ID through the signal context so the
+				// JS bridge can pass it as execute's first argument (TS
+				// execute(toolCallId, ...)); Go's def.Execute signature has no
+				// ID param.
+				threaded := extensions.WithToolCallID(signal, toolCallID)
 				var result any
 				var err error
 				if entry.Definition.ExecuteContext != nil && ctxFactory != nil {
-					result, err = entry.Definition.ExecuteContext(signal, args, ctxFactory())
+					result, err = entry.Definition.ExecuteContext(threaded, args, ctxFactory())
 				} else {
-					result, err = entry.Definition.Execute(signal, args)
+					result, err = entry.Definition.Execute(threaded, args)
 				}
 				if err != nil {
 					return sdk.AgentToolResult[any]{

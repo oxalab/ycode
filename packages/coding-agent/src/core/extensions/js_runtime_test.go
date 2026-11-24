@@ -5,8 +5,65 @@ package extensions
 // registered JS handler back from Go.
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/fastschema/qjs"
 )
+
+// pinCaptureFunction evals a snippet that pins a JS function which records its
+// arguments into globalThis.__captured (as JSON) and returns {ok:true}.
+// Returns the pinned handle.
+func (j *JSRuntime) pinCaptureFunction(t *testing.T) int64 {
+	t.Helper()
+	var v *qjs.Value
+	if err := j.safeCall(func() error {
+		var err error
+		v, err = j.ctx.Eval("capture.js", qjs.Code(`(function(){
+			globalThis.__captured = null;
+			return __piPin(function () {
+				globalThis.__captured = JSON.stringify(Array.prototype.slice.call(arguments));
+				return { ok: true };
+			});
+		})()`), qjs.TypeGlobal())
+		return err
+	}); err != nil {
+		t.Fatalf("pin capture fn: %v", err)
+	}
+	if v == nil {
+		t.Fatal("pin returned nil")
+	}
+	id := int64(v.Int32())
+	v.Free()
+	return id
+}
+
+// capturedArgs reads back globalThis.__captured. Returns nil when the capture
+// fn hasn't run.
+func (j *JSRuntime) capturedArgs(t *testing.T) []any {
+	t.Helper()
+	var v *qjs.Value
+	if err := j.safeCall(func() error {
+		var err error
+		v, err = j.ctx.Eval("capture.js", qjs.Code(`globalThis.__captured === null ? "null" : globalThis.__captured`), qjs.TypeGlobal())
+		return err
+	}); err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	if v == nil {
+		t.Fatal("read capture returned nil")
+	}
+	s := v.String()
+	v.Free()
+	if s == "null" || s == "" {
+		return nil
+	}
+	var out []any
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		t.Fatalf("capture not JSON: %v (%s)", err, s)
+	}
+	return out
+}
 
 func TestJSRuntime_FactoryAndHandler(t *testing.T) {
 	j, err := NewJSRuntime()
@@ -117,5 +174,126 @@ func TestJSRuntime_NotAFactory(t *testing.T) {
 	_, err = j.EvalModule("/test/notfn.js", js)
 	if err == nil {
 		t.Fatal("EvalModule should reject a non-function export")
+	}
+}
+
+// A panicking provider (stale runner after Invalidate — CreateContext asserts
+// active) must be recovered into the {"cwd"} fallback, not crash the bridge.
+func TestRunnerCtxMapRecoversStaleProviderPanic(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	j.SetToolCtxProvider(func() map[string]any {
+		panic("This extension ctx is stale after session replacement or reload.")
+	})
+	if got := j.runnerCtxMap(); got != nil {
+		t.Fatalf("runnerCtxMap = %v, want nil (panic recovered)", got)
+	}
+}
+
+// Story 42 (C16): CallToolExecuteWithJSCtx must deliver the flat 5 positional
+// args (toolCallId, params, signal, null, ctx) — a nested marshaling bug
+// ([]any{toolCallID, params, signal, nil} + ctx) once arrived as ONE array arg.
+func TestCallToolExecuteWithJSCtxFlatArgs(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	h := j.pinCaptureFunction(t)
+	// jsCtx is CONSUMED by the bridge call below (story-42 ownership) — no
+	// deferred free; a pre-consume failure leaks one object until Close.
+	jsCtx := j.Context().NewObject()
+	jsCtx.SetPropertyStr("cwd", j.Context().NewString("/proj"))
+
+	res, err := j.CallToolExecuteWithJSCtx(h, "call-9", map[string]any{"x": 42}, map[string]any{"aborted": false}, jsCtx)
+	if err != nil {
+		t.Fatalf("CallToolExecuteWithJSCtx: %v", err)
+	}
+	if m, ok := res.(map[string]any); !ok || m["ok"] != true {
+		t.Fatalf("result = %v, want {ok:true}", res)
+	}
+
+	args := j.capturedArgs(t)
+	if len(args) != 5 {
+		t.Fatalf("execute got %d args, want 5: %v", len(args), args)
+	}
+	if args[0] != "call-9" {
+		t.Errorf("arg0 (toolCallId) = %v, want call-9", args[0])
+	}
+	params, ok := args[1].(map[string]any)
+	if !ok || params["x"] != float64(42) {
+		t.Errorf("arg1 (params) = %v, want {x:42}", args[1])
+	}
+	sig, ok := args[2].(map[string]any)
+	if !ok || sig["aborted"] != false {
+		t.Errorf("arg2 (signal) = %v, want {aborted:false}", args[2])
+	}
+	if args[3] != nil {
+		t.Errorf("arg3 (onUpdate) = %v, want null", args[3])
+	}
+	ctxObj, ok := args[4].(map[string]any)
+	if !ok || ctxObj["cwd"] != "/proj" {
+		t.Errorf("arg4 (ctx) = %v, want the JS object with cwd", args[4])
+	}
+}
+
+// CallCommandHandlerWithJSCtx delivers (args, ctx) with ctx as the JS object.
+func TestCallCommandHandlerWithJSCtxArgs(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	h := j.pinCaptureFunction(t)
+	// jsCtx is CONSUMED by the bridge call below — no deferred free.
+	jsCtx := j.Context().NewObject()
+	jsCtx.SetPropertyStr("cwd", j.Context().NewString("/proj"))
+
+	if err := j.CallCommandHandlerWithJSCtx(h, "do-thing", jsCtx); err != nil {
+		t.Fatalf("CallCommandHandlerWithJSCtx: %v", err)
+	}
+	args := j.capturedArgs(t)
+	if len(args) != 2 {
+		t.Fatalf("handler got %d args, want 2: %v", len(args), args)
+	}
+	if args[0] != "do-thing" {
+		t.Errorf("arg0 (args) = %v, want do-thing", args[0])
+	}
+	ctxObj, ok := args[1].(map[string]any)
+	if !ok || ctxObj["cwd"] != "/proj" {
+		t.Errorf("arg1 (ctx) = %v, want the JS object with cwd", args[1])
+	}
+}
+
+// CallShortcutHandler delivers (ctx) — the single ExtensionContext argument of
+// the reference signature (types.ts:1146); the old bridge passed ({"cwd"}, null).
+func TestCallShortcutHandlerSingleCtxArg(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	h := j.pinCaptureFunction(t)
+	// jsCtx is CONSUMED by the bridge call below — no deferred free.
+	jsCtx := j.Context().NewObject()
+	jsCtx.SetPropertyStr("isIdle", j.Context().NewBool(true))
+
+	if err := j.CallShortcutHandler(h, jsCtx); err != nil {
+		t.Fatalf("CallShortcutHandler: %v", err)
+	}
+	args := j.capturedArgs(t)
+	if len(args) != 1 {
+		t.Fatalf("handler got %d args, want 1 (ctx): %v", len(args), args)
+	}
+	ctxObj, ok := args[0].(map[string]any)
+	if !ok || ctxObj["isIdle"] != true {
+		t.Errorf("arg0 (ctx) = %v, want the JS object with isIdle", args[0])
 	}
 }
