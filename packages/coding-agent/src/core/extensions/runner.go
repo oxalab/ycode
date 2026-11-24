@@ -146,12 +146,17 @@ func (r *ExtensionRunner) BindCore(
 		r.runtime.ContextActions = contextActions
 
 		r.getModel = func() any {
-			if contextActions.Signal != nil {
-				return nil
+			if contextActions.GetModel != nil {
+				return contextActions.GetModel()
 			}
 			return nil
 		}
-		r.getSignalFn = func() context.Context { return contextActions.Signal }
+		r.getSignalFn = func() context.Context {
+			if contextActions.GetSignal != nil {
+				return contextActions.GetSignal()
+			}
+			return nil
+		}
 		// Only override the constructor defaults when the caller actually provides
 		// a callback. Without these guards, a contextActions with nil fields (e.g.
 		// HasPendingMessages unset) clobbers the safe default with nil, and
@@ -428,6 +433,7 @@ func (r *ExtensionRunner) CreateContext() map[string]any {
 	ctx["modelRegistry"] = r.modelRegistry
 	ctx["model"] = r.getModel()
 	ctx["isIdle"] = r.isIdleFn()
+	ctx["signal"] = r.getSignalFn()
 	ctx["abort"] = r.abortFn
 	ctx["hasPendingMessages"] = r.hasPendingMessagesFn()
 	ctx["shutdown"] = r.shutdownHandler

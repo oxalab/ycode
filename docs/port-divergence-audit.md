@@ -1,13 +1,18 @@
 # Port Divergence Audit — TS Reference vs Go Port
 
 > **Created:** 2026-08-26 · **Status:** 34 of 34 findings fixed ·
+> **AUDIT COMPLETE 2026-11-24** — every finding, backlog group, and
+> deferred-by-choice item is closed (story 42 resolved C16 JS-runner context,
+> the last item, with documented feature-sized residuals).
 > **P-backlog CLOSED 2026-11-13** (P9–P16 all resolved; story 36 closed the
-> last group, P15 structural — only the explicitly-deferred bucket remains:
+> last group, P15 structural — the explicitly-deferred bucket, all closed:
 > ~~codex WS transport~~ ✅ closed 2026-11-21 (story 39 — see the resolved
 > record in the deferred-bucket section), ~~catalog sync for untouched
 > groups~~ ✅ closed 2026-11-21 (story 40), ~~add-second-model TUI~~ ✅ closed
 > 2026-11-23 (story 41) ·
 > ~~oauth registry population~~ ✅ closed 2026-11-20 (story 38)) ·
+> ~~C16 JS-runner context~~ ✅ closed 2026-11-24 (story 42 — tools re-audit
+> C-group, deferred-in-place) ·
 > **catalog typos ✅ closed 2026-11-14 (story 37)**
 >
 > Four parallel audits compared `reference/coding-agent/` (TypeScript, source of
@@ -1014,19 +1019,71 @@ missing feature/surface, LOW = cosmetic/wording.
   despite update). Runtime note: production flows through the session bridge
   (which honored ExecuteContext since story 15), so this fix is
   parity-surface correctness, not a behavior change.
-- **C16 MED — LOGGED 2026-10-24 (story 24), DEFERRED by choice** — JS
-  extension tools receive only `{cwd}` as ctx (`js_api.go:385` →
-  `CallToolExecute(exHandle, params, map{"cwd":...})`); the TS reference
-  passes the full runner context (`runner.createContext()`: getModel,
-  isIdle, getSignal, abort, hasPendingMessages, shutdown,
-  getContextUsage, compact, getSystemPrompt + actions/ui — runner.ts:268-299)
-  as the 5th execute arg. Porting it is an extensions-runtime feature family
-  (same class as the subagent example extension), not a wrapper fix; the Go
-  `ExtensionContext` struct currently carries only `Model` (types.go comment:
-  "the Go port starts with the model only"). Related dead code:
-  `extensions/wrapper.go WrapRegisteredTool` is a broken stub
-  (`def.Execute(nil, nil)`) with zero callers. Revisit if/when JS extension
-  tool parity matters in practice.
+- **C16 MED — LOGGED 2026-10-24 (story 24), DEFERRED by choice → ✅ RESOLVED
+  2026-11-24 (story 42 — the last audit item, deferrals included)** — the
+  deferred family was the JS runner context: "JS extension tools receive only
+  `{cwd}` as ctx (`js_api.go:385` → `CallToolExecute(exHandle, params,
+  map{"cwd":...})`); the TS reference passes the full runner context
+  (`runner.createContext()`: getModel, isIdle, getSignal, abort,
+  hasPendingMessages, shutdown, getContextUsage, compact, getSystemPrompt +
+  actions/ui — runner.ts:573-634 createContext, :266-336 bindCore) as the 5th
+  execute arg." Hand-verified finding: the Go runner ALREADY had the full
+  late-bound machinery (`CreateContext()` builds all 13 members per emit,
+  `BindCore` mirrors bindCore) and JS **event handlers** already received a
+  rich JS object (`BuildJSContext` + `CallHandlerWithJSCtx` with live `ui`
+  dialogs) — the holes were (1) the tool/command/shortcut bridges bypassed the
+  runner with inline `{cwd}`/`null` maps, (2) production `bindExtensionCore`
+  bound only 2 of 9 contextActions (and `runner.getModel` was dead code
+  returning nil unconditionally), (3) `bindExtensionCore` passed an EMPTY
+  providerActions struct → queued `pi.registerProvider` calls silently
+  dropped at bind time (post-bind would nil-panic) — the real story-38
+  residual gate, (4) `CallToolExecute` hardcoded toolCallId=""/signal=null,
+  (5) `wrapper.go WrapRegisteredTool` broken stub with zero callers. Fixed
+  (story 42): late-bound `JSRuntime.SetToolCtxProvider` wired in buildRuntime
+  from `runner.CreateContext()` (TS ctxFactory semantics — resolves at call
+  time, stale-runner panic recovered to the `{cwd}` fallback); all three
+  bridges (execute/command/shortcut) now deliver the rich JS ctx via
+  `CallToolExecuteWithJSCtx`/`CallCommandHandlerWithJSCtx`/`CallShortcutHandler`
+  (shortcut arg shape also fixed to the reference's single `(ctx)`);
+  `bindExtensionCore` binds all NINE actions (GetModel added to the struct;
+  `Signal` field → `GetSignal func() context.Context` backed by NEW
+  `sdk.Agent.Signal()` — the active run's abort context, nil when idle, the
+  agent.signal analog; Compact fire-and-forget goroutine — Go's Compact
+  BLOCKS and emits session events, awaited inside a JS bridge call a nested
+  emit would deadlock); real providerActions flush (unblocks the non-oauth
+  half of the story-38 residual); real toolCallId threaded via a
+  context-value (`extensions.WithToolCallID`/`ToolCallIDFromContext`);
+  signal rides as an `{aborted}` snapshot (a Go context.Context can't cross
+  the JSON bridge — live `addEventListener` documented divergence);
+  `ctx["signal"]` added to `CreateContext` and rendered by BuildJSContext;
+  wrapper.go DELETED (34 lines; the live equivalent `buildAgentToolFromDefinition`
+  already takes ctxFactory). **BONUS BUG found by the story: the whole
+  JS-bridge had a latent qjs double-free** — qjs `SetPropertyStr` CONSUMES the
+  value's reference (probe-verified: Free-after-set OOBs the next
+  allocation), so the `defer SafeFree(jsCtx)` idiom after every
+  `CallHandlerWithJSCtx` underflowed on every handler call; ownership is now
+  explicit (the Call*WithJSCtx methods consume ctxValue; call sites never
+  free). Tests: runner_test (full 9-action bind + nil GetModel/GetSignal
+  defaults), js_context_test (signal{aborted} + eager getters rendering),
+  js_runtime_test (flat 5-arg pin — a nested-marshaling bug was caught here
+  mid-story — command/shortcut arg pins, stale-provider panic recovery),
+  js_api_test (rich ctx + real toolCallId + signal snapshot via provider,
+  `{cwd}` fallback without), core agent_session_extensions_test (all-9 bind,
+  provider-registration flush → registry, toolCallID threading). Mutations:
+  7 detected deterministically (provider dropped → `{cwd}` fallback, dead
+  getModel restored, GetModel unbound, toolCallID threading dropped, signal
+  → null, providerActions → empty struct, getSignalFn nil-clobber guard
+  removed → panic); 8th (SafeFree double-free restored) is heap-state
+  dependent — verified empirically during development (it OOB-crashed the
+  smoke test mid-story exactly on that pattern), not deterministically
+  re-triggerable in isolation. Full suite + vet + `-count=3` green.
+  **Residuals (documented, feature-sized): command-context actions
+  (waitForIdle/newSession/fork/navigateTree/switchSession/reload) not
+  bridged to JS command handlers (BindCommandContext has no production
+  caller); ReplacedSessionContext; live AbortSignal (addEventListener /
+  polling mid-execute); oauth login-callback function bridging (the story-38
+  residual NARROWS to this — non-oauth provider registration from extensions
+  now works end-to-end); pi.exec (pre-existing v1 stub).**
 - **C15 LOW — ✅ FIXED (2026-10-24, story 25; grab-bag verified item-by-item,
   3 sub-items were already STALE)** — STALE (parity, no code): bash abort
   wording ("Command aborted", TestExecAbortWording), "(no output)" placeholder
@@ -1075,17 +1132,20 @@ Suggested fix order (one story per turn): (1) ~~A1-A4 edit_diff criticals~~
 (tests in `bash_exec_test.go` + wrapper/executor/signal tests), (6) ~~C12~~ ✅
 done 2026-10-24 (test in `ls_test.go`), (7) ~~C13~~ ✅ done 2026-10-24 (test
 in `schema_test.go`), (8) ~~C14~~ ✅ resolved 2026-10-24 (half stale; tests
-in `tool_definition_wrapper_test.go`; C16 logged deferred), (9) ~~C15~~ ✅
+in `tool_definition_wrapper_test.go`; ~~C16 logged deferred~~ ✅ story 42
+2026-11-24), (9) ~~C15~~ ✅
 done 2026-10-24 (tests in bash_exec/find_grep/ls/schema/file_mutation_queue
 tests) — **C-group complete**, (10) ~~theme-cache verification~~ ✅ done
 2026-10-29 (recolor fix + line-cache parity verdict), (11) ~~provider-parity
 verification~~ ✅ done 2026-10-29 (story 27: first fix wave landed; follow-up
-queue = P9-P16 provider backlog above; deferred: C16 (JS runner context,
-feature family), ~~add-second-model TUI gap~~ ✅ story 41 2026-11-23;
+queue = P9-P16 provider backlog above; ~~deferred: C16 (JS runner context,
+feature family)~~ ✅ story 42 2026-11-24 — the audit's final item,
+deferrals included; ~~add-second-model TUI gap~~ ✅ story 41 2026-11-23;
 ~~catalog typos~~ ✅ story 37
 2026-11-14; ~~catalog sync for untouched groups~~ ✅ story 40 2026-11-21).
 **All audit items
-verified — no remaining unverified entries.** (B1's masked-path
+verified — no remaining unverified entries — and no remaining deferrals
+(story 42 closed C16, the last deferred-by-choice item).** (B1's masked-path
 question was resolved in story 2 — the interactive path uses
 `extractResultText`; `GetTextOutput` serves the core/tui fallback renderer.)
 
@@ -1650,11 +1710,16 @@ markModified dropped). Full suite + vet + `-count=3` green.
     refresh-with-lock at stream time, model_registry ModifyModels,
     display names, llm-oauth CLI. Tests: `oauth_registry_test.go` (9 —
     first tests in the package); 6/6 mutations detected. Residuals: custom
-    oauth providers from config stay C16-gated (TS model-registry.ts:863
+    oauth providers from config ~~stay C16-gated~~ — **narrowed by story 42
+    (2026-11-24)**: extension `pi.registerProvider` now flushes through real
+    providerActions at bindCore, so NON-oauth provider registration from
+    extensions works end-to-end; what remains C16-residual is the oauth
+    login-callback function bridging itself (TS model-registry.ts:863
     registers function-carrying provider objects — extensions only; Go's
     `RegisterOAuthProvider(id)` keeps TS-unregister semantics,
     restore-builtin-or-delete; `agent_session_services.go` providerConfigToInput
-    OAuth conversion is best-effort/nil until the JS runner exists);
+    OAuth conversion stays best-effort/nil until oauth login/refreshToken
+    callbacks are bridged across the qjs runtime);
     `UsesCallbackServer` has no Go consumer yet (TS login-dialog reads it —
     TUI-tier)); ~~env-key
     resolver divergence~~ ✅ FIXED 2026-10-31 (story 28:

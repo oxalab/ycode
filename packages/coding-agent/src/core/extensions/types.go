@@ -291,13 +291,39 @@ type ToolDefinition struct {
 	PrepareArguments 	func(args any) (any, error)
 }
 
-// ExtensionContext is the per-execute context handed to context-aware tools
-// (TS ExtensionContext, extensions/types.ts:298-310 — which also carries UI
-// methods and the model registry; the Go port starts with the model only).
+// ExtensionContext is the per-execute context handed to context-aware Go
+// tools (TS ExtensionContext, extensions/types.ts:298-310). The native struct
+// stays Model-only by design: Go tools already receive the signal and the
+// update callback as direct AgentTool.Execute params, and the JS-extension
+// bridge (js_api.go) carries the full runner ctx via BuildJSContext instead.
 type ExtensionContext struct {
 	// Model is the session's current model, resolved at execute time (so
 	// mid-session model switches are reflected). Zero-valued when unknown.
 	Model llm.Model[llm.Api]
+}
+
+// toolCallIDCtxKey is the context-value key under which the session's tool
+// wrapper threads the current tool-call ID into def.Execute, so the JS bridge
+// can pass the real ID as execute's first argument (TS execute(toolCallId, ...)).
+type toolCallIDCtxKey struct{}
+
+// WithToolCallID returns ctx carrying the tool-call ID (background-based when
+// ctx is nil — direct calls in tests pass no signal).
+func WithToolCallID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, toolCallIDCtxKey{}, id)
+}
+
+// ToolCallIDFromContext extracts the tool-call ID threaded through the execute
+// signal context ("" when absent — e.g. direct calls in tests).
+func ToolCallIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(toolCallIDCtxKey{}).(string)
+	return id
 }
 
 // --- Registered Types ---
@@ -456,9 +482,14 @@ type ExtensionActions struct {
 	UnregisterProvider 	func(name string)
 }
 
+// ExtensionContextActions carries the runner's injectable ctx.* callbacks
+// (TS ExtensionContextActions, extensions/types.ts:1493-1503). All nine are
+// bound in production by AgentSession.bindExtensionCore; fields left nil keep
+// the constructor's no-op defaults (BindCore guards against nil clobbering).
 type ExtensionContextActions struct {
+	GetModel 	func() any
+	GetSignal 	func() context.Context
 	IsIdle 		func() bool
-	Signal 		context.Context
 	Abort 		func()
 	HasPendingMessages func() bool
 	Shutdown 	func()

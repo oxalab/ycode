@@ -78,11 +78,13 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 			if runnerCtx == nil {
 				runnerCtx = map[string]any{"cwd": jsAPI.cwd}
 			}
+			// CallHandlerWithJSCtx CONSUMES jsCtx (story-42 ownership fix:
+			// qjs SetPropertyStr takes the value's reference — a SafeFree
+			// afterward double-freed and corrupted the WASM heap).
 			jsCtx, err := BuildJSContext(jrt, runnerCtx)
 			if err != nil {
 				return nil, fmt.Errorf("build js ctx: %w", err)
 			}
-			defer jrt.SafeFree(jsCtx)
 			return jrt.CallHandlerWithJSCtx(handle, event, jsCtx)
 		})
 		return ctx.NewUndefined(), nil
@@ -125,7 +127,20 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 				return nil, fmt.Errorf("pi.registerCommand: %w", err)
 			}
 			goHandler = func(argsStr string, _ context.Context) error {
-				return jrt.CallCommandHandler(hh, argsStr, map[string]any{"cwd": cwd})
+				// Story 42 (C16): command handlers get the rich runner ctx too
+				// (TS ExtensionCommandContext; the command-only actions —
+				// waitForIdle/newSession/fork/... — stay deferred, documented
+				// residual).
+				runnerCtx := jrt.runnerCtxMap()
+				if runnerCtx == nil {
+					runnerCtx = map[string]any{"cwd": cwd}
+				}
+				// CallCommandHandlerWithJSCtx consumes jsCtx — no SafeFree.
+				jsCtx, err := BuildJSContext(jrt, runnerCtx)
+				if err != nil {
+					return fmt.Errorf("build command ctx: %w", err)
+				}
+				return jrt.CallCommandHandlerWithJSCtx(hh, argsStr, jsCtx)
 			}
 		}
 		handlerProp.Free()
@@ -160,8 +175,19 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 				return nil, fmt.Errorf("pi.registerShortcut: %w", err)
 			}
 			goHandler = func(_ context.Context) error {
-				_, err := jrt.CallHandler(hh, map[string]any{"cwd": cwd}, nil)
-				return err
+				// Story 42 (C16): shortcut handlers receive (ctx) — the single
+				// ExtensionContext argument of the reference signature
+				// (types.ts:1146); the old bridge passed ({"cwd"}, null).
+				runnerCtx := jrt.runnerCtxMap()
+				if runnerCtx == nil {
+					runnerCtx = map[string]any{"cwd": cwd}
+				}
+				// CallShortcutHandler consumes jsCtx — no SafeFree.
+				jsCtx, err := BuildJSContext(jrt, runnerCtx)
+				if err != nil {
+					return fmt.Errorf("build shortcut ctx: %w", err)
+				}
+				return jrt.CallShortcutHandler(hh, jsCtx)
 			}
 		}
 		handlerProp.Free()
@@ -382,7 +408,26 @@ func jsToolDefToGo(v *qjs.Value, jrt *JSRuntime) (*ToolDefinition, error) {
 			if len(args) > 0 {
 				_ = json.Unmarshal(args, &params)
 			}
-			return jrt.CallToolExecute(exHandle, params, map[string]any{"cwd": jrt.cwdLabel()})
+			// Story 42 (C16): execute receives the full runner ctx as its 5th
+			// arg — TS wires ctxFactory = () => runner.createContext() into
+			// every registered tool (extensions/wrapper.ts:17-30). The map is
+			// resolved late via the JSRuntime provider (wired at bind time);
+			// nil falls back to {"cwd"} — the pre-bind/unit-test shape.
+			runnerCtx := jrt.runnerCtxMap()
+			if runnerCtx == nil {
+				runnerCtx = map[string]any{"cwd": jrt.cwdLabel()}
+			}
+			// CallToolExecuteWithJSCtx consumes jsCtx (qjs SetPropertyStr takes
+			// the value's reference) — no SafeFree here, ever.
+			jsCtx, err := BuildJSContext(jrt, runnerCtx)
+			if err != nil {
+				return nil, fmt.Errorf("build tool ctx: %w", err)
+			}
+			// TS arg 3 is the run's live AbortSignal; a Go context.Context can't
+			// cross the JSON bridge, so it rides as an {aborted} snapshot.
+			aborted := ctx != nil && ctx.Err() != nil
+			signalObj := map[string]any{"aborted": aborted}
+			return jrt.CallToolExecuteWithJSCtx(exHandle, ToolCallIDFromContext(ctx), params, signalObj, jsCtx)
 		}
 	} else {
 		ex.Free()
