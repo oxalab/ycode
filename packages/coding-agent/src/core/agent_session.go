@@ -62,7 +62,7 @@ type AgentSession struct {
 	turnIndex                      int
 	extensionRunnerRef             *ExtensionRunnerRef
 	extensionUIContext             extensions.ExtensionUIContext
-	extensionCommandContextActions extensions.ExtensionCommandContextActions
+	extensionCommandContextActions *extensions.ExtensionCommandContextActions
 	extensionShutdownHandler       extensions.ShutdownHandler
 	extensionErrorListener         extensions.ExtensionErrorListener
 	extensionErrorUnsubscriber     func()
@@ -574,7 +574,7 @@ func (s *AgentSession) GetContextFiles() []ContextFile {
 // Mirrors TS agent-session.ts createReplacedSessionContext (line 3087).
 func (s *AgentSession) CreateReplacedSessionContext() *extensions.ReplacedSessionContext {
 	ctx := &extensions.ReplacedSessionContext{
-		Actions: &s.extensionCommandContextActions,
+		Actions: s.extensionCommandContextActions,
 		SendMessage: func(msg any) error {
 			s.SendCustomMessage("", msg, true, nil, false, "nextTurn")
 			return nil
@@ -582,6 +582,16 @@ func (s *AgentSession) CreateReplacedSessionContext() *extensions.ReplacedSessio
 		SendUserMessage: func(content string, images []any) error {
 			return s.SendUserMessage(content, images)
 		},
+	}
+	// F1: the replacement session's full command ctx for JS rendering — TS
+	// createReplacedSessionContext clones the NEW session's
+	// createCommandContext (agent-session.ts:3087-3095). Read through
+	// s.extensionRunner at call time; a stale runner's assertActive panic is
+	// recovered by the renderer (BuildReplacedSessionContext).
+	if s.extensionRunner != nil {
+		ctx.Ctx = func() map[string]any {
+			return s.extensionRunner.CreateCommandContext()
+		}
 	}
 	return ctx
 }

@@ -107,3 +107,61 @@ func TestBindCoreNilModelAndSignalKeepDefaults(t *testing.T) {
 		t.Errorf("signal = %v, want nil (default preserved)", ctx["signal"])
 	}
 }
+
+// F1: CreateCommandContext adds the six session-control actions on top of the
+// base ctx — the map the command bridge renders (the JS shims key off these
+// entries' presence).
+func TestCreateCommandContextExposesCommandActions(t *testing.T) {
+	runner := NewExtensionRunner(nil, &ExtensionRuntime{}, "/proj", nil, nil)
+
+	ctx := runner.CreateCommandContext()
+	for _, name := range []string{"waitForIdle", "newSession", "fork", "navigateTree", "switchSession", "reload"} {
+		if _, present := ctx[name]; !present {
+			t.Errorf("command ctx missing %q", name)
+		}
+	}
+	// The base members ride along (TS createCommandContext copies
+	// createContext's members, runner.ts:636-669).
+	if ctx["cwd"] != "/proj" {
+		t.Errorf("cwd = %v, want /proj", ctx["cwd"])
+	}
+	if _, present := ctx["abort"]; !present {
+		t.Error("command ctx missing base abort")
+	}
+	// And the plain ctx does NOT carry the six (the TS interface split).
+	plain := runner.CreateContext()
+	for _, name := range []string{"waitForIdle", "newSession", "fork", "navigateTree", "switchSession", "reload"} {
+		if _, present := plain[name]; present {
+			t.Errorf("plain ctx carries %q — must be command-only", name)
+		}
+	}
+}
+
+// F1 (TS bindCommandContext(undefined) parity, runner.ts:349-354): with no
+// actions bound, the constructor's silent no-op defaults answer
+// {cancelled:false} instead of panicking.
+func TestCommandContextNoOpDefaults(t *testing.T) {
+	runner := NewExtensionRunner(nil, &ExtensionRuntime{}, "/proj", nil, nil)
+	ctx := runner.CreateCommandContext()
+
+	newSession, ok := ctx["newSession"].(NewSessionHandler)
+	if !ok {
+		t.Fatalf("newSession = %T, want the handler func", ctx["newSession"])
+	}
+	res, err := newSession(nil)
+	if err != nil || res["cancelled"] {
+		t.Errorf("newSession no-op = %v (err %v), want {cancelled:false}, nil", res, err)
+	}
+	switchSession, ok := ctx["switchSession"].(SwitchSessionHandler)
+	if !ok {
+		t.Fatalf("switchSession = %T, want the handler func", ctx["switchSession"])
+	}
+	if res, err := switchSession("/path", nil); err != nil || res["cancelled"] {
+		t.Errorf("switchSession no-op = %v (err %v), want {cancelled:false}, nil", res, err)
+	}
+	if wi, ok := ctx["waitForIdle"].(func() error); !ok {
+		t.Fatalf("waitForIdle = %T", ctx["waitForIdle"])
+	} else if err := wi(); err != nil {
+		t.Errorf("waitForIdle no-op errored: %v", err)
+	}
+}

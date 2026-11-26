@@ -6,7 +6,9 @@ package extensions
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/fastschema/qjs"
 )
@@ -96,7 +98,8 @@ func TestJSRuntime_FactoryAndHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildFakePi: %v", err)
 	}
-	defer j.SafeFree(pi) // SafeFree, not pi.Free — survives a poisoned runtime
+	// NO SafeFree(pi) — InvokeFactory consumes the value's reference (the
+	// __pi global stash + reset); freeing it here is a double-free.
 
 	if err := j.InvokeFactory(factoryHandle, pi); err != nil {
 		t.Fatalf("InvokeFactory: %v", err)
@@ -144,7 +147,8 @@ func TestJSRuntime_FactoryThrows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildFakePi: %v", err)
 	}
-	defer j.SafeFree(pi)
+	// NO SafeFree(pi) — InvokeFactory consumes it, on the throw path too (the
+	// __pi reset runs before the error surfaces).
 
 	factoryHandle, err := j.EvalModule("/test/bad.js", js)
 	if err != nil {
@@ -158,8 +162,7 @@ func TestJSRuntime_FactoryThrows(t *testing.T) {
 	// is a qjs-version-dependent implementation detail (the panic may or may
 	// not fire during result extraction). The hard contract is: no host crash,
 	// the error is reported, and IsPoisoned/SafeFree keep subsequent operations
-	// safe. Verify SafeFree doesn't panic regardless of poison state.
-	j.SafeFree(pi) // immediate; the defer is belt-and-suspenders
+	// safe.
 }
 
 func TestJSRuntime_NotAFactory(t *testing.T) {
@@ -191,6 +194,29 @@ func TestRunnerCtxMapRecoversStaleProviderPanic(t *testing.T) {
 	})
 	if got := j.runnerCtxMap(); got != nil {
 		t.Fatalf("runnerCtxMap = %v, want nil (panic recovered)", got)
+	}
+}
+
+// The command provider shares the stale-panic recovery: a panicking command
+// provider degrades to nil (→ the tool provider → the {"cwd"} fallback), not
+// a crash in the command dispatch.
+func TestCommandCtxMapRecoversStaleProviderPanic(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	j.SetCommandCtxProvider(func() map[string]any {
+		panic("This extension ctx is stale after session replacement or reload.")
+	})
+	if got := j.ctxProviderChain(); got != nil {
+		t.Fatalf("ctxProviderChain = %v, want nil (panic recovered, no tool provider)", got)
+	}
+	// And with a healthy tool provider the chain falls through to it.
+	j.SetToolCtxProvider(func() map[string]any { return map[string]any{"cwd": "/fallback"} })
+	if got := j.ctxProviderChain(); got == nil || got["cwd"] != "/fallback" {
+		t.Fatalf("ctxProviderChain = %v, want the tool provider's map after the command provider panicked", got)
 	}
 }
 
@@ -295,5 +321,229 @@ func TestCallShortcutHandlerSingleCtxArg(t *testing.T) {
 	ctxObj, ok := args[0].(map[string]any)
 	if !ok || ctxObj["isIdle"] != true {
 		t.Errorf("arg0 (ctx) = %v, want the JS object with isIdle", args[0])
+	}
+}
+
+// evalLockedSetup runs a global eval under j.mu (test bootstrap helper for the
+// action-bridge tests).
+func evalJS(t *testing.T, j *JSRuntime, name, code string) {
+	t.Helper()
+	j.mu.Lock()
+	err := j.safeCall(func() error {
+		v, err := j.ctx.Eval(name, qjs.Code(code), qjs.TypeGlobal())
+		if v != nil {
+			v.Free()
+		}
+		return err
+	})
+	j.mu.Unlock()
+	if err != nil {
+		t.Fatalf("eval %s: %v", name, err)
+	}
+}
+
+func evalString(t *testing.T, j *JSRuntime, code string) string {
+	t.Helper()
+	var out string
+	j.mu.Lock()
+	err := j.safeCall(func() error {
+		v, err := j.ctx.Eval("read.js", qjs.Code(code), qjs.TypeGlobal())
+		if err != nil {
+			return err
+		}
+		if v != nil {
+			out = v.String()
+			v.Free()
+		}
+		return nil
+	})
+	j.mu.Unlock()
+	if err != nil {
+		t.Fatalf("eval read: %v", err)
+	}
+	return out
+}
+
+// awaitNotPending polls the JS expression until it stops reading "pending"
+// (the production dispatcher is a goroutine — it may legitimately complete a
+// moment after DispatchPendingActions returns) or the deadline expires.
+func awaitNotPending(t *testing.T, j *JSRuntime, code string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := evalString(t, j, code)
+		if got != "pending" {
+			return got
+		}
+		if time.Now().After(deadline) {
+			j.mu.Lock()
+			dbg := j.lastCompleteErr
+			j.mu.Unlock()
+			t.Fatalf("%s never settled (still %q; lastCompleteErr=%q; dbgComplete=%q)",
+				code, got, dbg, evalString(t, j, `String(globalThis.__dbgComplete)`))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// F1: the deferred-action dispatcher resolves the shim's native Promise with
+// the executor's result — the TS {cancelled} shape.
+func TestActionDispatcherResolvesPromise(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	j.SetActionExecutor(func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+		if name != "newSession" {
+			return nil, nil
+		}
+		if parent, _ := payload["opts"].(map[string]any)["parentSession"].(string); parent != "parent-1" {
+			return nil, nil // payload didn't thread through
+		}
+		return map[string]any{"cancelled": false}, nil
+	})
+
+	evalJS(t, j, "a1.js", `
+		globalThis.__settled = "pending";
+		var shim = __piMakeAction("newSession");
+		shim({ parentSession: "parent-1" }).then(
+			function (v) { globalThis.__settled = JSON.stringify(v); },
+			function (e) { globalThis.__settled = "rejected:" + e.message; }
+		);
+		"started";
+	`)
+	j.DispatchPendingActions()
+	if got := awaitNotPending(t, j, `globalThis.__settled`); got != `{"cancelled":false}` {
+		t.Fatalf("settled = %v, want {\"cancelled\":false}", got)
+	}
+}
+
+// Executor errors reject the promise (TS: errors throw).
+func TestActionDispatcherRejectsOnError(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	j.SetActionExecutor(func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+		return nil, errors.New("switch vetoed by the host")
+	})
+	evalJS(t, j, "a2.js", `
+		globalThis.__settled = "pending";
+		__piMakeAction("switchSession")("/some/path").then(
+			function (v) { globalThis.__settled = "resolved:" + JSON.stringify(v); },
+			function (e) { globalThis.__settled = "rejected:" + e.message; }
+		);
+		"started";
+	`)
+	j.DispatchPendingActions()
+	if got := awaitNotPending(t, j, `globalThis.__settled`); got != "rejected:switch vetoed by the host" {
+		t.Fatalf("settled = %v, want rejection with the executor error", got)
+	}
+}
+
+// No executor wired → every action rejects (the silent-no-op TS default is
+// handled at the runner layer, not the dispatcher).
+func TestActionDispatcherRejectsWithoutExecutor(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	evalJS(t, j, "a3.js", `
+		globalThis.__settled = "pending";
+		__piMakeAction("waitForIdle")().then(
+			function (v) { globalThis.__settled = "resolved"; },
+			function (e) { globalThis.__settled = "rejected"; }
+		);
+		"started";
+	`)
+	j.DispatchPendingActions()
+	if got := awaitNotPending(t, j, `globalThis.__settled`); got != "rejected" {
+		t.Fatalf("settled = %v, want rejection without an executor", got)
+	}
+}
+
+// The eval pumps pending jobs across entries: the handler-side
+// `await ctx.newSession()` continuation resumes when the dispatcher settles
+// (probe-verified; this test pins it so a qjs upgrade that drops the pump
+// surfaces here).
+func TestActionDispatcherResumesAwaitContinuation(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	j.SetActionExecutor(func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+		return map[string]any{"cancelled": false}, nil
+	})
+	evalJS(t, j, "a4.js", `
+		globalThis.__resumed = false;
+		(async function () {
+			var r = await __piMakeAction("newSession")();
+			globalThis.__resumed = (r && r.cancelled === false);
+		})();
+		"started";
+	`)
+	j.DispatchPendingActions()
+	// Poll FOR the value: the continuation resumes on a later eval's job
+	// pump, so the first read can legitimately see the not-yet-resumed
+	// "false" (unlike the settled-marker polls, "false" is a valid
+	// intermediate state here).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := evalString(t, j, `String(globalThis.__resumed)`); got == "true" {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("continuation resumed = %v, want true (job pump)", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A panicking executor must reject, not kill the dispatcher (recovered into a
+// rejection).
+func TestActionDispatcherRecoversExecutorPanic(t *testing.T) {
+	j, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	defer j.Close()
+
+	j.SetActionExecutor(func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+		panic("This extension ctx is stale after session replacement or reload.")
+	})
+	evalJS(t, j, "a5.js", `
+		globalThis.__settled = "pending";
+		__piMakeAction("newSession")().then(
+			function (v) { globalThis.__settled = "resolved"; },
+			function (e) { globalThis.__settled = "rejected"; }
+		);
+		"started";
+	`)
+	j.DispatchPendingActions() // must not panic the test goroutine
+	if got := awaitNotPending(t, j, `globalThis.__settled`); got != "rejected" {
+		t.Fatalf("settled = %v, want rejection after an executor panic", got)
+	}
+	// The dispatcher must still work afterwards.
+	evalJS(t, j, "a5b.js", `
+		globalThis.__settled2 = "pending";
+		__piMakeAction("newSession")().then(
+			function (v) { globalThis.__settled2 = "resolved"; },
+			function (e) { globalThis.__settled2 = "rejected"; }
+		);
+		"started";
+	`)
+	j.SetActionExecutor(func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+		return map[string]any{"cancelled": false}, nil
+	})
+	j.DispatchPendingActions()
+	if got := awaitNotPending(t, j, `globalThis.__settled2`); got != "resolved" {
+		t.Fatalf("after-panic dispatch = %v, want resolved", got)
 	}
 }

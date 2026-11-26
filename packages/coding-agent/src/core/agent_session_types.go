@@ -123,10 +123,13 @@ type ExtensionRunnerRef struct {
 }
 
 type ExtensionBindings struct {
-	UIContext 		extensions.ExtensionUIContext
-	CommandContextActions extensions.ExtensionCommandContextActions
-	ShutdownHandler extensions.ShutdownHandler
-	OnError 		extensions.ExtensionErrorListener
+	UIContext extensions.ExtensionUIContext
+	// CommandContextActions (F1): explicit command-action overrides. nil (all
+	// current modes) keeps the session's runtime-injected defaults; TS's
+	// bindCommandContext(?actions) has the same optional shape.
+	CommandContextActions *extensions.ExtensionCommandContextActions
+	ShutdownHandler       extensions.ShutdownHandler
+	OnError               extensions.ExtensionErrorListener
 }
 
 type PromptOptions struct {

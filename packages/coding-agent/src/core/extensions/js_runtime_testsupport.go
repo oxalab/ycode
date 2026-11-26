@@ -8,7 +8,9 @@ package extensions
 // This file is compiled into the package but only referenced from tests.
 
 import (
+	"encoding/json"
 	"fmt"
+	"testing"
 
 	"github.com/fastschema/qjs"
 )
@@ -67,4 +69,64 @@ func (j *JSRuntime) lastRegisteredHandler() (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("no handlers registered")
+}
+
+// PinCaptureFunctionForTest pins a JS function that records its arguments
+// (JSON) into globalThis.__capturedArgs and returns {ok:true}. Exported
+// test-support for cross-package tests (the ycode-package withSession
+// end-to-end test drives it through the F1 dispatcher).
+func (j *JSRuntime) PinCaptureFunctionForTest() (int64, error) {
+	var handle int64
+	j.mu.Lock()
+	err := j.safeCall(func() error {
+		v, eerr := j.ctx.Eval("pin.js", qjs.Code(`(function(){
+			globalThis.__capturedArgs = null;
+			return __piPin(function () {
+				globalThis.__capturedArgs = JSON.stringify(Array.prototype.slice.call(arguments));
+				return { ok: true };
+			});
+		})()`), qjs.TypeGlobal())
+		if eerr != nil {
+			return eerr
+		}
+		if v == nil {
+			return fmt.Errorf("pin returned nil")
+		}
+		handle = int64(v.Int32())
+		v.Free()
+		return nil
+	})
+	j.mu.Unlock()
+	return handle, err
+}
+
+// CapturedArgsForTest reads back globalThis.__capturedArgs (nil when the
+// pinned function hasn't run). See PinCaptureFunctionForTest.
+func (j *JSRuntime) CapturedArgsForTest(t *testing.T) []any {
+	t.Helper()
+	var raw string
+	j.mu.Lock()
+	err := j.safeCall(func() error {
+		v, eerr := j.ctx.Eval("read.js", qjs.Code(`globalThis.__capturedArgs === null ? "null" : globalThis.__capturedArgs`), qjs.TypeGlobal())
+		if eerr != nil {
+			return eerr
+		}
+		if v != nil {
+			raw = v.String()
+			v.Free()
+		}
+		return nil
+	})
+	j.mu.Unlock()
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	var out []any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("captured args not JSON: %v (%s)", err, raw)
+	}
+	return out
 }

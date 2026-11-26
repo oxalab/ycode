@@ -131,7 +131,9 @@ func (s *AgentSession) replaceMessageInPlace(original, replacement any) {
 // Mirrors TS: bindExtensions() lines 2035-2052
 func (s *AgentSession) BindExtensions(bindings ExtensionBindings) error {
 	s.extensionUIContext = bindings.UIContext
-	s.extensionCommandContextActions = bindings.CommandContextActions
+	if bindings.CommandContextActions != nil {
+		s.extensionCommandContextActions = bindings.CommandContextActions
+	}
 	if bindings.ShutdownHandler != nil {
 		s.extensionShutdownHandler = bindings.ShutdownHandler
 	}
@@ -168,7 +170,7 @@ func (s *AgentSession) applyExtensionBindings(runner *extensions.ExtensionRunner
 		return
 	}
 	runner.SetUIContext(&s.extensionUIContext)
-	runner.BindCommandContext(&s.extensionCommandContextActions)
+	runner.BindCommandContext(s.extensionCommandContextActions)
 }
 
 // extendResourcesFromExtensions asks extensions to discover resources and reloads.
@@ -538,6 +540,24 @@ func (s *AgentSession) buildRuntime(activeToolNames []string, flagValues map[str
 					return nil
 				}
 				return s.extensionRunner.CreateContext()
+			})
+			// F1: the command bridge + deferred-action executor. The command
+			// provider returns CreateCommandContext (base ctx + the six
+			// session-control action keys) so ONLY command handlers render
+			// them — event handlers, tools, and shortcuts get the plain ctx
+			// (TS ExtensionCommandContext vs ExtensionContext, types.ts:1066
+			// vs 1079). The executor routes through the session's injected
+			// callbacks and runs on the dispatcher goroutine OUTSIDE j.mu:
+			// session switches emit extension events, which re-enter the
+			// runtime via ordinary j.mu contention on their own.
+			jr.SetCommandCtxProvider(func() map[string]any {
+				if s.extensionRunner == nil {
+					return nil
+				}
+				return s.extensionRunner.CreateCommandContext()
+			})
+			jr.SetActionExecutor(func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+				return executeJSAction(s, jr, name, payload, withSessionID)
 			})
 		}
 	}
