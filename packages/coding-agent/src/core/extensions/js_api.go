@@ -127,11 +127,10 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 				return nil, fmt.Errorf("pi.registerCommand: %w", err)
 			}
 			goHandler = func(argsStr string, _ context.Context) error {
-				// Story 42 (C16): command handlers get the rich runner ctx too
-				// (TS ExtensionCommandContext; the command-only actions —
-				// waitForIdle/newSession/fork/... — stay deferred, documented
-				// residual).
-				runnerCtx := jrt.runnerCtxMap()
+				// F1: command handlers get the ExtensionCommandContext — the
+				// command provider (base ctx + the six session-control
+				// actions) falling back to the tool provider, then {"cwd"}.
+				runnerCtx := jrt.ctxProviderChain()
 				if runnerCtx == nil {
 					runnerCtx = map[string]any{"cwd": cwd}
 				}
@@ -355,7 +354,10 @@ func (j *jsExtensionAPI) PIValue() *qjs.Value { return j.pi }
 func setMethod(ctx *qjs.Context, obj *qjs.Value, name, globalFn string) error {
 	g := ctx.Global()
 	fn := g.GetPropertyStr(globalFn)
-	defer fn.Free()
+	// NO Free: GetPropertyStr hands us one reference and SetPropertyStr
+	// CONSUMES it (the F1 ref-accounting fix — freeing here left the value
+	// one ref short for two holders, the latent corruption behind the
+	// story-42-era heap fragility).
 	obj.SetPropertyStr(name, fn)
 	return nil
 }

@@ -1079,11 +1079,18 @@ missing feature/surface, LOW = cosmetic/wording.
   re-triggerable in isolation. Full suite + vet + `-count=3` green.
   **Residuals (documented, feature-sized): command-context actions
   (waitForIdle/newSession/fork/navigateTree/switchSession/reload) not
-  bridged to JS command handlers (BindCommandContext has no production
-  caller); ReplacedSessionContext; live AbortSignal (addEventListener /
-  polling mid-execute); oauth login-callback function bridging (the story-38
-  residual NARROWS to this — non-oauth provider registration from extensions
-  now works end-to-end); pi.exec (pre-existing v1 stub).**
+  bridged to JS command handlers — CORRECTED 2026-11-25: BindCommandContext
+  IS production-wired (applyExtensionBindings, all three modes) and
+  CreateCommandContext exposes all six; the real gap is BuildJSContext,
+  which drops every func-valued action, so JS handlers get a data-only ctx
+  (js_context.go's header documents this as the v1.x deferral);
+  ReplacedSessionContext (Go side complete — CreateReplacedSessionContext is
+  used by finishSessionReplacement; no JS rendering); live AbortSignal
+  (addEventListener / polling mid-execute); oauth login-callback function
+  bridging (the story-38 residual NARROWS to this — non-oauth provider
+  registration from extensions now works end-to-end); pi.exec (pre-existing
+  v1 stub). These five are the post-audit feature roadmap
+  (docs/feature-roadmap.md, F1-F4).**
 - **C15 LOW — ✅ FIXED (2026-10-24, story 25; grab-bag verified item-by-item,
   3 sub-items were already STALE)** — STALE (parity, no code): bash abort
   wording ("Command aborted", TestExecAbortWording), "(no output)" placeholder

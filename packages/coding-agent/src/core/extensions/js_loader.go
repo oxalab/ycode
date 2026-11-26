@@ -49,19 +49,26 @@ func loadJSExtension(extensionPath, cwd string, eventBus EventBus, runtime *Exte
 		return nil, err
 	}
 
-	// 4. Eval the CJS module to get the factory handle.
-	factoryHandle, err := jsrt.EvalModule(resolvedPath, js)
-	if err != nil {
-		return nil, err
-	}
-
-	// 5. Build the *Extension + JS-backed `pi` object, then invoke the factory.
+	// 4. Build the *Extension + JS-backed `pi` object FIRST — before the
+	//    module eval (the order every test fixture uses).
 	extension := NewExtension(extensionPath, resolvedPath, nil)
 	jsAPI, err := BuildJSAPI(jsrt, extension, runtime, cwd, eventBus)
 	if err != nil {
 		return nil, fmt.Errorf("build pi: %w", err)
 	}
-	defer jsrt.SafeFree(jsAPI.PIValue())
+	// NO SafeFree(jsAPI.PIValue()) here: InvokeFactory stashes the pi value on
+	// globalThis.__pi and resets the property afterwards — qjs SetPropertyStr
+	// CONSUMES the transferred reference and the reset releases it, so the
+	// value is already dead when this function returns (the same ownership
+	// contract story 42 established for the Call*WithJSCtx ctx values; the
+	// defer here was a latent double-free that detonated as heap corruption
+	// once any perturbation shifted allocation patterns).
+
+	// 5. Eval the CJS module to get the factory handle.
+	factoryHandle, err := jsrt.EvalModule(resolvedPath, js)
+	if err != nil {
+		return nil, err
+	}
 
 	// 6. Invoke the factory — this is where the extension calls pi.on/registerTool
 	//    and populates the maps.

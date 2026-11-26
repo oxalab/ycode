@@ -128,8 +128,22 @@ func (r *AgentSessionRuntime) SetBeforeSessionInvalidate(fn func()) {
 // injectSessionCallbacks wires the runtime's session-replacement methods into the session
 // so extension actions (NewSession, Fork, SwitchSession) can delegate to the runtime.
 func (r *AgentSessionRuntime) injectSessionCallbacks() {
+	// F1: the callbacks honor the opts keys the JS executor threads —
+	// parentSession/withSession for newSession (TS newSession options,
+	// types.ts:338-345), position/withSession for fork, withSession for
+	// switchSession. The withSession wrapper (a typed func value inside the
+	// map — internal convention) runs inside finishSessionReplacement, after
+	// the new session is applied and messages are loaded: TS-faithful
+	// ordering (agent-session-runtime.ts:200-232).
 	r.session.onNewSession = func(opts map[string]any) (map[string]bool, error) {
-		result, err := r.NewSession(&NewSessionRuntimeOptions{})
+		nOpts := &NewSessionRuntimeOptions{}
+		if p, ok := opts["parentSession"].(string); ok {
+			nOpts.ParentSession = p
+		}
+		if ws, ok := opts["withSession"].(func(ctx *extensions.ReplacedSessionContext) error); ok {
+			nOpts.WithSession = ws
+		}
+		result, err := r.NewSession(nOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +151,14 @@ func (r *AgentSessionRuntime) injectSessionCallbacks() {
 	}
 
 	r.session.onFork = func(entryID string, opts map[string]any) (map[string]bool, error) {
-		result, err := r.Fork(entryID, &ForkOptions{})
+		fOpts := &ForkOptions{}
+		if p, ok := opts["position"].(string); ok {
+			fOpts.Position = p
+		}
+		if ws, ok := opts["withSession"].(func(ctx *extensions.ReplacedSessionContext) error); ok {
+			fOpts.WithSession = ws
+		}
+		result, err := r.Fork(entryID, fOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -145,11 +166,49 @@ func (r *AgentSessionRuntime) injectSessionCallbacks() {
 	}
 
 	r.session.onSwitchSession = func(sessionPath string, opts map[string]any) (map[string]bool, error) {
-		result, err := r.SwitchSession(sessionPath, &SwitchSessionOptions{})
+		sOpts := &SwitchSessionOptions{}
+		if ws, ok := opts["withSession"].(func(ctx *extensions.ReplacedSessionContext) error); ok {
+			sOpts.WithSession = ws
+		}
+		result, err := r.SwitchSession(sessionPath, sOpts)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]bool{"cancelled": result.Cancelled}, nil
+	}
+
+	// F1: the session's default command-context actions — the six real,
+	// runtime-backed impls. TS wires these per-mode (interactive-mode.ts:
+	// 1462-1534, print-mode.ts:67-100, rpc-mode.ts:310-336); the runtime is
+	// the one place holding both the session and the replacement machinery,
+	// so the defaults live here. An explicit
+	// ExtensionBindings.CommandContextActions override (applied later by
+	// BindExtensions) still wins; with no bindings at all the runner keeps
+	// its silent no-op constructor defaults (TS bindCommandContext(undefined)).
+	s := r.session
+	s.extensionCommandContextActions = &extensions.ExtensionCommandContextActions{
+		WaitForIdle: func() error {
+			s.Agent.WaitForIdle()
+			return nil
+		},
+		NewSession: s.onNewSession,
+		Fork:       s.onFork,
+		NavigateTree: func(targetID string, opts map[string]any) (map[string]bool, error) {
+			// Go's NavigateTree takes no options (no summarize/instructions
+			// variants — documented divergence from TS types.ts:351-355).
+			s.NavigateTree(targetID)
+			return map[string]bool{"cancelled": false}, nil
+		},
+		SwitchSession: s.onSwitchSession,
+		Reload: func() error {
+			// TS interactive guards reload while streaming/compacting
+			// (interactive-mode.ts:4778-4786); extension-invoked reload gets
+			// the same guard here.
+			if s.IsStreaming() || s.IsCompacting() {
+				return fmt.Errorf("Wait for the current response to finish before reloading.")
+			}
+			return s.Reload()
+		},
 	}
 }
 

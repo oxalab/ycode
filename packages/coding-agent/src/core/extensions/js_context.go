@@ -49,8 +49,9 @@ func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 // corrupts the WASM heap; verified by probe). Only free it yourself if you do
 // NOT pass it to the bridge.
 //
-// Caller holds jrt.mu (this is invoked from inside fireJSON's call chain,
-// which is already locked).
+// Threading: call sites do NOT hold jrt.mu (the four js_api.go bridges call
+// it before CallXxxWithJSCtx, which locks). Internal helpers that need the
+// runtime (actionShim) lock it themselves — do NOT call this under j.mu.
 func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error) {
 	ctx := jrt.Context()
 	obj := ctx.NewObject()
@@ -107,7 +108,138 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 		obj.SetPropertyStr("ui", ui)
 	}
 
+	// --- State-changing actions (F1): abort/compact/shutdown are
+	// ExtensionContext members in the reference (types.ts:298-327) — every
+	// ctx (events, tools, shortcuts, commands) carries them. Their Go bodies
+	// emit extension events (abort tears down the agent run, shutdown exits,
+	// compact compacts), so they run fire-and-forget on their own goroutine:
+	// invoked synchronously inside a handler's Eval, the nested emit would
+	// re-enter qjs and deadlock (the story-42 compact precedent). JS-visible
+	// semantics match the reference (void → undefined immediately).
+	setFireAndForget(ctx, obj, "abort", runnerCtx["abort"])
+	setFireAndForget(ctx, obj, "compact", wrapCompactFn(runnerCtx["compact"]))
+	setFireAndForget(ctx, obj, "shutdown", runnerCtx["shutdown"])
+
+	// --- Command-only actions (F1): waitForIdle/newSession/fork/navigateTree/
+	// switchSession/reload exist ONLY on the command ctx (TS
+	// ExtensionCommandContext, types.ts:333-364) — the CreateContext map used
+	// for events/tools/shortcuts never carries them, so the TS interface
+	// split falls out of which map the caller hands us. Each renders as a
+	// __piMakeAction shim returning a native Promise that the Go dispatcher
+	// settles later (they emit session events; see js_runtime.go).
+	for _, name := range []string{"waitForIdle", "newSession", "fork", "navigateTree", "switchSession", "reload"} {
+		if _, present := runnerCtx[name]; !present {
+			continue
+		}
+		if shim := jrt.actionShim(name); shim != nil {
+			obj.SetPropertyStr(name, shim) // consumes shim's ref — no Free
+		}
+	}
+
 	return obj, nil
+}
+
+// setFireAndForget installs fn as a JS method on obj that invokes it on its
+// own goroutine and returns undefined immediately. fnValue is the raw map
+// entry; only plain func() values render (a nil func or a differently-typed
+// entry is skipped — the JS property stays absent, matching the reference's
+// undefined).
+func setFireAndForget(ctx *qjs.Context, obj *qjs.Value, jsName string, fnValue any) {
+	fn, ok := fnValue.(func())
+	if !ok || fn == nil {
+		return
+	}
+	scratch := "__pi_ff_" + jsName
+	ctx.SetFunc(scratch, func(t *qjs.This) (*qjs.Value, error) {
+		go func() {
+			defer func() { _ = recover() }() // a panicking action must not crash the host
+			fn()
+		}()
+		return t.Context().NewUndefined(), nil
+	})
+	fnVal := ctx.Global().GetPropertyStr(scratch)
+	// NO Free: SetPropertyStr consumes the get's reference (the global keeps
+	// its own) — freeing left two holders on one ref.
+	obj.SetPropertyStr(jsName, fnVal)
+}
+
+// BuildReplacedSessionContext renders a ReplacedSessionContext for a JS
+// withSession callback: the replacement session's command ctx (via rc.Ctx())
+// plus sendMessage/sendUserMessage (TS ReplacedSessionContext adds both,
+// types.ts:366-381). Both send methods run fire-and-forget and take a single
+// argument coerced with .String() — object fidelity (CustomMessage shapes) is
+// a documented v1 limitation.
+//
+// OWNERSHIP: the returned value holds one reference — hand it to
+// CallShortcutHandler (which consumes it), never Free it.
+func BuildReplacedSessionContext(jrt *JSRuntime, rc *ReplacedSessionContext) (*qjs.Value, error) {
+	runnerCtx := func() (m map[string]any) {
+		if rc == nil || rc.Ctx == nil {
+			return nil
+		}
+		defer func() {
+			if recover() != nil {
+				m = nil // stale replacement runner (assertActive) → bare ctx
+			}
+		}()
+		return rc.Ctx()
+	}()
+	if runnerCtx == nil {
+		runnerCtx = map[string]any{}
+	}
+	obj, err := BuildJSContext(jrt, runnerCtx)
+	if err != nil {
+		return nil, err
+	}
+	if rc != nil {
+		setSingleArgFireAndForget(jrt.Context(), obj, "sendMessage", "__pi_ff_sendMessage", func(arg string) {
+			if rc.SendMessage != nil {
+				_ = rc.SendMessage(arg) //nolint:errcheck — fire-and-forget; failures surface via session events
+			}
+		})
+		setSingleArgFireAndForget(jrt.Context(), obj, "sendUserMessage", "__pi_ff_sendUserMessage", func(arg string) {
+			if rc.SendUserMessage != nil {
+				_ = rc.SendUserMessage(arg, nil) //nolint:errcheck — fire-and-forget
+			}
+		})
+	}
+	return obj, nil
+}
+
+// setSingleArgFireAndForget installs a JS method on obj that takes one
+// argument (coerced with .String()), passes it to fn on a goroutine, and
+// returns undefined immediately.
+func setSingleArgFireAndForget(ctx *qjs.Context, obj *qjs.Value, jsName, scratch string, fn func(arg string)) {
+	ctx.SetFunc(scratch, func(t *qjs.This) (*qjs.Value, error) {
+		arg := ""
+		if args := t.Args(); len(args) > 0 {
+			arg = args[0].String()
+		}
+		go func() {
+			defer func() { _ = recover() }()
+			fn(arg)
+		}()
+		return t.Context().NewUndefined(), nil
+	})
+	fnVal := ctx.Global().GetPropertyStr(scratch)
+	// NO Free — SetPropertyStr consumed the get's reference (see
+	// setFireAndForget).
+	obj.SetPropertyStr(jsName, fnVal)
+}
+
+// wrapCompactFn adapts the map's compact entry — func(*CompactOptions) error
+// in the runner map (story-42 binding, itself already fire-and-forget) — to
+// the plain func() the shim needs. A JS compact() call takes no arguments
+// (v1; TS takes optional CompactOptions).
+func wrapCompactFn(v any) func() {
+	fn, ok := v.(func(*CompactOptions) error)
+	if !ok || fn == nil {
+		if f0, ok0 := v.(func()); ok0 {
+			return f0
+		}
+		return nil
+	}
+	return func() { _ = fn(nil) }
 }
 
 // buildJSUI constructs the JS-side `ui` object from a Go *ExtensionUIContext.
@@ -158,8 +290,9 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 		return ctx.NewUndefined(), nil
 	})
 	notifyFn := ctx.Global().GetPropertyStr("__ui_notify")
+	// NO Free: SetPropertyStr consumes the get's reference (F1 ref-accounting
+	// fix — the old Free left two holders on one ref).
 	obj.SetPropertyStr("notify", notifyFn)
-	notifyFn.Free() // GetPropertyStr returns a reference; freeing the ref is safe after assign
 
 	// ui.status(key, text)
 	ctx.SetFunc("__ui_status", func(t *qjs.This) (*qjs.Value, error) {
@@ -177,8 +310,8 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 		return ctx.NewUndefined(), nil
 	})
 	statusFn := ctx.Global().GetPropertyStr("__ui_status")
+	// NO Free — SetPropertyStr consumed the get's reference (see notify).
 	obj.SetPropertyStr("status", statusFn)
-	statusFn.Free()
 
 	// ui.input(title, placeholder?, opts?) → Promise<string>
 	ctx.SetAsyncFunc("__ui_input", func(this *qjs.This) {
@@ -202,8 +335,8 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 		this.Promise().Resolve(this.Context().NewString(text))
 	})
 	inputFn := ctx.Global().GetPropertyStr("__ui_input")
+	// NO Free — SetPropertyStr consumed the get's reference (see notify).
 	obj.SetPropertyStr("input", inputFn)
-	inputFn.Free()
 
 	// ui.select(title, options, opts?) → Promise<number>
 	// Returns the selected index, or -1 if the user cancels.
@@ -234,8 +367,8 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 		this.Promise().Resolve(this.Context().NewInt32(int32(idx)))
 	})
 	selectFn := ctx.Global().GetPropertyStr("__ui_select")
+	// NO Free — SetPropertyStr consumed the get's reference (see notify).
 	obj.SetPropertyStr("select", selectFn)
-	selectFn.Free()
 
 	// ui.confirm(title, message, opts?) → Promise<boolean>
 	ctx.SetAsyncFunc("__ui_confirm", func(this *qjs.This) {
@@ -259,8 +392,8 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 		this.Promise().Resolve(this.Context().NewBool(ok))
 	})
 	confirmFn := ctx.Global().GetPropertyStr("__ui_confirm")
+	// NO Free — SetPropertyStr consumed the get's reference (see notify).
 	obj.SetPropertyStr("confirm", confirmFn)
-	confirmFn.Free()
 
 	// ui.editor(title, prefill?) → Promise<string>
 	// Multi-line editor (no timeout — interrupting a compose flow mid-edit
@@ -282,8 +415,8 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 		this.Promise().Resolve(this.Context().NewString(text))
 	})
 	editorFn := ctx.Global().GetPropertyStr("__ui_editor")
+	// NO Free — SetPropertyStr consumed the get's reference (see notify).
 	obj.SetPropertyStr("editor", editorFn)
-	editorFn.Free()
 
 	return obj
 }
@@ -360,19 +493,16 @@ func isJSONSafe(v any) bool {
 	buf, err = jsonMarshal(v)
 	return err == nil && len(buf) > 0 && string(buf) != "null"
 }
-// Note on the v1.x deferrals (documented for future implementers):
+// Note on the former v1.x deferrals (implemented in F1, 2026-11-25):
 //
-// The runner's ctx map also carries state-changing callbacks:
-//   - abort()              — abort the current agent operation
-//   - compact(opts)        — trigger context compaction
-//   - shutdown()           — shut down the session
-//   - waitForIdle()        — (command ctx only) block until agent idle
-//   - newSession/fork/navigateTree/switchSession/reload — (command ctx only)
-//
-// Bridging these requires calling back into Go from inside a JS handler —
-// which is a re-entrancy surface (the handler is itself running inside a
-// qjs Eval). The clean way is to queue the Go-side callback on a channel and
-// let the host execute it after the Eval returns, then resume the JS if it
-// needs the result. That's the v1.x work item. For now, handlers get the
-// read-only ctx fields above, which covers the common cases (cwd, model,
-// isIdle, contextUsage, systemPrompt).
+// The runner's ctx map carries state-changing callbacks. abort/compact/
+// shutdown render as fire-and-forget shims on every ctx. The six command-only
+// actions (waitForIdle/newSession/fork/navigateTree/switchSession/reload)
+// render as __piMakeAction shims that return native Promises settled by the
+// Go dispatcher (js_runtime.go) — they emit session events, so they can never
+// run inside the submitting handler's Eval (qjs forbids re-entrancy). The
+// eval's job pump resumes `await ctx.action()` continuations (probe-verified
+// 2026-11-25). Remaining known divergences: newSession's setup(sessionManager)
+// callback is not bridged (SessionManager has no JS rendering), and the
+// modes' TUI glue (editor text, loading animation) does not run for
+// extension-initiated switches.

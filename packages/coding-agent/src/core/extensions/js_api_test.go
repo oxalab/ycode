@@ -30,7 +30,8 @@ func newAPIFixture(t *testing.T) (jsAPI *jsExtensionAPI, ext *Extension, jrt *JS
 	if err != nil {
 		t.Fatalf("BuildJSAPI: %v", err)
 	}
-	t.Cleanup(func() { jrt.SafeFree(jsAPI.PIValue()) })
+	// NO SafeFree(jsAPI.PIValue()): InvokeFactory consumes the pi value's
+	// reference (the __pi global stash + reset) — callers never free it.
 	return jsAPI, ext, jrt
 }
 
@@ -291,7 +292,8 @@ func TestJSAPI_RegisterFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildJSAPI: %v", err)
 	}
-	t.Cleanup(func() { jrt.SafeFree(jsAPI2.PIValue()) })
+	// NO SafeFree(jsAPI2.PIValue()) — InvokeFactory consumes it (see
+	// newAPIFixture).
 
 	factoryJS := []byte(`module.exports = function (pi) {
 		pi.registerFlag("verbose", { type: "boolean", default: false, description: "Verbose output" });
@@ -315,5 +317,110 @@ func TestJSAPI_RegisterFlag(t *testing.T) {
 	// Flag default should be seeded into runtime.FlagValues.
 	if v, ok := rt.FlagValues["verbose"]; !ok || v != false {
 		t.Errorf("FlagValues[verbose] = %v, want false", v)
+	}
+}
+
+// F1 (TS interface split): command handlers receive ExtensionCommandContext —
+// the six session-control actions PLUS the base actions — while event
+// handlers receive the plain ExtensionContext without the six
+// (types.ts:1066 vs 1079). The command bridge resolves the command provider;
+// the event bridge the tool provider.
+func TestJSAPI_CommandVsEventCtxSurface(t *testing.T) {
+	jsAPI, ext, jrt := newAPIFixture(t)
+
+	// Command provider: base + the six; tool provider: base only.
+	base := map[string]any{"cwd": "/cmd/vs/event", "abort": func() {}}
+	jrt.SetCommandCtxProvider(func() map[string]any {
+		cmd := map[string]any{"cwd": "/cmd/vs/event", "abort": func() {}}
+		cmd["waitForIdle"] = func() error { return nil }
+		cmd["newSession"] = func(opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		}
+		cmd["fork"] = func(entryID string, opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		}
+		cmd["navigateTree"] = func(targetID string, opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		}
+		cmd["switchSession"] = func(sessionPath string, opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		}
+		cmd["reload"] = func() error { return nil }
+		return cmd
+	})
+	jrt.SetToolCtxProvider(func() map[string]any { return base })
+
+	factoryJS := []byte(`module.exports = function (pi) {
+		pi.registerCommand("probeCmd", {
+			description: "probe",
+			handler: function (args, ctx) {
+				globalThis.__cmdCtx = JSON.stringify({
+					newSession: typeof ctx.newSession,
+					waitForIdle: typeof ctx.waitForIdle,
+					abort: typeof ctx.abort
+				});
+			}
+		});
+		pi.on("session_start", function (event, ctx) {
+			return {
+				newSession: typeof ctx.newSession,
+				waitForIdle: typeof ctx.waitForIdle,
+				abort: typeof ctx.abort
+			};
+		});
+	};`)
+	js, err := TranspileExtension("/test/split.js", factoryJS, 1)
+	if err != nil {
+		t.Fatalf("transpile: %v", err)
+	}
+	fh, err := jsAPI.jrt.EvalModule("/test/split.js", js)
+	if err != nil {
+		t.Fatalf("EvalModule: %v", err)
+	}
+	if err := jsAPI.jrt.InvokeFactory(fh, jsAPI.PIValue()); err != nil {
+		t.Fatalf("InvokeFactory: %v", err)
+	}
+
+	// Command path: all six render (spot-check three) + base abort.
+	cmd := ext.Commands["probeCmd"]
+	if cmd == nil || cmd.Handler == nil {
+		t.Fatal("probeCmd not registered")
+	}
+	if err := cmd.Handler("", nil); err != nil {
+		t.Fatalf("command handler: %v", err)
+	}
+	var cmdCtx map[string]string
+	if err := jsonUnmarshalText(evalString(t, jsAPI.jrt, `globalThis.__cmdCtx`), &cmdCtx); err != nil {
+		t.Fatalf("cmd ctx echo: %v", err)
+	}
+	for _, k := range []string{"newSession", "waitForIdle"} {
+		if cmdCtx[k] != "function" {
+			t.Errorf("command ctx.%s = %q, want function", k, cmdCtx[k])
+		}
+	}
+	if cmdCtx["abort"] != "function" {
+		t.Errorf("command ctx.abort = %q, want function", cmdCtx["abort"])
+	}
+
+	// Event path: the six must be ABSENT (undefined), base abort present. The
+	// pi.on bridge renders whatever map the runner's Emit passes (js_api.go
+	// on-bridge: ctxVal) — a runner-shaped base ctx here.
+	handlers := ext.Handlers["session_start"]
+	if len(handlers) != 1 {
+		t.Fatalf("expected 1 session_start handler, got %d", len(handlers))
+	}
+	got, err := handlers[0](map[string]any{"type": "session_start"}, map[string]any{
+		"cwd":   "/cmd/vs/event",
+		"abort": func() {},
+	})
+	if err != nil {
+		t.Fatalf("event handler: %v", err)
+	}
+	m, _ := got.(map[string]any)
+	if m["newSession"] != "undefined" || m["waitForIdle"] != "undefined" {
+		t.Errorf("event ctx got command actions: %v (TS: only commands carry them)", m)
+	}
+	if m["abort"] != "function" {
+		t.Errorf("event ctx.abort = %v, want function (base action)", m["abort"])
 	}
 }

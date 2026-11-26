@@ -517,6 +517,11 @@ type ReplacedSessionContext struct {
 	SendUserMessage func(content string, images []any) error
 	// Actions inherited from the extension command context.
 	Actions *ExtensionCommandContextActions
+	// Ctx (F1) exposes the replacement session's runner ctx map so the JS
+	// bridge can render the full command context for withSession callbacks.
+	// Set by AgentSession.CreateReplacedSessionContext; a stale runner's
+	// panic must be recovered by the caller (→ {"cwd"} fallback).
+	Ctx func() map[string]any
 }
 
 // --- Load Result ---

@@ -55,6 +55,52 @@ type JSRuntime struct {
 	// in unit tests that call Definition.Execute directly) falls back to
 	// {"cwd": cwd} — the same no-op-default shape TS's runner uses.
 	toolCtx func() map[string]any
+
+	// commandCtx is the late-bound provider for the COMMAND-ctx map (TS
+	// createCommandContext: the base ctx + the six session-control actions).
+	// Only the pi.registerCommand bridge consults it — TS gives command
+	// handlers an ExtensionCommandContext while event handlers, tools, and
+	// shortcuts get the plain ExtensionContext (types.ts:1066 vs 1079).
+	// Wired alongside toolCtx by the session's runtime. nil → toolCtx →
+	// {"cwd": cwd}.
+	commandCtx func() map[string]any
+
+	// --- F1: deferred action bridge (waitForIdle/newSession/fork/navigateTree/
+	// switchSession/reload). The switch actions emit extension events, so they
+	// can NEVER run inside the submitting handler's bridge call: qjs forbids
+	// Eval re-entrancy (js_runtime.go:124-133) and j.mu is non-reentrant — a
+	// nested emit would deadlock on both. Instead the shim returns a native
+	// Promise, __piSubmitAction only enqueues, and the dispatcher goroutine
+	// executes the request OUTSIDE j.mu (event emits re-enter the runtime via
+	// normal lock contention), then settles the promise from a fresh Eval
+	// entry (__piCompleteAction; the qjs eval pumps pending jobs across
+	// entries — probe-verified 2026-11-25, so `await ctx.newSession()`
+	// continuations resume).
+	actionQ    []*jsActionRequest
+	actionQMu  sync.Mutex
+	actionWake chan struct{}
+	quit       chan struct{}
+	closeOnce  sync.Once
+
+	// actionExec executes one queued action on the dispatcher goroutine.
+	// Wired by the session's runtime (the SetToolCtxProvider seam — the
+	// executor needs the AgentSessionRuntime/AgentSession, which the
+	// extensions package cannot import). nil → every action rejects.
+	actionExec func(name string, payload map[string]any, withSessionID int64) (map[string]any, error)
+
+	// lastCompleteErr: the completion eval's error when one fails (normally
+	// empty). Kept as a field so tests and diagnostics can surface it — a
+	// silently-failing completion would strand the shim promise forever.
+	lastCompleteErr string
+}
+
+// jsActionRequest is one deferred ctx-action invocation enqueued by the JS
+// shim (ctx.newSession() & friends) and executed by the dispatcher goroutine.
+type jsActionRequest struct {
+	id            int64
+	name          string
+	payload       map[string]any // the shim's {arg, opts} JSON, parsed
+	withSessionID int64          // pinned JS fn for options.withSession (0 = none)
 }
 
 // errPoisonedRuntime is returned by every operation after the qjs runtime
@@ -94,6 +140,9 @@ func NewJSRuntime() (*JSRuntime, error) {
 	}
 	j.rt = rt
 	j.ctx = rt.Context()
+	j.actionWake = make(chan struct{}, 1)
+	j.quit = make(chan struct{})
+	j.startActionDispatcher()
 	if err := j.installMinimalShims(); err != nil {
 		j.Close()
 		return nil, err
@@ -107,6 +156,7 @@ func NewJSRuntime() (*JSRuntime, error) {
 // corrupts the handle table). Just reap the runtime. Recover defensively in
 // case Close trips on a poisoned runtime.
 func (j *JSRuntime) Close() {
+	j.closeOnce.Do(func() { close(j.quit) }) // stop the action dispatcher
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	defer func() { _ = recover() }()
@@ -142,6 +192,35 @@ func (j *JSRuntime) installMinimalShims() error {
 		if jsLogger != nil {
 			jsLogger(strings.Join(parts, " "))
 		}
+		return c.NewUndefined(), nil
+	})
+	// __piSubmitAction: the enqueue half of the deferred action bridge. Called
+	// from the __piMakeAction shims during a handler's Eval (j.mu held) — it
+	// must NEVER block or touch qjs beyond reading its args: enqueue + wake.
+	c.SetFunc("__piSubmitAction", func(t *qjs.This) (*qjs.Value, error) {
+		args := t.Args()
+		var id int64
+		var name, payload string
+		var withSessionID int64
+		if len(args) > 0 {
+			id = int64(args[0].Int32())
+		}
+		if len(args) > 1 {
+			name = args[1].String()
+		}
+		if len(args) > 2 {
+			payload = args[2].String()
+		}
+		if len(args) > 3 && !args[3].IsNull() && !args[3].IsUndefined() {
+			withSessionID = int64(args[3].Int32())
+		}
+		req := &jsActionRequest{id: id, name: name, withSessionID: withSessionID}
+		if payload != "" {
+			if err := json.Unmarshal([]byte(payload), &req.payload); err != nil {
+				req.payload = nil
+			}
+		}
+		j.enqueueAction(req)
 		return c.NewUndefined(), nil
 	})
 	// Build the Go-owned holder object. We keep a Go reference (j.holder) so
@@ -181,6 +260,63 @@ func (j *JSRuntime) installMinimalShims() error {
 				case 8: return fn(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
 				default: return fn.apply(null, a);
 			}
+		};
+		// --- Deferred action bridge (F1) ---
+		// The bridge shims live in a SECOND eval below: appending them to
+		// this eval triggered a qjs v0.0.6 eval-shape corruption (flag-default
+		// property reads silently failed and later allocations OOB'd — same
+		// family as the known .apply WASM bug; this binding's eval path is
+		// size/shape-sensitive). A separate, small Eval is stable.
+	})();`), qjs.TypeGlobal())
+	if err != nil {
+		return err
+	}
+	// Action-bridge globals (F1): ctx.newSession() & friends return native
+	// Promises that the Go dispatcher settles later via __piCompleteAction (a
+	// FRESH Eval entry — the switch actions emit extension events and can
+	// never run inside the submitting handler's Eval; qjs forbids
+	// re-entrancy). The eval pumps pending jobs across entries, so
+	// "await ctx.newSession()" continuations resume (probe-verified
+	// 2026-11-25). A separate, small Eval keeps the two bootstrap scripts
+	// independent.
+	_, err = j.ctx.Eval("actions.js", qjs.Code(`(function(){
+		globalThis.__piPendingActions = {};
+		globalThis.__piNextActionId = 1;
+		globalThis.__piCompleteAction = function (id, ok, resultJSON, errMsg) {
+			var p = globalThis.__piPendingActions[id];
+			if (!p) return undefined;
+			delete globalThis.__piPendingActions[id];
+			if (ok) { p.resolve(JSON.parse(resultJSON)); }
+			else { p.reject(new Error(errMsg)); }
+			return undefined;
+		};
+		// __piMakeAction(name) → the ctx.xxx function for one action.
+		// Args normalize: (optionsObj) | (stringArg) | (stringArg, optsObj).
+		// options.withSession (a function) is pinned and passed by handle —
+		// functions don't survive JSON.
+		globalThis.__piMakeAction = function (name) {
+			return function (a, b) {
+				var arg = a;
+				var opts = b;
+				if (a && typeof a === "object" && b === undefined) { opts = a; arg = null; }
+				if (arg === undefined) arg = null;
+				if (opts === undefined || opts === null) opts = {};
+				var withSessionId = null;
+				var cleaned = {};
+				for (var k in opts) {
+					if (k === "withSession" && typeof opts[k] === "function") {
+						withSessionId = __piPin(opts[k]);
+					} else {
+						cleaned[k] = opts[k];
+					}
+				}
+				var payload = JSON.stringify({ arg: arg, opts: cleaned });
+				return new Promise(function (resolve, reject) {
+					var id = globalThis.__piNextActionId++;
+					globalThis.__piPendingActions[id] = { resolve: resolve, reject: reject };
+					__piSubmitAction(id, name, payload, withSessionId);
+				});
+			};
 		};
 	})();`), qjs.TypeGlobal())
 	return err
@@ -476,6 +612,232 @@ func (j *JSRuntime) SetToolCtxProvider(fn func() map[string]any) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.toolCtx = fn
+}
+
+// SetCommandCtxProvider wires the late-bound COMMAND-ctx provider (TS
+// createCommandContext: base ctx + the six session-control actions). Only the
+// pi.registerCommand bridge consults it. Called by the session's runtime; nil
+// falls back to the tool provider, then {"cwd"}.
+func (j *JSRuntime) SetCommandCtxProvider(fn func() map[string]any) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.commandCtx = fn
+}
+
+// commandCtxMap resolves the command ctx at call time with the same
+// stale-panic recovery as runnerCtxMap.
+func (j *JSRuntime) commandCtxMap() (runnerCtx map[string]any) {
+	j.mu.Lock()
+	fn := j.commandCtx
+	j.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			runnerCtx = nil
+		}
+	}()
+	return fn()
+}
+
+// ctxProviderChain returns the effective ctx map for the command bridge:
+// command provider → tool provider → nil (caller applies the {"cwd"} fallback).
+func (j *JSRuntime) ctxProviderChain() map[string]any {
+	if m := j.commandCtxMap(); m != nil {
+		return m
+	}
+	return j.runnerCtxMap()
+}
+
+// actionShim returns a fresh JS function value implementing the named
+// deferred action (ctx.newSession() & friends) via the __piMakeAction factory.
+// The returned value holds one reference — the caller consumes it via
+// SetPropertyStr (the story-42 ownership contract) and must NOT free it.
+// Locks j.mu internally; BuildJSContext's call sites do not hold it.
+func (j *JSRuntime) actionShim(name string) *qjs.Value {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.rt == nil || j.poisoned {
+		return nil
+	}
+	var v *qjs.Value
+	_ = j.safeCall(func() error {
+		var err error
+		v, err = j.ctx.Eval("mkaction.js", qjs.Code(fmt.Sprintf(`__piMakeAction(%s)`, mustJSONString(name))), qjs.TypeGlobal())
+		return err
+	})
+	if j.poisoned || v == nil {
+		return nil // a poisoned runtime's value is dead; Close reaps it
+	}
+	return v
+}
+
+// SetActionExecutor wires the deferred-action executor (the dispatcher's
+// backend). The executor runs OUTSIDE j.mu on the dispatcher goroutine: it
+// may block (waitForIdle), emit extension events (session switches — the
+// emits re-enter the runtime via normal j.mu contention), and must recover
+// its own stale-session panics defensively (dispatchOne also recovers).
+// Returns the action result (marshaled to the promise) and any error.
+func (j *JSRuntime) SetActionExecutor(fn func(name string, payload map[string]any, withSessionID int64) (map[string]any, error)) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.actionExec = fn
+}
+
+// getActionExecutor reads the executor under j.mu.
+func (j *JSRuntime) getActionExecutor() func(name string, payload map[string]any, withSessionID int64) (map[string]any, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.actionExec
+}
+
+// enqueueAction appends a request and wakes the dispatcher. Safe to call from
+// inside a qjs Go-callback (never blocks on j.mu — it only takes actionQMu).
+func (j *JSRuntime) enqueueAction(req *jsActionRequest) {
+	j.actionQMu.Lock()
+	j.actionQ = append(j.actionQ, req)
+	j.actionQMu.Unlock()
+	select {
+	case j.actionWake <- struct{}{}:
+	default:
+	}
+}
+
+// popAction dequeues the next request, or ok=false when the queue is empty.
+func (j *JSRuntime) popAction() (*jsActionRequest, bool) {
+	j.actionQMu.Lock()
+	defer j.actionQMu.Unlock()
+	if len(j.actionQ) == 0 {
+		return nil, false
+	}
+	req := j.actionQ[0]
+	j.actionQ[0] = nil
+	j.actionQ = j.actionQ[1:]
+	return req, true
+}
+
+// startActionDispatcher launches the goroutine that executes queued ctx
+// actions. One request at a time (handlers are sequential by design, and two
+// concurrent session switches would race the runtime teardown). Exits when
+// Close closes j.quit; pending requests are then abandoned.
+func (j *JSRuntime) startActionDispatcher() {
+	go func() {
+		for {
+			select {
+			case <-j.quit:
+				return
+			case <-j.actionWake:
+			}
+			for {
+				req, ok := j.popAction()
+				if !ok {
+					break
+				}
+				if !j.dispatchAction(req) {
+					return
+				}
+			}
+		}
+	}()
+}
+
+// dispatchAction executes one queued action and settles its promise.
+// Returns false when the runtime is dead (closed/poisoned) so the dispatcher
+// goroutine can exit.
+func (j *JSRuntime) dispatchAction(req *jsActionRequest) bool {
+	if j.isDead() {
+		return false
+	}
+	exec := j.getActionExecutor()
+	var result map[string]any
+	var execErr error
+	if exec == nil {
+		execErr = fmt.Errorf("no action executor is wired for this JS runtime")
+	} else {
+		// Run OUTSIDE j.mu. A stale-session panic here must not kill the
+		// dispatcher goroutine — recover into a rejection.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					execErr = fmt.Errorf("action %s panicked: %v", req.name, r)
+				}
+			}()
+			result, execErr = exec(req.name, req.payload, req.withSessionID)
+		}()
+	}
+	if j.isDead() {
+		return false
+	}
+	j.completeAction(req.id, execErr == nil, result, errMsgForAction(execErr))
+	return true
+}
+
+// completeAction settles the shim promise from a FRESH Eval entry (holds
+// j.mu). The resolve schedules the await continuation as a pending job; the
+// eval's job pump resumes it (probe-verified). A missing pending id (runtime
+// closed before completion, or the promise dropped) is a no-op.
+func (j *JSRuntime) completeAction(id int64, ok bool, result map[string]any, errMsg string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.lastCompleteErr = "entered"
+	if j.rt == nil || j.poisoned {
+		j.lastCompleteErr = "dead-runtime"
+		return
+	}
+	resJSON := "null" // JS literal: JSON.parse(null) → null
+	if ok && result != nil {
+		if b, err := json.Marshal(result); err == nil {
+			// The JS side does JSON.parse(resultJSON) — the result must cross
+			// as a QUOTED string literal, not an inline object literal (which
+			// would arrive as an object and stringify to "[object Object]").
+			resJSON = mustJSONString(string(b))
+		}
+	}
+	expr := fmt.Sprintf(`globalThis.__piCompleteAction(%d, %v, %s, %s); "done";`, id, ok, resJSON, mustJSONString(errMsg))
+	if cErr := j.safeCall(func() error {
+		v, err := j.ctx.Eval("action.js", qjs.Code(expr), qjs.TypeGlobal())
+		if v != nil {
+			v.Free()
+		}
+		return err
+	}); cErr != nil {
+		// A failed completion strands the shim promise forever — the error is
+		// kept on the runtime (lastCompleteErr) rather than swallowed.
+		j.lastCompleteErr = cErr.Error()
+	}
+}
+
+// errMsgForAction renders an executor error for the promise rejection.
+func errMsgForAction(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// isDead reports closed-or-poisoned without locking j.mu from the dispatcher
+// (a plain read; Close's rt=nil write is ordered by the j.mu handoff in the
+// worst case and this is only a liveness hint).
+func (j *JSRuntime) isDead() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.rt == nil || j.poisoned
+}
+
+// DispatchPendingActions drains every queued ctx action synchronously (each
+// one executed + settled). Production uses the dispatcher goroutine; tests
+// call this for determinism instead of racing goroutine scheduling.
+func (j *JSRuntime) DispatchPendingActions() {
+	for {
+		req, ok := j.popAction()
+		if !ok {
+			return
+		}
+		if !j.dispatchAction(req) {
+			return
+		}
+	}
 }
 
 // runnerCtxMap resolves the runner ctx at call time (TS createContext's
