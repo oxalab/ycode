@@ -234,7 +234,7 @@ func TestCallToolExecuteWithJSCtxFlatArgs(t *testing.T) {
 	// jsCtx is CONSUMED by the bridge call below (story-42 ownership) — no
 	// deferred free; a pre-consume failure leaks one object until Close.
 	jsCtx := j.Context().NewObject()
-	jsCtx.SetPropertyStr("cwd", j.Context().NewString("/proj"))
+	setPropertyNoLeak(jsCtx, "cwd", j.Context().NewString("/proj"))
 
 	res, err := j.CallToolExecuteWithJSCtx(h, "call-9", map[string]any{"x": 42}, map[string]any{"aborted": false}, jsCtx)
 	if err != nil {
@@ -279,7 +279,7 @@ func TestCallCommandHandlerWithJSCtxArgs(t *testing.T) {
 	h := j.pinCaptureFunction(t)
 	// jsCtx is CONSUMED by the bridge call below — no deferred free.
 	jsCtx := j.Context().NewObject()
-	jsCtx.SetPropertyStr("cwd", j.Context().NewString("/proj"))
+	setPropertyNoLeak(jsCtx, "cwd", j.Context().NewString("/proj"))
 
 	if err := j.CallCommandHandlerWithJSCtx(h, "do-thing", jsCtx); err != nil {
 		t.Fatalf("CallCommandHandlerWithJSCtx: %v", err)
@@ -309,7 +309,7 @@ func TestCallShortcutHandlerSingleCtxArg(t *testing.T) {
 	h := j.pinCaptureFunction(t)
 	// jsCtx is CONSUMED by the bridge call below — no deferred free.
 	jsCtx := j.Context().NewObject()
-	jsCtx.SetPropertyStr("isIdle", j.Context().NewBool(true))
+	setPropertyNoLeak(jsCtx, "isIdle", j.Context().NewBool(true))
 
 	if err := j.CallShortcutHandler(h, jsCtx); err != nil {
 		t.Fatalf("CallShortcutHandler: %v", err)

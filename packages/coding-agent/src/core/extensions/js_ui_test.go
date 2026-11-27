@@ -50,10 +50,12 @@ func TestJSUI_NotifyFromHandler(t *testing.T) {
 		msg string
 	}
 	uiCtx := ExtensionUIContext{
-		Notify: func(msg, level string) { notifyCalls = append(notifyCalls, struct {
-			msg   string
-			level string
-		}{msg, level}) },
+		Notify: func(msg, level string) {
+			notifyCalls = append(notifyCalls, struct {
+				msg   string
+				level string
+			}{msg, level})
+		},
 		Status: func(key, msg string) { statusCalls = append(statusCalls, struct{ key, msg string }{key, msg}) },
 	}
 

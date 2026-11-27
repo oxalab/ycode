@@ -29,7 +29,7 @@ func (j *JSRuntime) buildFakePi() (*qjs.Value, error) {
 	// Install a Go function __test_pi_on(eventName, handler) that pins the
 	// handler via the runtime's registry and records the id.
 	c := j.ctx
-	c.SetFunc("__test_pi_on", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(c, "__test_pi_on", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 2 {
 			return c.NewUndefined(), nil
@@ -37,9 +37,9 @@ func (j *JSRuntime) buildFakePi() (*qjs.Value, error) {
 		eventName := args[0].String()
 		// Pin the handler function via __piPin and capture the returned id.
 		g := c.Global()
-		g.SetPropertyStr("__toPin", args[1])
+		setPropertyNoLeak(g, "__toPin", args[1])
 		idVal, err := c.Eval("pin.js", qjs.Code("__piPin(__toPin)"), qjs.TypeGlobal())
-		g.SetPropertyStr("__toPin", c.NewUndefined())
+		setPropertyNoLeak(g, "__toPin", c.NewUndefined())
 		if err != nil || idVal == nil {
 			return c.NewUndefined(), nil
 		}

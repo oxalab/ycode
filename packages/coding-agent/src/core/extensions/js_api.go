@@ -33,10 +33,10 @@ import (
 //   - the JSRuntime (so it can pin/call JS function values)
 //   - the *qjs.Value of the `pi` object handed to the factory
 type jsExtensionAPI struct {
-	api  ExtensionAPI
-	jrt  *JSRuntime
-	cwd  string
-	pi   *qjs.Value
+	api ExtensionAPI
+	jrt *JSRuntime
+	cwd string
+	pi  *qjs.Value
 }
 
 // BuildJSAPI constructs the JS `pi` object for one extension, wiring every
@@ -53,7 +53,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	// --- Registration methods ---
 
 	// pi.on(eventType, handler)
-	ctx.SetFunc("__pi_on", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_on", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 2 {
 			return ctx.NewUndefined(), nil
@@ -94,7 +94,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.registerTool(toolDef)
-	ctx.SetFunc("__pi_registerTool", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_registerTool", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 1 {
 			return ctx.NewUndefined(), nil
@@ -111,7 +111,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.registerCommand(name, { description, handler, getArgumentCompletions })
-	ctx.SetFunc("__pi_registerCommand", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_registerCommand", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 2 {
 			return ctx.NewUndefined(), nil
@@ -158,7 +158,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.registerShortcut(shortcut, { description, handler })
-	ctx.SetFunc("__pi_registerShortcut", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_registerShortcut", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 2 {
 			return ctx.NewUndefined(), nil
@@ -203,7 +203,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.registerFlag(name, { description, type, default })
-	ctx.SetFunc("__pi_registerFlag", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_registerFlag", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 2 {
 			return ctx.NewUndefined(), nil
@@ -231,7 +231,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.getFlag(name) → boolean | string | undefined
-	ctx.SetFunc("__pi_getFlag", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_getFlag", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 1 {
 			return ctx.NewUndefined(), nil
@@ -250,7 +250,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	// as a no-op (the TUI MessageRenderer signature is Go-only; bridging it
 	// would require the full ctx/ui surface). The registration is recorded so
 	// the extension loads without error.
-	ctx.SetFunc("__pi_registerMessageRenderer", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_registerMessageRenderer", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 1 {
 			return ctx.NewUndefined(), nil
@@ -266,7 +266,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.registerProvider(name, config)
-	ctx.SetFunc("__pi_registerProvider", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_registerProvider", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 2 {
 			return ctx.NewUndefined(), nil
@@ -284,7 +284,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.unregisterProvider(name)
-	ctx.SetFunc("__pi_unregisterProvider", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_unregisterProvider", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 1 {
 			return ctx.NewUndefined(), nil
@@ -299,7 +299,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	// --- Action methods ---
 
 	// pi.sendMessage(msg) — msg is a JS object; marshal and delegate.
-	ctx.SetFunc("__pi_sendMessage", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_sendMessage", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 1 {
 			return ctx.NewUndefined(), nil
@@ -313,7 +313,7 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 	}
 
 	// pi.sendUserMessage(text, images?)
-	ctx.SetFunc("__pi_sendUserMessage", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__pi_sendUserMessage", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		if len(args) < 1 {
 			return ctx.NewUndefined(), nil
@@ -330,13 +330,95 @@ func BuildJSAPI(jrt *JSRuntime, extension *Extension, runtime *ExtensionRuntime,
 		return nil, err
 	}
 
-	// pi.exec(command, args?, options?) — v1: not bridged (returns rejected promise
-	// stub). Pi.exec is Go-backed in the reference too; wiring it requires the
-	// bash executor which lives in the parent package. Deferred to v1.x.
-	ctx.SetFunc("__pi_exec_rejected", func(t *qjs.This) (*qjs.Value, error) {
-		return nil, fmt.Errorf("pi.exec is not yet supported in this build")
+	// pi.exec(command, args?, options?) — the F2 subprocess bridge, ported
+	// from TS core/exec.ts (execCommand — self-contained there too; the old
+	// seam premise was wrong: no bash executor, no core wiring, stdlib only,
+	// see exec.go). This is a plain leak-free SYNC function that BLOCKS on
+	// the subprocess — the ui.input idiom, deliberate: the TUI runs on its
+	// own goroutine and stays responsive, and extension handlers are
+	// sequential by design. Divergence from TS: pi.exec returns the result
+	// VALUE (not a Promise — await-compatible, so `await pi.exec(...)` is
+	// unchanged) and other extension work queues behind a running command
+	// instead of interleaving; TS result semantics preserved (exec.ts never
+	// rejects — even a spawn failure resolves {code:1, empty output}).
+	// Install-shape note (bisected 2026-11-27): this exact shape — ONE
+	// leak-free sync proxy created HERE, in the stub's old slot, copied via
+	// setMethod — is the only proven-safe BuildJSAPI→factory configuration.
+	// The qjs v0.0.6 heap corrupts the NEXT factory compile when anything
+	// else allocates in this window (async proxies, evals, extra installs —
+	// even at bootstrap — under the old leak-per-set baseline that the
+	// setPropertyNoLeak swap fixes repo-wide); a per-extension JS closure
+	// also can't exist here for the same reason, so the load-cwd default
+	// (TS loader.ts:300-303 closes over the same value) is captured by this
+	// Go closure instead.
+	setFuncNoLeak(ctx, "__pi_exec", func(t *qjs.This) (*qjs.Value, error) {
+		args := t.Args()
+		command := ""
+		if len(args) > 0 {
+			command = args[0].String()
+		}
+		// args: TS requires string[] (Node's spawn throws — here the throw is
+		// synchronous at the call, the observable its examples rely on).
+		var argList []string
+		argsOK := false
+		if len(args) > 1 {
+			if list, ok := jsValueToGo(args[1]).([]any); ok {
+				argsOK = true
+				for _, it := range list {
+					argList = append(argList, fmt.Sprint(it))
+				}
+			}
+		}
+		var timeout int64
+		execCwd := ""
+		preAborted := false
+		if len(args) > 2 {
+			if om, ok := jsValueToGo(args[2]).(map[string]any); ok {
+				if tv, ok := om["timeout"].(float64); ok && tv > 0 {
+					timeout = int64(tv)
+				}
+				if cv, ok := om["cwd"].(string); ok {
+					execCwd = cv
+				}
+				// ctx.signal is the story-42 {aborted} snapshot (live abort
+				// arrives with F4); TS exec.ts:66-68 short-circuits an
+				// already-aborted signal before any work.
+				if sig, ok := om["signal"].(map[string]any); ok {
+					if ab, _ := sig["aborted"].(bool); ab {
+						preAborted = true
+					}
+				}
+			}
+		}
+		// TS loader.ts:300-303 — options.cwd overrides the load cwd (empty
+		// means unset here; an empty load cwd inherits the process cwd, as
+		// in TS where the loader default is process.cwd()).
+		if execCwd == "" {
+			execCwd = cwd
+		}
+		// TS exec.ts:66-68 — an already-aborted signal resolves {code:0,
+		// killed:true} with no run (spawn-then-instant-SIGTERM observable).
+		if preAborted {
+			return goToJSValue(ctx, map[string]any{"stdout": "", "stderr": "", "code": 0, "killed": true})
+		}
+		if command == "" {
+			return nil, fmt.Errorf("pi.exec: command must be a non-empty string")
+		}
+		if !argsOK {
+			return nil, fmt.Errorf("pi.exec: args must be an array of strings")
+		}
+		// BLOCKS the JS thread for the command's duration (see the install
+		// comment — the ui.input idiom; the timeout option is how callers
+		// bound it, exactly as in TS's inline-bash example).
+		res := execCommand(command, argList, execCwd, timeout)
+		return goToJSValue(ctx, map[string]any{
+			"stdout": res.Stdout,
+			"stderr": res.Stderr,
+			"code":   res.Code,
+			"killed": res.Killed,
+		})
 	})
-	if err := setMethod(ctx, pi, "exec", "__pi_exec_rejected"); err != nil {
+	if err := setMethod(ctx, pi, "exec", "__pi_exec"); err != nil {
 		return nil, err
 	}
 
@@ -358,7 +440,7 @@ func setMethod(ctx *qjs.Context, obj *qjs.Value, name, globalFn string) error {
 	// CONSUMES it (the F1 ref-accounting fix — freeing here left the value
 	// one ref short for two holders, the latent corruption behind the
 	// story-42-era heap fragility).
-	obj.SetPropertyStr(name, fn)
+	setPropertyNoLeak(obj, name, fn)
 	return nil
 }
 
