@@ -21,7 +21,7 @@ func evalUI(t *testing.T, uiCtx ExtensionUIContext) (*JSRuntime, *qjs.Context) {
 	}
 	ctx := jrt.Context()
 	ui := buildJSUI(ctx, &uiCtx)
-	ctx.Global().SetPropertyStr("ui", ui)
+	setPropertyNoLeak(ctx.Global(), "ui", ui)
 	return jrt, ctx
 }
 
@@ -183,7 +183,7 @@ func TestJSUI_AllMethodsExposed(t *testing.T) {
 	defer jrt.Close()
 
 	for _, method := range []string{"notify", "status", "input", "select", "confirm", "editor"} {
-		has, err := ctx.Eval("t.js", qjs.Code("typeof ui." + method))
+		has, err := ctx.Eval("t.js", qjs.Code("typeof ui."+method))
 		if err != nil {
 			t.Fatalf("Eval typeof ui.%s: %v", method, err)
 		}

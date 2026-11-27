@@ -183,7 +183,7 @@ func (j *JSRuntime) Close() {
 //     so both paths share one registry.
 func (j *JSRuntime) installMinimalShims() error {
 	c := j.ctx
-	c.SetFunc("__js_log", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(c, "__js_log", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		parts := make([]string, 0, len(args))
 		for _, a := range args {
@@ -197,7 +197,7 @@ func (j *JSRuntime) installMinimalShims() error {
 	// __piSubmitAction: the enqueue half of the deferred action bridge. Called
 	// from the __piMakeAction shims during a handler's Eval (j.mu held) — it
 	// must NEVER block or touch qjs beyond reading its args: enqueue + wake.
-	c.SetFunc("__piSubmitAction", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(c, "__piSubmitAction", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		var id int64
 		var name, payload string
@@ -227,7 +227,7 @@ func (j *JSRuntime) installMinimalShims() error {
 	// pinCallable can SetPropertyStr on it directly without Eval.
 	j.holder = c.NewObject()
 	g := c.Global()
-	g.SetPropertyStr("__piHolder", j.holder)
+	setPropertyNoLeak(g, "__piHolder", j.holder)
 
 	_, err := j.ctx.Eval("shims.js", qjs.Code(`(function(){
 		var c = { log: __js_log, info: __js_log, warn: __js_log, error: __js_log, debug: __js_log };
@@ -319,6 +319,9 @@ func (j *JSRuntime) installMinimalShims() error {
 			};
 		};
 	})();`), qjs.TypeGlobal())
+	if err != nil {
+		return err
+	}
 	return err
 }
 
@@ -365,10 +368,10 @@ func (j *JSRuntime) pinCallable(fn *qjs.Value) (int64, error) {
 		id = curInt
 		// Write the incremented counter back.
 		nextVal := j.ctx.NewInt64(curInt + 1)
-		g.SetPropertyStr("__piNextId", nextVal)
+		setPropertyNoLeak(g, "__piNextId", nextVal)
 		nextVal.Free()
 		// Store fn in the holder under its id key.
-		j.holder.SetPropertyStr(fmt.Sprintf("%d", id), fn)
+		setPropertyNoLeak(j.holder, fmt.Sprintf("%d", id), fn)
 		return nil
 	}); err != nil {
 		return 0, fmt.Errorf("pin callable: %w", err)
@@ -450,11 +453,11 @@ func (j *JSRuntime) InvokeFactory(factoryHandle int64, piValue *qjs.Value) error
 	var evalErr error
 	if err := j.safeCall(func() error {
 		g := j.ctx.Global()
-		g.SetPropertyStr("__pi", piValue)
+		setPropertyNoLeak(g, "__pi", piValue)
 		v, evalErr = j.ctx.Eval("firefactory.js",
 			qjs.Code(fmt.Sprintf("__piHolder[%d](__pi)", factoryHandle)),
 			qjs.TypeGlobal())
-		g.SetPropertyStr("__pi", j.ctx.NewUndefined())
+		setPropertyNoLeak(g, "__pi", j.ctx.NewUndefined())
 		return evalErr
 	}); err != nil {
 		return fmt.Errorf("invoke factory: %w", err)
@@ -593,15 +596,15 @@ func (j *JSRuntime) CallHandlerWithJSCtx(handlerHandle int64, eventObj any, ctxV
 	// resolve bare identifiers set via SetPropertyStr as globals in all
 	// eval scopes; globalThis.X always works).
 	g := j.ctx.Global()
-	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	setPropertyNoLeak(g, "__jscall_ctx", ctxValue) // consumes ctxValue's ref
 	eventJSON, err := json.Marshal(eventObj)
 	if err != nil {
-		g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined())
+		setPropertyNoLeak(g, "__jscall_ctx", j.ctx.NewUndefined())
 		return nil, fmt.Errorf("marshal event: %w", err)
 	}
 	argsJSON := fmt.Sprintf(`[%s, globalThis.__jscall_ctx]`, string(eventJSON))
 	out, err := j.fireJSON(handlerHandle, argsJSON)
-	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
+	setPropertyNoLeak(g, "__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
 	return out, err
 }
 
@@ -890,10 +893,10 @@ func (j *JSRuntime) CallToolExecuteWithJSCtx(executeHandle int64, toolCallID str
 		return nil, fmt.Errorf("marshal tool args: %v/%v/%v", errID, errParams, errSignal)
 	}
 	g := j.ctx.Global()
-	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	setPropertyNoLeak(g, "__jscall_ctx", ctxValue) // consumes ctxValue's ref
 	argsJSON := fmt.Sprintf(`[%s, %s, %s, null, globalThis.__jscall_ctx]`, idJSON, paramsJSON, signalJSON)
 	out, err := j.fireJSON(executeHandle, argsJSON)
-	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
+	setPropertyNoLeak(g, "__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
 	return out, err
 }
 
@@ -912,10 +915,10 @@ func (j *JSRuntime) CallCommandHandlerWithJSCtx(handlerHandle int64, args string
 		return errPoisonedRuntime
 	}
 	g := j.ctx.Global()
-	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	setPropertyNoLeak(g, "__jscall_ctx", ctxValue) // consumes ctxValue's ref
 	jsArgs := fmt.Sprintf(`[%s, globalThis.__jscall_ctx]`, mustJSONString(args))
 	_, err := j.fireJSON(handlerHandle, jsArgs)
-	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
+	setPropertyNoLeak(g, "__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
 	return err
 }
 
@@ -946,9 +949,9 @@ func (j *JSRuntime) CallShortcutHandler(handlerHandle int64, ctxValue *qjs.Value
 		return errPoisonedRuntime
 	}
 	g := j.ctx.Global()
-	g.SetPropertyStr("__jscall_ctx", ctxValue) // consumes ctxValue's ref
+	setPropertyNoLeak(g, "__jscall_ctx", ctxValue) // consumes ctxValue's ref
 	_, err := j.fireJSON(handlerHandle, `[globalThis.__jscall_ctx]`)
-	g.SetPropertyStr("__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
+	setPropertyNoLeak(g, "__jscall_ctx", j.ctx.NewUndefined()) // releases the ctx ref the property held
 	return err
 }
 

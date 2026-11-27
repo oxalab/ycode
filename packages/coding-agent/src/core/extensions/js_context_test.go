@@ -35,7 +35,7 @@ func TestScrubRunnerCtx_DropsNonPrimitives(t *testing.T) {
 	// A func and a struct should NOT appear in the output (they don't JSON-marshal).
 	in := map[string]any{
 		"cwd":   "/x",
-		"abort": func() {}, // non-primitive
+		"abort": func() {},           // non-primitive
 		"model": struct{ X int }{42}, // struct — may or may not be JSON-safe; ScrubRunnerCtx surfaces it if so
 	}
 	out := ScrubRunnerCtx(in)
@@ -97,11 +97,11 @@ func TestBuildJSContextRendersSignalAndGetters(t *testing.T) {
 	aborted, cancel := context.WithCancel(context.Background())
 	cancel()
 	runnerCtx := map[string]any{
-		"cwd":       "/proj",
-		"hasUI":     true,
-		"isIdle":    true,
-		"model":     map[string]any{"id": "m1"},
-		"signal":    aborted,
+		"cwd":             "/proj",
+		"hasUI":           true,
+		"isIdle":          true,
+		"model":           map[string]any{"id": "m1"},
+		"signal":          aborted,
 		"getContextUsage": func() any { return map[string]any{"tokens": 100, "percent": 25} },
 		"getSystemPrompt": func() string { return "You are an agent." },
 	}
@@ -186,7 +186,7 @@ func TestBuildJSContextRendersActions(t *testing.T) {
 	jrt.mu.Lock()
 	evalErr := jrt.safeCall(func() error {
 		g := jrt.ctx.Global()
-		g.SetPropertyStr("__piTestCtx", jsCtx)
+		setPropertyNoLeak(g, "__piTestCtx", jsCtx)
 		v, err := jrt.ctx.Eval("abortcall.js", qjs.Code(`globalThis.__piTestCtx.abort(); "ok";`), qjs.TypeGlobal())
 		if v != nil {
 			v.Free()
@@ -219,14 +219,20 @@ func TestBuildJSContextRendersCommandActions(t *testing.T) {
 	t.Cleanup(func() { jrt.Close() })
 
 	runnerCtx := map[string]any{
-		"cwd":           "/proj",
-		"abort":         func() {},
-		"waitForIdle":   func() error { return nil },
-		"newSession":    func(opts map[string]any) (map[string]bool, error) { return map[string]bool{"cancelled": false}, nil },
-		"fork":          func(entryID string, opts map[string]any) (map[string]bool, error) { return map[string]bool{"cancelled": false}, nil },
-		"navigateTree":  func(targetID string, opts map[string]any) (map[string]bool, error) { return map[string]bool{"cancelled": false}, nil },
-		"switchSession": func(sessionPath string, opts map[string]any) (map[string]bool, error) { return map[string]bool{"cancelled": false}, nil },
-		"reload":        func() error { return nil },
+		"cwd":         "/proj",
+		"abort":       func() {},
+		"waitForIdle": func() error { return nil },
+		"newSession":  func(opts map[string]any) (map[string]bool, error) { return map[string]bool{"cancelled": false}, nil },
+		"fork": func(entryID string, opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		},
+		"navigateTree": func(targetID string, opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		},
+		"switchSession": func(sessionPath string, opts map[string]any) (map[string]bool, error) {
+			return map[string]bool{"cancelled": false}, nil
+		},
+		"reload": func() error { return nil },
 	}
 	jsCtx, err := BuildJSContext(jrt, runnerCtx)
 	if err != nil {
@@ -270,7 +276,7 @@ func TestBuildReplacedSessionContext(t *testing.T) {
 	jrt.mu.Lock()
 	evalErr := jrt.safeCall(func() error {
 		g := jrt.ctx.Global()
-		g.SetPropertyStr("__piRC", jsCtx)
+		setPropertyNoLeak(g, "__piRC", jsCtx)
 		v, err := jrt.ctx.Eval("rc.js", qjs.Code(`
 			globalThis.__rcCwd = globalThis.__piRC.cwd;
 			globalThis.__rcIdle = globalThis.__piRC.isIdle;
@@ -282,7 +288,7 @@ func TestBuildReplacedSessionContext(t *testing.T) {
 		if v != nil {
 			v.Free()
 		}
-		g.SetPropertyStr("__piRC", jrt.ctx.NewUndefined())
+		setPropertyNoLeak(g, "__piRC", jrt.ctx.NewUndefined())
 		return err
 	})
 	jrt.mu.Unlock()

@@ -61,16 +61,16 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 	// NOT Free them here (Free releases the underlying handle, leaving the
 	// property dangling).
 	if cwd, ok := runnerCtx["cwd"].(string); ok {
-		obj.SetPropertyStr("cwd", ctx.NewString(cwd))
+		setPropertyNoLeak(obj, "cwd", ctx.NewString(cwd))
 	}
 	if hasUI, ok := runnerCtx["hasUI"].(bool); ok {
-		obj.SetPropertyStr("hasUI", ctx.NewBool(hasUI))
+		setPropertyNoLeak(obj, "hasUI", ctx.NewBool(hasUI))
 	}
 	if isIdle, ok := runnerCtx["isIdle"].(bool); ok {
-		obj.SetPropertyStr("isIdle", ctx.NewBool(isIdle))
+		setPropertyNoLeak(obj, "isIdle", ctx.NewBool(isIdle))
 	}
 	if hasPM, ok := runnerCtx["hasPendingMessages"].(bool); ok {
-		obj.SetPropertyStr("hasPendingMessages", ctx.NewBool(hasPM))
+		setPropertyNoLeak(obj, "hasPendingMessages", ctx.NewBool(hasPM))
 	}
 
 	// signal: TS ctx.signal is the live AbortSignal (types.ts:309-311). A Go
@@ -79,14 +79,14 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 	// polling (documented divergence).
 	if sig, ok := runnerCtx["signal"].(context.Context); ok && sig != nil {
 		sigObj := ctx.NewObject()
-		sigObj.SetPropertyStr("aborted", ctx.NewBool(sig.Err() != nil))
-		obj.SetPropertyStr("signal", sigObj)
+		setPropertyNoLeak(sigObj, "aborted", ctx.NewBool(sig.Err() != nil))
+		setPropertyNoLeak(obj, "signal", sigObj)
 	}
 
 	// model: marshal the model object through JSON.
 	if model, ok := runnerCtx["model"]; ok && model != nil {
 		if mv, err := goToJSValue(ctx, model); err == nil {
-			obj.SetPropertyStr("model", mv)
+			setPropertyNoLeak(obj, "model", mv)
 		}
 	}
 
@@ -94,18 +94,18 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 	if getCU, ok := runnerCtx["getContextUsage"].(func() any); ok {
 		if cu := getCU(); cu != nil {
 			if v, err := goToJSValue(ctx, cu); err == nil {
-				obj.SetPropertyStr("contextUsage", v)
+				setPropertyNoLeak(obj, "contextUsage", v)
 			}
 		}
 	}
 	if getSP, ok := runnerCtx["getSystemPrompt"].(func() string); ok {
-		obj.SetPropertyStr("systemPrompt", ctx.NewString(getSP()))
+		setPropertyNoLeak(obj, "systemPrompt", ctx.NewString(getSP()))
 	}
 
 	// --- ui (the ExtensionUIContext) ---
 	if uiVal, ok := runnerCtx["ui"].(*ExtensionUIContext); ok && uiVal != nil {
 		ui := buildJSUI(ctx, uiVal)
-		obj.SetPropertyStr("ui", ui)
+		setPropertyNoLeak(obj, "ui", ui)
 	}
 
 	// --- State-changing actions (F1): abort/compact/shutdown are
@@ -132,7 +132,7 @@ func BuildJSContext(jrt *JSRuntime, runnerCtx map[string]any) (*qjs.Value, error
 			continue
 		}
 		if shim := jrt.actionShim(name); shim != nil {
-			obj.SetPropertyStr(name, shim) // consumes shim's ref — no Free
+			setPropertyNoLeak(obj, name, shim) // consumes shim's ref — no Free
 		}
 	}
 
@@ -150,7 +150,7 @@ func setFireAndForget(ctx *qjs.Context, obj *qjs.Value, jsName string, fnValue a
 		return
 	}
 	scratch := "__pi_ff_" + jsName
-	ctx.SetFunc(scratch, func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, scratch, func(t *qjs.This) (*qjs.Value, error) {
 		go func() {
 			defer func() { _ = recover() }() // a panicking action must not crash the host
 			fn()
@@ -160,7 +160,7 @@ func setFireAndForget(ctx *qjs.Context, obj *qjs.Value, jsName string, fnValue a
 	fnVal := ctx.Global().GetPropertyStr(scratch)
 	// NO Free: SetPropertyStr consumes the get's reference (the global keeps
 	// its own) — freeing left two holders on one ref.
-	obj.SetPropertyStr(jsName, fnVal)
+	setPropertyNoLeak(obj, jsName, fnVal)
 }
 
 // BuildReplacedSessionContext renders a ReplacedSessionContext for a JS
@@ -210,7 +210,7 @@ func BuildReplacedSessionContext(jrt *JSRuntime, rc *ReplacedSessionContext) (*q
 // argument (coerced with .String()), passes it to fn on a goroutine, and
 // returns undefined immediately.
 func setSingleArgFireAndForget(ctx *qjs.Context, obj *qjs.Value, jsName, scratch string, fn func(arg string)) {
-	ctx.SetFunc(scratch, func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, scratch, func(t *qjs.This) (*qjs.Value, error) {
 		arg := ""
 		if args := t.Args(); len(args) > 0 {
 			arg = args[0].String()
@@ -224,7 +224,7 @@ func setSingleArgFireAndForget(ctx *qjs.Context, obj *qjs.Value, jsName, scratch
 	fnVal := ctx.Global().GetPropertyStr(scratch)
 	// NO Free — SetPropertyStr consumed the get's reference (see
 	// setFireAndForget).
-	obj.SetPropertyStr(jsName, fnVal)
+	setPropertyNoLeak(obj, jsName, fnVal)
 }
 
 // wrapCompactFn adapts the map's compact entry — func(*CompactOptions) error
@@ -257,14 +257,15 @@ func wrapCompactFn(v any) func() {
 // work is starved.
 //
 // JS API (mirrors the reference's ExtensionUIContext, extensions/types.ts):
-//   ui.notify(message, level?)                 → void
-//   ui.status(key, text)                        → void
-//   await ui.input(title, placeholder?, opts?)  → string  ("" on cancel)
-//   await ui.select(title, options, opts?)      → number  (-1 on cancel;
-//                                                         the reference resolves
-//                                                         the option string)
-//   await ui.confirm(title, message, opts?)     → boolean
-//   await ui.editor(title, prefill?)            → string  ("" on cancel)
+//
+//	ui.notify(message, level?)                 → void
+//	ui.status(key, text)                        → void
+//	await ui.input(title, placeholder?, opts?)  → string  ("" on cancel)
+//	await ui.select(title, options, opts?)      → number  (-1 on cancel;
+//	                                                      the reference resolves
+//	                                                      the option string)
+//	await ui.confirm(title, message, opts?)     → boolean
+//	await ui.editor(title, prefill?)            → string  ("" on cancel)
 //
 // opts is { timeout?: number, defaultIdx?: number } (the reference also takes
 // { signal }, which ycode does not support yet). A bare number in the opts
@@ -274,7 +275,7 @@ func wrapCompactFn(v any) func() {
 func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	obj := ctx.NewObject()
 	// ui.notify(message, level)
-	ctx.SetFunc("__ui_notify", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__ui_notify", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		msg := ""
 		level := "info"
@@ -292,10 +293,10 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	notifyFn := ctx.Global().GetPropertyStr("__ui_notify")
 	// NO Free: SetPropertyStr consumes the get's reference (F1 ref-accounting
 	// fix — the old Free left two holders on one ref).
-	obj.SetPropertyStr("notify", notifyFn)
+	setPropertyNoLeak(obj, "notify", notifyFn)
 
 	// ui.status(key, text)
-	ctx.SetFunc("__ui_status", func(t *qjs.This) (*qjs.Value, error) {
+	setFuncNoLeak(ctx, "__ui_status", func(t *qjs.This) (*qjs.Value, error) {
 		args := t.Args()
 		key, msg := "", ""
 		if len(args) > 0 {
@@ -311,10 +312,10 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	})
 	statusFn := ctx.Global().GetPropertyStr("__ui_status")
 	// NO Free — SetPropertyStr consumed the get's reference (see notify).
-	obj.SetPropertyStr("status", statusFn)
+	setPropertyNoLeak(obj, "status", statusFn)
 
 	// ui.input(title, placeholder?, opts?) → Promise<string>
-	ctx.SetAsyncFunc("__ui_input", func(this *qjs.This) {
+	setAsyncFuncNoLeak(ctx, "__ui_input", func(this *qjs.This) {
 		args := this.Args()
 		title, placeholder := "", ""
 		if len(args) > 0 {
@@ -336,11 +337,11 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	})
 	inputFn := ctx.Global().GetPropertyStr("__ui_input")
 	// NO Free — SetPropertyStr consumed the get's reference (see notify).
-	obj.SetPropertyStr("input", inputFn)
+	setPropertyNoLeak(obj, "input", inputFn)
 
 	// ui.select(title, options, opts?) → Promise<number>
 	// Returns the selected index, or -1 if the user cancels.
-	ctx.SetAsyncFunc("__ui_select", func(this *qjs.This) {
+	setAsyncFuncNoLeak(ctx, "__ui_select", func(this *qjs.This) {
 		args := this.Args()
 		if len(args) < 2 || !args[0].IsString() || !args[1].IsArray() {
 			this.Promise().Reject(this.Context().NewError(errors.New("ui.select: expected (title: string, options: string[], opts?)")))
@@ -368,10 +369,10 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	})
 	selectFn := ctx.Global().GetPropertyStr("__ui_select")
 	// NO Free — SetPropertyStr consumed the get's reference (see notify).
-	obj.SetPropertyStr("select", selectFn)
+	setPropertyNoLeak(obj, "select", selectFn)
 
 	// ui.confirm(title, message, opts?) → Promise<boolean>
-	ctx.SetAsyncFunc("__ui_confirm", func(this *qjs.This) {
+	setAsyncFuncNoLeak(ctx, "__ui_confirm", func(this *qjs.This) {
 		args := this.Args()
 		title, message := "", ""
 		if len(args) > 0 {
@@ -393,12 +394,12 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	})
 	confirmFn := ctx.Global().GetPropertyStr("__ui_confirm")
 	// NO Free — SetPropertyStr consumed the get's reference (see notify).
-	obj.SetPropertyStr("confirm", confirmFn)
+	setPropertyNoLeak(obj, "confirm", confirmFn)
 
 	// ui.editor(title, prefill?) → Promise<string>
 	// Multi-line editor (no timeout — interrupting a compose flow mid-edit
 	// would lose the user's input).
-	ctx.SetAsyncFunc("__ui_editor", func(this *qjs.This) {
+	setAsyncFuncNoLeak(ctx, "__ui_editor", func(this *qjs.This) {
 		args := this.Args()
 		title, prefill := "", ""
 		if len(args) > 0 {
@@ -416,7 +417,7 @@ func buildJSUI(ctx *qjs.Context, ui *ExtensionUIContext) *qjs.Value {
 	})
 	editorFn := ctx.Global().GetPropertyStr("__ui_editor")
 	// NO Free — SetPropertyStr consumed the get's reference (see notify).
-	obj.SetPropertyStr("editor", editorFn)
+	setPropertyNoLeak(obj, "editor", editorFn)
 
 	return obj
 }
@@ -493,6 +494,7 @@ func isJSONSafe(v any) bool {
 	buf, err = jsonMarshal(v)
 	return err == nil && len(buf) > 0 && string(buf) != "null"
 }
+
 // Note on the former v1.x deferrals (implemented in F1, 2026-11-25):
 //
 // The runner's ctx map carries state-changing callbacks. abort/compact/

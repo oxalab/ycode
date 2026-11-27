@@ -7,7 +7,10 @@ package extensions
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func jsonUnmarshalText(s string, v any) error {
@@ -422,5 +425,153 @@ func TestJSAPI_CommandVsEventCtxSurface(t *testing.T) {
 	}
 	if m["abort"] != "function" {
 		t.Errorf("event ctx.abort = %v, want function (base action)", m["abort"])
+	}
+}
+
+// --- F2: pi.exec ---
+
+// newExecFixture builds a fixture whose extension factory stashes pi.exec on
+// a global (the factory-consumed pi object can't be reached otherwise — the
+// captured method value stays alive through the closure). cwd is the load
+// default the runtime records via SetExecDefaultCwd (a nonexistent dir makes
+// the default-cwd plumbing observable: a child failing to chdir resolves
+// code 1).
+func newExecFixture(t *testing.T, cwd string) (*JSRuntime, string) {
+	t.Helper()
+	jrt, err := NewJSRuntime()
+	if err != nil {
+		t.Fatalf("NewJSRuntime: %v", err)
+	}
+	t.Cleanup(func() { jrt.Close() })
+	ext := NewExtension("/test/ext.ts", "/test/ext.ts", nil)
+	rt := CreateExtensionRuntime()
+	jsAPI, err := BuildJSAPI(jrt, ext, rt, cwd, nil)
+	if err != nil {
+		t.Fatalf("BuildJSAPI: %v", err)
+	}
+	factoryJS := []byte(`module.exports = function (pi) {
+		globalThis.__piExec = pi.exec;
+	};`)
+	js, err := TranspileExtension("/test/exec.js", factoryJS, 1)
+	if err != nil {
+		t.Fatalf("transpile: %v", err)
+	}
+	fh, err := jrt.EvalModule("/test/exec.js", js)
+	if err != nil {
+		t.Fatalf("EvalModule: %v", err)
+	}
+	if err := jrt.InvokeFactory(fh, jsAPI.PIValue()); err != nil {
+		t.Fatalf("InvokeFactory: %v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	return jrt, exe
+}
+
+// execCallJS builds one synchronous pi.exec call: exe + the -test.run arg +
+// passthrough args (everything after "--" reaches TestExecHelperProcess via
+// os.Args) + an opts JSON literal. YCODE_EXEC_MODE must be set in the parent
+// env (the child inherits it). The result crosses as JSON text; the trailing
+// "setup" keeps the eval's completion value a string (a promise completion
+// value would make QJS_Eval js_std_await it — moot now that pi.exec is
+// sync, kept as cheap insurance for future reshapes).
+func execCallJS(exe, opts string, passthrough ...string) string {
+	args, _ := json.Marshal(append([]string{"-test.run=^TestExecHelperProcess$", "--"}, passthrough...))
+	return `globalThis.__execRes = JSON.stringify(globalThis.__piExec(` + mustJSONString(exe) + `, ` + string(args) + `, ` + opts + `));
+		"setup";`
+}
+
+func readExecResult(t *testing.T, jrt *JSRuntime) string {
+	t.Helper()
+	return evalString(t, jrt, `String(globalThis.__execRes)`)
+}
+
+// The bootstrap installed the proxy (setFuncNoLeak → __pi_exec) and the build
+// copied it onto pi.
+func TestJSAPI_ExecIsFunction(t *testing.T) {
+	jrt, _ := newExecFixture(t, "/test/cwd")
+	if got := evalString(t, jrt, `typeof globalThis.__piExec`); got != "function" {
+		t.Fatalf("pi.exec typeof = %q, want function", got)
+	}
+}
+
+func TestJSAPI_ExecResolvesShape(t *testing.T) {
+	jrt, exe := newExecFixture(t, t.TempDir()) // an existing default cwd
+	t.Setenv("YCODE_EXEC_MODE", "echo")
+	evalJS(t, jrt, "exec.js", execCallJS(exe, "{}", "a1", "a2"))
+	_ = readExecResult(t, jrt)
+	keys := evalString(t, jrt, `JSON.stringify(Object.keys(JSON.parse(globalThis.__execRes)).sort())`)
+	if keys != `["code","killed","stderr","stdout"]` {
+		t.Errorf("result keys = %s, want exactly the TS ExecResult shape", keys)
+	}
+	if out := evalString(t, jrt, `JSON.parse(globalThis.__execRes).stdout`); out != "hello-exec a1 a2" {
+		t.Errorf("stdout = %q, want 'hello-exec a1 a2' (args pass through)", out)
+	}
+	if code := evalString(t, jrt, `JSON.parse(globalThis.__execRes).code`); code != "0" {
+		t.Errorf("code = %s, want 0", code)
+	}
+	if killed := evalString(t, jrt, `String(JSON.parse(globalThis.__execRes).killed)`); killed != "false" {
+		t.Errorf("killed = %s, want false", killed)
+	}
+}
+
+// TS exec.ts:99-105 — a spawn failure resolves {code:1, empty}; it never
+// rejects and the error text must not leak into stderr.
+func TestJSAPI_ExecSpawnFailureResolves(t *testing.T) {
+	jrt, _ := newExecFixture(t, "/test/cwd")
+	evalJS(t, jrt, "execfail.js", `globalThis.__execRes = JSON.stringify(globalThis.__piExec("ycode-no-such-binary-f2", [], {}));
+		"setup";`)
+	_ = readExecResult(t, jrt)
+	if code := evalString(t, jrt, `JSON.parse(globalThis.__execRes).code`); code != "1" {
+		t.Errorf("code = %s, want 1 (TS resolves the catch path)", code)
+	}
+	if out := evalString(t, jrt, `JSON.parse(globalThis.__execRes).stdout + JSON.parse(globalThis.__execRes).stderr`); out != "" {
+		t.Errorf("stdout+stderr = %q, want empty", out)
+	}
+}
+
+func TestJSAPI_ExecTimeoutKills(t *testing.T) {
+	jrt, exe := newExecFixture(t, t.TempDir())
+	t.Setenv("YCODE_EXEC_MODE", "slow")
+	start := time.Now()
+	evalJS(t, jrt, "timeout.js", execCallJS(exe, `{timeout: 150}`))
+	_ = readExecResult(t, jrt)
+	if killed := evalString(t, jrt, `String(JSON.parse(globalThis.__execRes).killed)`); killed != "true" {
+		t.Errorf("killed = %s, want true (the sole timeout indicator)", killed)
+	}
+	if elapsed := time.Since(start); elapsed > 15*time.Second {
+		t.Errorf("timeout kill took %v — the process was not killed", elapsed)
+	}
+}
+
+// An already-aborted signal short-circuits (TS exec.ts:66-68): {code:0,
+// killed:true} with no run — the slow child would hang the synchronous call
+// until its 30s exit if the check regressed and the spawn went ahead.
+func TestJSAPI_ExecPreAbortedSignal(t *testing.T) {
+	jrt, exe := newExecFixture(t, t.TempDir())
+	t.Setenv("YCODE_EXEC_MODE", "slow")
+	evalJS(t, jrt, "preabort.js", execCallJS(exe, `{signal: {aborted: true}}`))
+	_ = readExecResult(t, jrt)
+	if code := evalString(t, jrt, `JSON.parse(globalThis.__execRes).code`); code != "0" {
+		t.Errorf("code = %s, want 0", code)
+	}
+	if killed := evalString(t, jrt, `String(JSON.parse(globalThis.__execRes).killed)`); killed != "true" {
+		t.Errorf("killed = %s, want true", killed)
+	}
+}
+
+// The runtime default cwd (SetExecDefaultCwd ← the load cwd, TS
+// loader.ts:300-303) reaches the child: the fixture's default is a
+// nonexistent dir, so the child fails to start and the result is code 1. If
+// the default were dropped, the child would run and yield code 0.
+func TestJSAPI_ExecDefaultCwdPlumbed(t *testing.T) {
+	jrt, exe := newExecFixture(t, filepath.Join(t.TempDir(), "missing-dir"))
+	t.Setenv("YCODE_EXEC_MODE", "echo")
+	evalJS(t, jrt, "defaultcwd.js", execCallJS(exe, `{}`))
+	_ = readExecResult(t, jrt)
+	if code := evalString(t, jrt, `JSON.parse(globalThis.__execRes).code`); code != "1" {
+		t.Errorf("code = %s, want 1 (the loader cwd default reached the child)", code)
 	}
 }
